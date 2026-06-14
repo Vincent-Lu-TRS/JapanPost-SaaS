@@ -174,7 +174,7 @@ def handle_oauth_callback() -> bool:
 
     # CSRF 驗證（HMAC 自我驗證，不依賴 session_state）
     if not _verify_state(state or ""):
-        st.error("⚠️ 安全驗證失敗（state invalid），請重新登入。")
+        st.session_state._auth_error = "⚠️ 安全驗證失敗（state invalid），請重新登入。"
         st.query_params.clear()
         return True
 
@@ -182,7 +182,7 @@ def handle_oauth_callback() -> bool:
         token_data = exchange_code_for_token(code)
         access_token = token_data.get("access_token")
         if not access_token:
-            st.error(f"❌ 無法取得 access token: {token_data}")
+            st.session_state._auth_error = f"❌ 無法取得 access token: {token_data}"
             st.query_params.clear()
             return True
 
@@ -190,8 +190,8 @@ def handle_oauth_callback() -> bool:
         email = user_info.get("email", "")
 
         if not is_authorized(email):
-            st.error(
-                f"🚫 帳號 **{email}** 不在授權名單中。\n\n"
+            st.session_state._auth_error = (
+                f"🚫 帳號 {email} 不在授權名單中。"
                 f"請使用 @{ALLOWED_DOMAIN} 的公司帳號登入，或聯絡系統管理員。"
             )
             st.query_params.clear()
@@ -202,10 +202,11 @@ def handle_oauth_callback() -> bool:
         st.session_state.user_email = email
         st.session_state.user_name = user_info.get("name", email)
         st.session_state.user_picture = user_info.get("picture", "")
+        st.session_state._auth_error = None
         st.query_params.clear()
 
     except Exception as e:
-        st.error(f"❌ 認證過程發生錯誤：{e}")
+        st.session_state._auth_error = f"❌ 認證過程發生錯誤：{e}"
         st.query_params.clear()
 
     return True
