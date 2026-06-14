@@ -3,8 +3,10 @@ Google OAuth 2.0 認證模組
 限制：僅允許 @tkrjm.co.jp 網域或白名單人員登入
 """
 import os
+import hmac
 import hashlib
 import secrets
+import time
 import requests
 import streamlit as st
 from urllib.parse import urlencode
@@ -63,12 +65,43 @@ def is_authorized(email: str) -> bool:
     return False
 
 
+def _generate_state() -> str:
+    """
+    產生自我驗證的 HMAC state token（無需伺服器端儲存）。
+    格式：{timestamp}.{hmac_hex}
+    """
+    timestamp = str(int(time.time()))
+    secret = (_get_client_secret() or "fallback-secret").encode()
+    sig = hmac.new(secret, timestamp.encode(), hashlib.sha256).hexdigest()
+    return f"{timestamp}.{sig}"
+
+
+def _verify_state(state: str) -> bool:
+    """
+    驗證 HMAC state token。
+    允許 10 分鐘內的 state（防止 CSRF，同時不依賴 session 儲存）。
+    """
+    if not state or "." not in state:
+        return False
+    try:
+        timestamp_str, sig = state.rsplit(".", 1)
+        ts = int(timestamp_str)
+        # 時間視窗：10 分鐘
+        if abs(int(time.time()) - ts) > 600:
+            return False
+        secret = (_get_client_secret() or "fallback-secret").encode()
+        expected = hmac.new(secret, timestamp_str.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+
 def get_login_url() -> tuple[str, str]:
     """
     產生 Google OAuth 授權 URL 及 state 防 CSRF 值。
     回傳 (auth_url, state)
     """
-    state = secrets.token_urlsafe(32)
+    state = _generate_state()
     params = {
         "client_id": _get_client_id(),
         "redirect_uri": _get_redirect_uri(),
@@ -139,9 +172,9 @@ def handle_oauth_callback() -> bool:
     if not code:
         return False
 
-    # CSRF 驗證
-    if state != st.session_state.get("oauth_state"):
-        st.error("⚠️ 安全驗證失敗（state mismatch），請重新登入。")
+    # CSRF 驗證（HMAC 自我驗證，不依賴 session_state）
+    if not _verify_state(state or ""):
+        st.error("⚠️ 安全驗證失敗（state invalid），請重新登入。")
         st.query_params.clear()
         return True
 
