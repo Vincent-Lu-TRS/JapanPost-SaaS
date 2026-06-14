@@ -103,7 +103,7 @@ def _render_login_page():
         st.session_state.oauth_state = state
 
         st.markdown(
-            f'<a href="{auth_url}" target="_self" style="'
+            f'<a href="{auth_url}" target="_top" style="'
             'display:inline-block;background:#fff;border:1px solid #dadce0;'
             'border-radius:4px;padding:10px 20px;font-size:1rem;font-weight:500;'
             'color:#3c4043;text-decoration:none;'
