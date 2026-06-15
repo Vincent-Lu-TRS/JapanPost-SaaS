@@ -19,7 +19,7 @@ from auth import (
 # ── Playwright 環境初始化（僅在第一次啟動時執行）────────
 @st.cache_resource(show_spinner="正在墉裝 Playwright Chromium 環境...")
 def _install_playwright():
-    """圤雲端環境首次啟動時安裝 Playwright 瀏覽器"""
+    """在雲端環境首次啟動時安裝 Playwright 瀏覽器"""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
@@ -32,23 +32,22 @@ def _install_playwright():
         return False
 
 
-# ── 全域任務追蹤器（使用 cache_resource 確保跨 rerun 保持狀態）──────
-# 注意：模組頂層的普通 dict 會在每次 Streamlit rerun 時被重置為 {}
-# 必須用 @st.cache_resource 才能讓資料跨 rerun 存活
-@st.cache_resource
-def _get_jobs_store() -> dict:
-    """取得全域 jobs 儲存（跨 rerun、跨 session 共享）"""
-    return {}
+# ── 全域任務追蹤器 ──────────────────────────────────────
+# 使用 globals() 條件初始化，確保跨 Streamlit rerun 保持狀態。
+# 原因：Streamlit 每次 rerun 都重新執行整個 script（exec(code, module.__dict__)），
+# 但 module.__dict__ 在同一 session 中是持久的。
+# 用 if '_JOBS' not in globals() 可避免每次 rerun 重置。
+if "_JOBS" not in globals():
+    _JOBS: dict = {}
 
 
 def _get_job(email: str) -> dict | None:
-    return _get_jobs_store().get(email)
+    return _JOBS.get(email)
 
 
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
     """在背景執行緒啟動自動化任務"""
-    jobs = _get_jobs_store()
-    if email in jobs and jobs[email].get("status") == "running":
+    if email in _JOBS and _JOBS[email].get("status") == "running":
         return False
 
     job: dict = {
@@ -57,32 +56,48 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
         "results": [],
         "started_at": time.strftime("%H:%M:%S"),
     }
-    jobs[email] = job
+    _JOBS[email] = job
 
     def _run():
+        import traceback as tb
+
         def _log(msg: str):
-            job["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+            ts = time.strftime("%H:%M:%S")
+            entry = f"[{ts}] {msg}"
+            # 同步寫到 stderr，確保 Streamlit Cloud logs 永遠可見
+            print(f"[BOT] {entry}", file=sys.stderr, flush=True)
+            try:
+                job["logs"].append(entry)
+            except Exception as log_err:
+                print(f"[LOG_ERR] {log_err}", file=sys.stderr, flush=True)
 
         try:
-            _log("🚀 任務啟動，正圤匯入自動化模組...")
+            _log("🚀 任務啟動，正在載入模組...")
             from bot.automation import run_automation
             from bot.sheets import backfill_results
 
-            _log("✅ 模組載入成功，開始執行 Playwright 自動化...")
+            _log("✅ 模組載入成功，開始 Playwright 自動化...")
             results = run_automation(df, max_rows=max_rows, log_cb=_log, headless=True)
             job["results"] = results
             if results:
-                _log(f"📋 正圤回填 {len(results)} 筆至 Google Sheets...")
+                _log(f"📋 正在回填 {len(results)} 筆至 Google Sheets...")
                 backfill_results(results, log_cb=_log)
                 _log(f"✅ 完成！共處理 {len(results)} 筆訂單。")
             else:
-                _log("ℹ️ 自動化完成，無新增結果（訂單可能已處理或發生異常）。")
+                _log("ℹ️ 自動化完成，無新增結果（可能已全部處理或無符合條件訂單）。")
             job["status"] = "completed"
-        except Exception as e:
-            import traceback
-            _log(f"❌ 系統例外：{e}")
-            _log(traceback.format_exc())
-            job["status"] = "error"
+        except BaseException as e:  # 捕捉所有例外，含 SystemExit
+            err_text = tb.format_exc()
+            print(f"[BOT_ERROR] {err_text}", file=sys.stderr, flush=True)
+            try:
+                _log(f"❌ 例外：{type(e).__name__}: {e}")
+                _log(f"詳細：{err_text}")
+            except Exception:
+                pass
+            try:
+                job["status"] = "error"
+            except Exception:
+                pass
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -90,7 +105,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
 
 
 # ══════════════════════════════════════════════════════
-# 頁面渲染函數（必須在呼叫前定義）
+# 頁面渲染函數
 # ══════════════════════════════════════════════════════
 
 def _render_login_page():
@@ -107,16 +122,14 @@ def _render_login_page():
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown("## 📮 JP Post 自動製單平台")
-        st.markdown("*+企業專屬 SaaS・免安裝・雲端全自動**")
+        st.markdown("**企業專屬 SaaS・免墉裝・雲端全自動**")
         st.divider()
         st.markdown("請使用公司 Google 帳號登入（@tkrjm.co.jp）")
 
-        # 顯示並清除上次的認證錯誤
         _auth_error = st.session_state.pop("_auth_error", None)
         if _auth_error:
             st.error(_auth_error)
 
-        # 產生 OAuth URL 並儲存 state
         auth_url, state = get_login_url()
         st.session_state.oauth_state = state
 
@@ -127,9 +140,9 @@ def _render_login_page():
                 use_container_width=False,
             )
         else:
-            st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加 GOOGLE_CLIENT_ID。")
+            st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")
             st.code(f"auth_url 前 100 字：{auth_url[:100]}", language=None)
-        st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人員")
+        st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人��")
 
 
 def _render_main_app():
@@ -177,7 +190,6 @@ def _render_main_app():
     with col_left:
         st.subheader("📋 操作面板")
 
-        # 統計卡片
         m1, m2 = st.columns(2)
         with m1:
             st.metric("⏳ 待製單", pending_count)
@@ -187,7 +199,6 @@ def _render_main_app():
 
         st.divider()
 
-        # 執行設定
         st.markdown("**執行設定**")
         max_rows_input = st.number_input(
             "最多處理筆數（0 = 全部）",
@@ -199,9 +210,8 @@ def _render_main_app():
         )
         max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
 
-        # 啟動 / 刷新按鈕
         if is_running:
-            st.info("🔄 自動化進行中...")
+            st.info("🔄 自動化進行$��...")
             if st.button("🔄 重新整理", use_container_width=True):
                 st.rerun()
         else:
@@ -223,21 +233,18 @@ def _render_main_app():
                     else:
                         st.error("任務執行中，請稍候")
 
-        # 上次任務狀態
         if job and job.get("status") in ("completed", "error"):
             st.divider()
             icon = "✅" if job["status"] == "completed" else "❌"
             st.markdown(f"**{icon} 上次：{job['status']}**")
             st.caption(f"啟動於 {job.get('started_at', '')}")
-            if job["results"]:
+            if job.get("results"):
                 st.caption(f"完成 {len(job['results'])} 筆")
 
     with col_right:
-        # 日誌面板
         st.subheader("📄 執行日誌")
         log_lines = job["logs"] if job else []
         log_text = "\n".join(log_lines) if log_lines else "（尚無日誌）"
-        # 注意：空字串 label 在新版 Streamlit 會報錯，必須給非空 label 並用 label_visibility 隱藏
         st.text_area(
             "執行日誌內容",
             value=log_text,
@@ -247,20 +254,17 @@ def _render_main_app():
             label_visibility="hidden",
         )
 
-        # 任務進行中 → 每 2 秒自動刷新
         if is_running:
             time.sleep(2)
             st.rerun()
 
-        # 本次結果表格
         if job and job.get("results"):
             st.divider()
             st.subheader("✅ 本次製單結果")
             df_res = pd.DataFrame(job["results"])
             df_res.columns = ["收件人", "注文番号", "貨運單號", "國家（原始）", "日期"]
-            st.dataframe(df_res, use_container_width=True, hide_index=True)
+            st.dataframe(df_res, hide_index=True)
 
-        # 待打單預覽（可折疊）
         if not df_pending.empty:
             with st.expander(f"📊 待打單預覽（共 {pending_count} 筆，顯示前 10）"):
                 preview_cols = [
@@ -275,12 +279,11 @@ def _render_main_app():
                 if preview_cols:
                     st.dataframe(
                         df_pending[preview_cols].head(10),
-                        use_container_width=True,
                         hide_index=True,
                     )
 
 
-# ══════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════
 # 主程式入口
 # ══════════════════════════════════════════════════════
 
@@ -291,13 +294,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# 背景安裝 Playwright（雲端環境需要）
 _install_playwright()
-
-# 初始化 Auth session state
 init_auth_state()
 
-# 處理 OAuth callback（Google 回調帶 ?code=...）
 if handle_oauth_callback():
     st.rerun()
 elif st.session_state.get("authenticated"):
