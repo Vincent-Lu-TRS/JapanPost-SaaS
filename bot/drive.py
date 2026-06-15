@@ -55,12 +55,12 @@ def upload_pdf(pdf_bytes: bytes, filename: str, folder_id: str = DRIVE_FOLDER_ID
                 body=file_metadata,
                 media_body=media,
                 fields="id, name",
-                supportsAllDrives=True,
+                supportsAllDrives=True,  # 關鍵：支援共用雲端硬碟
             )
             .execute()
         )
         file_id = file.get("id")
-        _log(f"☁️ PDF 上傳成功：{len(pdf_bytes)} Bytes}（ID: {file_id}）")
+        _log(f"☁️ PDF 上傳成功：{filename}（ID: {file_id}）")
         return file_id
     except Exception as e:
         _log(f"❌ Google Drive 上傳失敗: {e}")
