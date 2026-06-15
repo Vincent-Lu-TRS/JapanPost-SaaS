@@ -70,7 +70,7 @@ def is_authorized(email: str) -> bool:
     if not email:
         return False
     email_lower = email.lower().strip()
-  2 if email_lower.endswith(f"@{ALLOWED_DOMAIN}"):
+    if email_lower.endswith(f"@{ALLOWED_DOMAIN}"):
         return True
     if email_lower in [w.lower() for w in ALLOWED_WHITELIST]:
         return True
@@ -212,4 +212,20 @@ def handle_oauth_callback() -> bool:
         # 認證成功
         st.session_state.authenticated = True
         st.session_state.user_email = email
-        st.session_state.user_name 
+        st.session_state.user_name = user_info.get("name", email)
+        st.session_state.user_picture = user_info.get("picture", "")
+        st.session_state._auth_error = None
+        st.query_params.clear()
+
+    except Exception as e:
+        st.session_state._auth_error = f"❌ 認證過程發生錯誤：{e}"
+        st.query_params.clear()
+
+    return True
+
+
+def logout():
+    """清除 session 狀態，執行登出"""
+    for key in ["authenticated", "user_email", "user_name", "user_picture", "oauth_state"]:
+        st.session_state[key] = None
+    st.session_state.authenticated = False
