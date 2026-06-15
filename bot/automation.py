@@ -426,7 +426,7 @@ def run_automation(
                         dismiss_dialogs()
 
                         # 檢查數量上限警告
-                     try:
+                        try:
                             limit_text = page.evaluate("""() => {
                                 const ds = document.querySelectorAll('.ui-dialog[style*="display: block"]');
                                 for (const d of ds) {
@@ -471,7 +471,7 @@ def run_automation(
                     pkg = _clean(row.get("內容物1", ""))
                     if pkg:
                         cost = _clean(row.get("申告金額1", "0"))
-                        raw_num = row.get("數量7", 1)
+                        raw_num = row.get("數量1", 1)
                         try:
                             num = str(int(float(raw_num))) if raw_num != "" else "1"
                         except Exception:
@@ -637,4 +637,3 @@ def run_automation(
 
     _log(f"\n🏁 自動化完成。成功：{len(results)}/{len(rows)} 筆")
     return results
-ts
