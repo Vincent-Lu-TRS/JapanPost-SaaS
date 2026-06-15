@@ -7,6 +7,7 @@ import sys
 import time
 import threading
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 
 from auth import (
@@ -107,13 +108,30 @@ def _render_login_page():
         auth_url, state = get_login_url()
         st.session_state.oauth_state = state
 
-        st.markdown(
-            f'<a href="{auth_url}" target="_top" style="'
-            'display:inline-block;background:#fff;border:1px solid #dadce0;'
-            'border-radius:4px;padding:10px 20px;font-size:1rem;font-weight:500;'
-            'color:#3c4043;text-decoration:none;'
-            '">🔑 使用 Google 帳號登入</a>',
-            unsafe_allow_html=True,
+        # 用 components.html 在子 iframe 中執行 JS 導航，
+        # 繞過 Streamlit React 攔截點擊事件的問題
+        components.html(
+            f"""
+            <style>
+              body {{ margin: 0; padding: 0; }}
+              button {{
+                background: #fff;
+                border: 1px solid #dadce0;
+                border-radius: 4px;
+                padding: 10px 24px;
+                font-size: 1rem;
+                font-weight: 500;
+                color: #3c4043;
+                cursor: pointer;
+                font-family: sans-serif;
+              }}
+              button:hover {{ background: #f8f9fa; border-color: #c6cacd; }}
+            </style>
+            <button onclick="window.top.location.href = '{auth_url}'">
+              🔑 使用 Google 帳號登入
+            </button>
+            """,
+            height=60,
         )
         st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人員")
 
