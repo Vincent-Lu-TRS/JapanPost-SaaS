@@ -17,9 +17,9 @@ from auth import (
 )
 
 # ── Playwright 環境初始化（僅在第一次啟動時執行）────────
-@st.cache_resource(show_spinner="正在安裝 Playwright Chromium 環境...")
+@st.cache_resource(show_spinner="正在墉裝 Playwright Chromium 環境...")
 def _install_playwright():
-    """在雲端環境首次啟動時安裝 Playwright 瀏覽器"""
+    """圤雲端環境首次啟動時安裝 Playwright 瀏覽器"""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
@@ -32,17 +32,23 @@ def _install_playwright():
         return False
 
 
-# ── 全域任務追蹤器（跨 Streamlit rerun 保持狀態）──────
-_JOBS: dict[str, dict] = {}
+# ── 全域任務追蹤器（使用 cache_resource 確保跨 rerun 保持狀態）──────
+# 注意：模組頂層的普通 dict 會在每次 Streamlit rerun 時被重置為 {}
+# 必須用 @st.cache_resource 才能讓資料跨 rerun 存活
+@st.cache_resource
+def _get_jobs_store() -> dict:
+    """取得全域 jobs 儲存（跨 rerun、跨 session 共享）"""
+    return {}
 
 
 def _get_job(email: str) -> dict | None:
-    return _JOBS.get(email)
+    return _get_jobs_store().get(email)
 
 
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
     """在背景執行緒啟動自動化任務"""
-    if email in _JOBS and _JOBS[email].get("status") == "running":
+    jobs = _get_jobs_store()
+    if email in jobs and jobs[email].get("status") == "running":
         return False
 
     job: dict = {
@@ -51,24 +57,31 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
         "results": [],
         "started_at": time.strftime("%H:%M:%S"),
     }
-    _JOBS[email] = job
+    jobs[email] = job
 
     def _run():
-        from bot.automation import run_automation
-        from bot.sheets import backfill_results
-
         def _log(msg: str):
             job["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
         try:
+            _log("🚀 任務啟動，正圤匯入自動化模組...")
+            from bot.automation import run_automation
+            from bot.sheets import backfill_results
+
+            _log("✅ 模組載入成功，開始執行 Playwright 自動化...")
             results = run_automation(df, max_rows=max_rows, log_cb=_log, headless=True)
             job["results"] = results
             if results:
-                _log(f"📋 正在回填 {len(results)} 筆至 Google Sheets...")
+                _log(f"📋 正圤回填 {len(results)} 筆至 Google Sheets...")
                 backfill_results(results, log_cb=_log)
+                _log(f"✅ 完成！共處理 {len(results)} 筆訂單。")
+            else:
+                _log("ℹ️ 自動化完成，無新增結果（訂單可能已處理或發生異常）。")
             job["status"] = "completed"
         except Exception as e:
-            job["logs"].append(f"[{time.strftime('%H:%M:%S')}] ❌ 系統例外：{e}")
+            import traceback
+            _log(f"❌ 系統例外：{e}")
+            _log(traceback.format_exc())
             job["status"] = "error"
 
     t = threading.Thread(target=_run, daemon=True)
@@ -94,7 +107,7 @@ def _render_login_page():
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown("## 📮 JP Post 自動製單平台")
-        st.markdown("**企業專屬 SaaS・免安裝・雲端全自動**")
+        st.markdown("*+企業專屬 SaaS・免安裝・雲端全自動**")
         st.divider()
         st.markdown("請使用公司 Google 帳號登入（@tkrjm.co.jp）")
 
@@ -107,8 +120,6 @@ def _render_login_page():
         auth_url, state = get_login_url()
         st.session_state.oauth_state = state
 
-        # 使用 Streamlit 原生 link_button，由 Streamlit 內部處理導航
-        # 避免 React 事件攔截和 iframe sandbox 限制
         if "client_id=" in auth_url and "client_id=&" not in auth_url:
             st.link_button(
                 "🔑 使用 Google 帳號登入",
@@ -226,9 +237,17 @@ def _render_main_app():
         st.subheader("📄 執行日誌")
         log_lines = job["logs"] if job else []
         log_text = "\n".join(log_lines) if log_lines else "（尚無日誌）"
-        st.text_area("", value=log_text, height=380, disabled=True, key="log_area")
+        # 注意：空字串 label 在新版 Streamlit 會報錯，必須給非空 label 並用 label_visibility 隱藏
+        st.text_area(
+            "執行日誌內容",
+            value=log_text,
+            height=380,
+            disabled=True,
+            key="log_area",
+            label_visibility="hidden",
+        )
 
-        # 任務進行$�� → 每 2 秒自動刷新
+        # 任務進行中 → 每 2 秒自動刷新
         if is_running:
             time.sleep(2)
             st.rerun()
