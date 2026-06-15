@@ -214,4 +214,6 @@ def handle_oauth_callback() -> bool:
 
 def logout():
     """清除 session 狀態，執行登出"""
-    for key in ["authenticated", "user_email", "us
+    for key in ["authenticated", "user_email", "user_name", "user_picture", "oauth_state"]:
+        st.session_state[key] = None
+    st.session_state.authenticated = False
