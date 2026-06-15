@@ -17,7 +17,7 @@ from auth import (
 )
 
 # ── Playwright 環境初始化（僅在第一次啟動時執行）────────
-@st.cache_resource(show_spinner="正在墉裝 Playwright Chromium 環境...")
+@st.cache_resource(show_spinner="正在安裝 Playwright Chromium 環境...")
 def _install_playwright():
     """在雲端環境首次啟動時安裝 Playwright 瀏覽器"""
     try:
@@ -122,7 +122,7 @@ def _render_login_page():
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown("## 📮 JP Post 自動製單平台")
-        st.markdown("**企業專屬 SaaS・免墉裝・雲端全自動**")
+        st.markdown("**企業專屬 SaaS・免安裝・雲端全自動**")
         st.divider()
         st.markdown("請使用公司 Google 帳號登入（@tkrjm.co.jp）")
 
@@ -142,7 +142,7 @@ def _render_login_page():
         else:
             st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")
             st.code(f"auth_url 前 100 字：{auth_url[:100]}", language=None)
-        st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人��")
+        st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人員")
 
 
 def _render_main_app():
@@ -211,7 +211,7 @@ def _render_main_app():
         max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
 
         if is_running:
-            st.info("🔄 自動化進行$��...")
+            st.info("🔄 自動化進行中...")
             if st.button("🔄 重新整理", use_container_width=True):
                 st.rerun()
         else:
@@ -283,7 +283,7 @@ def _render_main_app():
                     )
 
 
-# ═════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 # 主程式入口
 # ══════════════════════════════════════════════════════
 
