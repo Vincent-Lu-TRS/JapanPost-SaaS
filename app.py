@@ -7,7 +7,6 @@ import sys
 import time
 import threading
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 
 from auth import (
@@ -108,31 +107,17 @@ def _render_login_page():
         auth_url, state = get_login_url()
         st.session_state.oauth_state = state
 
-        # 用 components.html 在子 iframe 中執行 JS 導航，
-        # 繞過 Streamlit React 攔截點擊事件的問題
-        components.html(
-            f"""
-            <style>
-              body {{ margin: 0; padding: 0; }}
-              button {{
-                background: #fff;
-                border: 1px solid #dadce0;
-                border-radius: 4px;
-                padding: 10px 24px;
-                font-size: 1rem;
-                font-weight: 500;
-                color: #3c4043;
-                cursor: pointer;
-                font-family: sans-serif;
-              }}
-              button:hover {{ background: #f8f9fa; border-color: #c6cacd; }}
-            </style>
-            <button onclick="window.top.location.href = '{auth_url}'">
-              🔑 使用 Google 帳號登入
-            </button>
-            """,
-            height=60,
-        )
+        # 使用 Streamlit 原生 link_button，由 Streamlit 內部處理導航
+        # 避免 React 事件攔截和 iframe sandbox 限制
+        if "client_id=" in auth_url and "client_id=&" not in auth_url:
+            st.link_button(
+                "🔑 使用 Google 帳號登入",
+                auth_url,
+                use_container_width=False,
+            )
+        else:
+            st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加 GOOGLE_CLIENT_ID。")
+            st.code(f"auth_url 前 100 字：{auth_url[:100]}", language=None)
         st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人員")
 
 
