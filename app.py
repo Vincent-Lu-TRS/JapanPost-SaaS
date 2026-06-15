@@ -24,15 +24,22 @@ from auth import (
 def _install_playwright():
     """在雲端環境首次啟動時安裝 Playwright 瀏覽器"""
     try:
+        _env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/tmp/ms-playwright"}
         result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
+            [sys.executable, "-m", "playwright", "install", "chromium"],
             capture_output=True,
             text=True,
             timeout=300,
-            env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/tmp/ms-playwright"},
+            env=_env,
         )
+        print(f"[PLAYWRIGHT_INSTALL] returncode={result.returncode}", file=sys.stderr)
+        if result.stdout:
+            print(f"[PLAYWRIGHT_INSTALL stdout] {result.stdout[:500]}", file=sys.stderr)
+        if result.stderr:
+            print(f"[PLAYWRIGHT_INSTALL stderr] {result.stderr[:500]}", file=sys.stderr)
         return result.returncode == 0
-    except Exception:
+    except Exception as e:
+        print(f"[PLAYWRIGHT_INSTALL ERROR] {e}", file=sys.stderr)
         return False
 
 
