@@ -45,12 +45,24 @@ def _get_client_secret() -> str:
 def _get_redirect_uri() -> str:
     """
     取得 OAuth 回呼 URI。
-    優先使用 secrets 中的設定（生產環境），否則用 localhost（開發環境）。
+    優先順序：
+    1. Streamlit secrets 中的 OAUTH_REDIRECT_URI（明確設定）
+    2. 從 Streamlit context 自動偵測（Streamlit Cloud 生產環境）
+    3. 環境變數 OAUTH_REDIRECT_URI
+    4. 預設 localhost（本地開發）
     """
     try:
         return st.secrets["OAUTH_REDIRECT_URI"]
     except Exception:
-        return os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8501/")
+        pass
+    # 自動偵測：從請求 headers 取得 host（適用於 Streamlit Cloud）
+    try:
+        host = st.context.headers.get("host", "")
+        if host and "localhost" not in host and "127.0.0.1" not in host:
+            return f"https://{host}/"
+    except Exception:
+        pass
+    return os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8501/")
 
 
 def is_authorized(email: str) -> bool:
