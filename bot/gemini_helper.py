@@ -7,7 +7,8 @@ import re
 import logging
 import streamlit as st
 
-_HS_CODE_CACHE = {}
+# 執行期 HS Code 快取（同一品名不重複呼叫 API）
+_HS_CODE_CACHE: dict[str, str] = {}
 
 
 def _get_gemini_key() -> str:
@@ -18,6 +19,10 @@ def _get_gemini_key() -> str:
 
 
 def predict_hs_code(item_name: str, log_cb=None) -> str:
+    """
+    使用 Gemini API 預測 6 碼 HS Code。
+    - log_cb: 可選的進度回呼函數 (str -> None)
+    """
     def _log(msg):
         if log_cb:
             log_cb(msg)
@@ -29,11 +34,12 @@ def predict_hs_code(item_name: str, log_cb=None) -> str:
         return ""
 
     if item_clean in _HS_CODE_CACHE:
+        _log(f"📦 HS Code 快取命中: {item_clean} → {_HS_CODE_CACHE[item_clean]}")
         return _HS_CODE_CACHE[item_clean]
 
     api_key = _get_gemini_key()
     if not api_key:
-        _log("⚠️ GEMINI_API_KEY not set, skipping HS Code")
+        _log("⚠️ 未設定 GEMINI_API_KEY，跳過 HS Code 預測")
         return ""
 
     try:
@@ -43,20 +49,29 @@ def predict_hs_code(item_name: str, log_cb=None) -> str:
             f"Predict a 6-digit HS Code for the shipping item: '{item_clean}'. "
             "Return ONLY the 6-digit number, nothing else."
         )
+        _log(f"🤖 Gemini 預測 HS Code: {item_clean}")
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
         )
         text = response.text or ""
+
+        # 優先抓取標準 6 碼
         match = re.search(r'\b\d{6}\b', text)
         if match:
             code = match.group(0)
         else:
+            # 備案：移除非數字後取前 6 碼
             digits = re.sub(r'\D', '', text)
             code = digits[:6] if len(digits) >= 6 else ""
+
         if code:
+            _log(f"✅ HS Code 預測成功: {item_clean} → {code}")
             _HS_CODE_CACHE[item_clean] = code
-        return code
+            return code
+        else:
+            _log(f"⚠️ 無法從 Gemini 回應解析 HS Code: {text!r}")
     except Exception as e:
-        _log(f"❌ Gemini API error: {e}")
+        _log(f"❌ Gemini API 錯誤: {e}")
+
     return ""
