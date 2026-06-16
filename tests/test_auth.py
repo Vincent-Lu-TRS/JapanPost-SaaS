@@ -49,7 +49,9 @@ class AuthSessionTests(unittest.TestCase):
         markup = auth.render_login_link(url)
 
         self.assertIn('href="https://accounts.google.com/o/oauth2/v2/auth?client_id=abc"', markup)
-        self.assertNotIn("target=", markup)
+        self.assertIn('target="_self"', markup)
+        self.assertIn("window.top.location.href=this.href", markup)
+        self.assertIn("return false", markup)
         self.assertNotIn("window.open", markup)
 
 
