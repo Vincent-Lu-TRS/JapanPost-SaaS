@@ -273,6 +273,78 @@ def run_automation(
                 pass
             return False
 
+        def _login_via_requests():
+            """
+            用 requests HTTP POST 直接登入，繞過 Playwright 導航至登入頁（會 crash）
+            回傳：(playwright_cookies, post_login_url, success_bool)
+            """
+            import requests as _req
+            import re as _re
+
+            base = "https://www.int-mypage.post.japanpost.jp"
+            s = _req.Session()
+            s.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            })
+
+            # Step 1: GET 登入頁，取 CSRF token 與 session cookie
+            _log("🌐 requests 登入：取得登入頁面...")
+            r1 = s.get(f"{base}/mypage/M010000.do?request_locale=en", timeout=30)
+            _log(f"  → {r1.status_code}, {len(r1.content)} bytes")
+
+            csrf = ""
+            m = _re.search(r'name="csrfToken"[^>]+value="([^"]+)"', r1.text)
+            if not m:
+                m = _re.search(r'value="([^"]+)"[^>]*name="csrfToken"', r1.text)
+            if m:
+                csrf = m.group(1)
+                _log(f"  → CSRF: {csrf[:10]}...")
+            else:
+                _log("  ⚠️ 找不到 CSRF token")
+
+            # Step 2: POST 登入表單
+            _log("🌐 requests 登入：提交表單...")
+            r2 = s.post(
+                f"{base}/mypage/M010000.do",
+                data={
+                    "command": "login",
+                    "csrfToken": csrf,
+                    "loginBean.id": user,
+                    "loginBean.pw": pwd,
+                    "request_locale": "en",
+                    "localeSel": "en",
+                },
+                timeout=30,
+                allow_redirects=True,
+            )
+            _log(f"  → {r2.status_code}, final URL: {r2.url}")
+
+            success = (
+                "M010001.do" in r2.url
+                or "/mypage/M06" in r2.url
+                or "Log out" in r2.text
+                or "Create New Labels" in r2.text
+            )
+            _log(f"  → {'✅ 登入成功' if success else '⚠️ 登入狀態不明'}")
+
+            # 轉換為 Playwright cookie 格式
+            pw_cookies = []
+            for c in s.cookies:
+                domain = c.domain
+                if domain and not domain.startswith("."):
+                    domain = "." + domain
+                pw_cookies.append({
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": domain or ".int-mypage.post.japanpost.jp",
+                    "path": c.path or "/",
+                })
+            _log(f"  → {len(pw_cookies)} 個 cookies 提取完成")
+            return pw_cookies, r2.url, success
+
         def attempt_login():
             _log(f"🔐 執行登入，帳號: {user[:3]}***")
             login_url = (
@@ -325,18 +397,30 @@ def run_automation(
                 except Exception:
                     pass
 
-        # ── 執行登入 ─────────────────────────────────
-        login_url = (
-            "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
-            "?request_locale=en"
-        )
-        # ?request_locale=en 強制英文介面
-        # wait_until="load"：等 load 事件；resource blocking 使其快速完成（只需等 4 個 JS 檔）
-        page.goto(login_url, wait_until="load", timeout=60000)
-        if not check_logged_in():
-            attempt_login()
+        # ── 執行登入：優先用 requests 繞過 Playwright 登入頁 crash ──────
+        _login_ok = False
+        try:
+            pw_cookies, post_url, req_ok = _login_via_requests()
+            if pw_cookies:
+                context.add_cookies(pw_cookies)
+                _log("✅ Cookies 已注入 Playwright context")
+            if req_ok:
+                # 直接導航至登入後頁面，跳過會 crash 的 M010000.do
+                dest = post_url if "int-mypage.post.japanpost.jp/mypage" in post_url                        else "https://www.int-mypage.post.japanpost.jp/mypage/M010001.do"
+                page.goto(dest, wait_until="commit", timeout=30000)
+                page.wait_for_timeout(2000)
+                _login_ok = check_logged_in()
+                if _login_ok:
+                    _log("✅ requests 登入成功，已進入操作介面")
+        except Exception as _re_err:
+            _log(f"⚠️ requests 登入例外：{_re_err}")
 
-        if check_logged_in():
+        if not _login_ok:
+            _log("🔄 改用 Playwright 瀏覽器登入...")
+            attempt_login()
+            _login_ok = check_logged_in()
+
+        if _login_ok:
             _log("✅ 登入成功")
         else:
             _log("⚠️ 登入狀態未確認，嘗試繼續...")
