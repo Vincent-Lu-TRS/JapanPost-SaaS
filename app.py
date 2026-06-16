@@ -299,4 +299,23 @@ def _render_main_app():
         if not df_pending.empty:
             with st.expander(f"📊 待打單預覽（共 {pending_count} 筆，顯示前 10）"):
                 preview_cols = [c for c in [
-                    "注文番号(貼
+                    "注文番号(貼上原始資料)", "Shipping Name", "收件人國家",
+                    "郵局運送方式(複數商品請自行確認是否走小包)", "郵局申告金額(USD)",
+                ] if c in df_pending.columns]
+                if preview_cols:
+                    st.dataframe(df_pending[preview_cols].head(10), hide_index=True)
+
+
+# ══════════════════════════════════════════════════════
+# 主程式入口
+# ══════════════════════════════════════════════════════
+
+_install_playwright()
+init_auth_state(_cm)
+
+if handle_oauth_callback(_cm):
+    st.rerun()
+elif st.session_state.get("authenticated"):
+    _render_main_app()
+else:
+    _render_login_page()
