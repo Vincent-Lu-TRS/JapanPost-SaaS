@@ -104,6 +104,11 @@ def run_automation(
         )
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
+        # 阻擋圖片/字型/媒體：防止 Streamlit Cloud 容器 OOM kill Chromium
+        page.route(
+            "**/*.{png,jpg,jpeg,gif,svg,ico,webp,woff,woff2,ttf,eot,mp4,mp3}",
+            lambda route: route.abort(),
+        )
 
         # ── 診斷：驗證瀏覽器基礎導航能力 ────────────────
         try:
@@ -258,7 +263,7 @@ def run_automation(
                 "?request_locale=en"
             )
             page.goto(login_url, wait_until="commit", timeout=60000)
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
+            page.wait_for_timeout(5000)  # 固定等待，避免 domcontentloaded 觸發 OOM
             page.wait_for_timeout(1500)
 
             # 填帳號密碼
@@ -307,10 +312,11 @@ def run_automation(
             "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
             "?request_locale=en"
         )
-        # wait_until="commit"：只等到 HTTP 回應頭收到即繼續，最快速的選項
-        # 避免在頁面內容載入時因記憶體壓力導致 TargetClosedError
+        # wait_until="commit"：只等到 HTTP 回應頭收到即繼續
+        # 不呼叫 wait_for_load_state("domcontentloaded")：等待 DOM 事件會觸發大量 JS 執行，
+        # 在 Streamlit Cloud 記憶體有限環境下導致 Chromium OOM crash → TargetClosedError
         page.goto(login_url, wait_until="commit", timeout=60000)
-        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_timeout(5000)  # 固定等待取代 domcontentloaded
         if not check_logged_in():
             attempt_login()
 
