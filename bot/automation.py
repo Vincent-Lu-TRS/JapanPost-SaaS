@@ -306,21 +306,30 @@ def run_automation(
                 _log("  ⚠️ 找不到 CSRF token")
 
             # Step 2: POST 登入表單
+            # submitCommand('login') 的實際行為：把 command 欄位名改為 method:login
+            # 所以 POST body 要用 method:login=（空值），而非 command=login
             _log("🌐 requests 登入：提交表單...")
             r2 = s.post(
                 f"{base}/mypage/M010000.do",
                 data={
-                    "command": "login",
+                    "method:login": "",
                     "csrfToken": csrf,
                     "loginBean.id": user,
                     "loginBean.pw": pwd,
                     "request_locale": "en",
                     "localeSel": "en",
                 },
+                headers={
+                    "Referer": f"{base}/mypage/M010000.do?request_locale=en",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
                 timeout=30,
                 allow_redirects=True,
             )
             _log(f"  → {r2.status_code}, final URL: {r2.url}")
+            # 回應 body 前 300 字（debug 用）
+            _body_snip = r2.text[:300].replace('\n', ' ').replace('\r', '')
+            _log(f"  → body[:300]: {_body_snip}")
 
             success = (
                 "M010001.do" in r2.url
@@ -416,9 +425,9 @@ def run_automation(
             _log(f"⚠️ requests 登入例外：{_re_err}")
 
         if not _login_ok:
-            _log("🔄 改用 Playwright 瀏覽器登入...")
-            attempt_login()
-            _login_ok = check_logged_in()
+            _log("❌ requests 登入失敗，且 Playwright 直接登入在雲端環境會 crash（TargetClosedError）")
+            _log("❌ 請確認帳號密碼是否正確，或聯絡管理員")
+            raise RuntimeError("登入失敗：requests 登入未成功，已停用 Playwright 瀏覽器登入以避免 crash")
 
         if _login_ok:
             _log("✅ 登入成功")
