@@ -91,15 +91,19 @@ def run_automation(
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",         # 避免 /dev/shm 不足
-                "--single-process",                # 減少進程數，降低 OOM/renderer 崩潰風險
+                "--disable-dev-shm-usage",
+                # "--single-process" 已移除：Playwright 明確不建議，會造成 renderer crash
                 "--disable-gpu",
                 "--disable-software-rasterizer",
                 "--disable-extensions",
                 "--disable-background-networking",
                 "--disable-default-apps",
                 "--mute-audio",
-                "--disable-features=site-per-process",  # 進一步避免多渲染進程
+                "--disable-features=site-per-process",
+                "--blink-settings=imagesEnabled=false",
+                "--disable-background-timer-throttling",
+                "--disable-hang-monitor",
+                "--disable-ipc-flooding-protection",
             ],
         )
         context = browser.new_context(accept_downloads=True)
@@ -107,12 +111,15 @@ def run_automation(
         # 以 resource_type 攔截非必要資源（比副檔名更全面），大幅降低 Chromium 記憶體
         # stylesheet/image/font/media 全擋，保留 document/script/xhr/fetch（登入表單需要）
         def _abort_heavy(route):
-            if route.request.resource_type in (
-                "image", "stylesheet", "font", "media", "ping", "eventsource", "other"
-            ):
-                route.abort()
-            else:
-                route.continue_()
+            try:
+                if route.request.resource_type in (
+                    "image", "stylesheet", "font", "media", "ping", "eventsource", "other"
+                ):
+                    route.abort()
+                else:
+                    route.continue_()
+            except Exception:
+                pass  # route 可能已被解析
         page.route("**/*", _abort_heavy)
 
         # ── 診斷：驗證瀏覽器基礎導航能力 ────────────────
@@ -267,40 +274,41 @@ def run_automation(
                 "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
                 "?request_locale=en"
             )
-            # ?request_locale=en 直接強制英文介面
-            page.goto(login_url, wait_until="commit", timeout=60000)
-            page.wait_for_timeout(4000)
+            # ?request_locale=en 強制英文介面
+            page.goto(login_url, wait_until="load", timeout=60000)
 
             # 填帳號密碼
-            user_loc = page.locator(
-                'input[id*="mailAddress"], input[id*="loginBean.id"], '
-                'input[name="loginBean.id"], input[type="text"]'
-            )
-            pass_loc = page.locator('input[type="password"]')
+            # 精確 ID（DOM 檢查確認）
+            user_loc = page.locator('#M010000_loginBean_id, input[name="loginBean.id"]')
+            pass_loc = page.locator('#M010000_loginBean_pw, input[name="loginBean.pw"]')
             if user_loc.count() > 0:
                 user_loc.first.fill(user)
+            else:
+                _log("⚠️ 找不到帳號欄位")
             if pass_loc.count() > 0:
                 pass_loc.first.fill(pwd)
+            else:
+                _log("⚠️ 找不到密碼欄位")
 
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(500)
 
-            # 點擊登入按鈕
-            login_selectors = [
-                'img[alt="Log in"]',
-                'input[type="image"][alt*="Log in"]',
-                'a:has-text("Log in")',
-                'button:has-text("Log in")',
-                '#M010000_login',
-            ]
+            # 登入鈕結構：<a href="javascript:submitCommand('login')"><img alt="Log in"></a>
+            # 必須點錨點（而非 img）才能觸發 javascript: href
             clicked = False
-            for sel in login_selectors:
+            for sel in [
+                'a:has(img[alt="Log in"])',    # DOM 確認的結構
+                'a[href*="submitCommand"]',     # 備用
+                'img[alt="Log in"]',            # 備用（事件冒泡）
+            ]:
                 loc = page.locator(sel)
-                if loc.count() > 0 and loc.first.is_visible():
+                if loc.count() > 0:
                     loc.first.click()
                     clicked = True
+                    _log(f"✅ 點擊登入按鈕 ({sel})")
                     break
             if not clicked:
-                page.keyboard.press("Enter")
+                _log("⚠️ 未找到登入按鈕，嘗試 JS submitCommand")
+                page.evaluate("submitCommand('login')")
 
             page.wait_for_timeout(3000)
 
@@ -317,10 +325,9 @@ def run_automation(
             "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
             "?request_locale=en"
         )
-        # ?request_locale=en 直接強制英文介面，不需再手動切換 Language
-        # wait_until="commit"：只等 HTTP 回應頭（避免 domcontentloaded 觸發 OOM）
-        page.goto(login_url, wait_until="commit", timeout=60000)
-        page.wait_for_timeout(4000)
+        # ?request_locale=en 強制英文介面
+        # wait_until="load"：等 load 事件；resource blocking 使其快速完成（只需等 4 個 JS 檔）
+        page.goto(login_url, wait_until="load", timeout=60000)
         if not check_logged_in():
             attempt_login()
 
