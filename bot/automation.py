@@ -92,7 +92,7 @@ def run_automation(
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                # "--single-process" 已移除：Playwright 明確不建議，會造成 renderer crash
+                "--no-zygote",          # 容器環境必加：停用 zygote fork，避免 seccomp 限制殺掉進程
                 "--disable-gpu",
                 "--disable-software-rasterizer",
                 "--disable-extensions",
@@ -106,7 +106,7 @@ def run_automation(
                 "--disable-ipc-flooding-protection",
             ],
         )
-        context = browser.new_context(accept_downloads=True)
+        context = browser.new_context(accept_downloads=True, ignore_https_errors=True)
         page = context.new_page()
         # 以 resource_type 攔截非必要資源（比副檔名更全面），大幅降低 Chromium 記憶體
         # stylesheet/image/font/media 全擋，保留 document/script/xhr/fetch（登入表單需要）
@@ -130,6 +130,11 @@ def run_automation(
         except Exception as _diag_e:
             _log(f"❌ 瀏覽器基礎導航失敗（可能缺少系統函式庫）: {_diag_e}")
             raise
+        try:
+            page.goto("https://example.com", wait_until="commit", timeout=15000)
+            _log("✅ 外部網路連線測試通過")
+        except Exception as _diag_e:
+            _log(f"⚠️ 外部網路連線測試失敗（略過）: {_diag_e}")
 
         # ── 工具：重試包裝 ──────────────────────────
         def retry(fn, attempts=3, delay=1, name="action"):
