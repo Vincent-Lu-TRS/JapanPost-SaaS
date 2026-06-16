@@ -27,6 +27,7 @@ from auth import (
     init_auth_state,
     handle_oauth_callback,
     get_login_url,
+    render_login_link,
     logout,
     get_cookie_manager,
 )
@@ -163,11 +164,9 @@ def _render_login_page():
         st.session_state.oauth_state = state
 
         if "client_id=" in auth_url and "client_id=&" not in auth_url:
-            st.link_button(
-                "🔑 使用 Google 帳號登入",
-                auth_url,
-                type="primary",
-                use_container_width=False,
+            st.markdown(
+                render_login_link(auth_url),
+                unsafe_allow_html=True,
             )
         else:
             st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")

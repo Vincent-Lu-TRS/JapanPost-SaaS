@@ -10,6 +10,7 @@ import hashlib
 import secrets
 import time
 import base64
+from html import escape
 import requests
 import streamlit as st
 from urllib.parse import urlencode
@@ -207,6 +208,16 @@ def get_login_url() -> tuple[str, str]:
     }
     url = GOOGLE_AUTH_URL + "?" + urlencode(params)
     return url, state
+
+
+def render_login_link(auth_url: str) -> str:
+    """Render a same-tab Google OAuth link for Streamlit markdown."""
+    safe_url = escape(auth_url, quote=True)
+    return (
+        '<a class="google-login-btn" href="'
+        f'{safe_url}'
+        '">🔑 使用 Google 帳號登入</a>'
+    )
 
 
 def exchange_code_for_token(code: str) -> dict:
