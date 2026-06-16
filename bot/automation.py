@@ -91,15 +91,15 @@ def run_automation(
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
+                "--disable-dev-shm-usage",         # 避免 /dev/shm 不足
                 "--single-process",                # 減少進程數，降低 OOM/renderer 崩潰風險
                 "--disable-gpu",
-                "--disable-features=site-per-process",  # 進一步避免多渲染進程
                 "--disable-software-rasterizer",
                 "--disable-extensions",
                 "--disable-background-networking",
                 "--disable-default-apps",
                 "--mute-audio",
+                "--disable-features=site-per-process",  # 進一步避免多渲染進程
             ],
         )
         context = browser.new_context(accept_downloads=True)
@@ -308,7 +308,7 @@ def run_automation(
             "?request_locale=en"
         )
         # wait_until="commit"：只等到 HTTP 回應頭收到即繼續，最快速的選項
-        # 避免在雲端環境中渲染器崩潰前就拋出 TargetClosedError
+        # 避免在頁面內容載入時因記憶體壓力導致 TargetClosedError
         page.goto(login_url, wait_until="commit", timeout=60000)
         page.wait_for_load_state("domcontentloaded", timeout=30000)
         if not check_logged_in():
@@ -629,39 +629,4 @@ def run_automation(
                 try:
                     final_btn = page.locator(
                         "input[value='Print Completed'], input[value='Completed']"
-                    )
-                    if final_btn.is_visible(timeout=3000):
-                        final_btn.click()
-                        page.wait_for_timeout(1500)
-                except Exception:
-                    pass
-
-                # 記錄成功結果
-                if tracking not in ("ERROR", "N/A", ""):
-                    results.append({
-                        "name": _get_excel_val(row, ["Shipping Name", "Shipping Name_1"]),
-                        "order_id": order_id,
-                        "tracking": tracking,
-                        "country_raw": country_raw,
-                        "date": str(date.today()),
-                    })
-                    _log(f"✅ 訂單 {order_id} 完成！單號：{tracking}")
-                else:
-                    _log(f"❌ 訂單 {order_id} 未能取得有效單號")
-
-            except Exception as e:
-                _log(f"❌ 訂單 {order_id} 發生例外：{e}")
-                # 嘗試導航回首頁繼續下一筆
-                try:
-                    page.goto(
-                        "https://www.int-mypage.post.japanpost.jp/mypage/M010001.do",
-                        timeout=10000,
-                    )
-                    page.wait_for_timeout(1500)
-                except Exception:
-                    pass
-
-        browser.close()
-
-    _log(f"\n🏁 自動化完成。成功：{len(results)}/{len(rows)} 筆")
-    return results
+        
