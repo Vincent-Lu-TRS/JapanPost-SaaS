@@ -264,26 +264,12 @@ def run_automation(
         def attempt_login():
             _log(f"🔐 執行登入，帳號: {user[:3]}***")
             login_url = (
-                "https://int-mypage.post.japanpost.jp/mypage/M010000.do"
+                "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
                 "?request_locale=en"
             )
+            # ?request_locale=en 直接強制英文介面
             page.goto(login_url, wait_until="commit", timeout=60000)
             page.wait_for_timeout(4000)
-
-            # 語系確認：如非英文則切換
-            try:
-                lang_sel = page.locator('select[name="localeSel"]')
-                if lang_sel.count() > 0:
-                    current = lang_sel.first.input_value()
-                    if current != "en":
-                        lang_sel.first.select_option("en")
-                        move_btn = page.locator('input[type="submit"][value="Move"], button:has-text("Move"), input[value="Move"]')
-                        if move_btn.count() > 0:
-                            move_btn.first.click()
-                            page.wait_for_timeout(3000)
-                        _log("🌐 已切換為英文語系")
-            except Exception as _le:
-                _log(f"⚠️ 語系切換略過：{_le}")
 
             # 填帳號密碼
             user_loc = page.locator(
@@ -328,26 +314,13 @@ def run_automation(
 
         # ── 執行登入 ─────────────────────────────────
         login_url = (
-            "https://int-mypage.post.japanpost.jp/mypage/M010000.do"
+            "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
             "?request_locale=en"
         )
+        # ?request_locale=en 直接強制英文介面，不需再手動切換 Language
         # wait_until="commit"：只等 HTTP 回應頭（避免 domcontentloaded 觸發 OOM）
         page.goto(login_url, wait_until="commit", timeout=60000)
         page.wait_for_timeout(4000)
-
-        # 語系確認：如非英文則切換
-        try:
-            lang_sel = page.locator('select[name="localeSel"]')
-            if lang_sel.count() > 0:
-                if lang_sel.first.input_value() != "en":
-                    lang_sel.first.select_option("en")
-                    move_btn = page.locator('input[type="submit"][value="Move"], input[value="Move"]')
-                    if move_btn.count() > 0:
-                        move_btn.first.click()
-                        page.wait_for_timeout(3000)
-                    _log("🌐 已切換為英文語系")
-        except Exception as _le:
-            _log(f"⚠️ 語系切換略過：{_le}")
         if not check_logged_in():
             attempt_login()
 
@@ -630,7 +603,7 @@ def run_automation(
                 except Exception:
                     _log("⚠️ 未偵測到自動跳轉，強制導航至完成頁")
                     page.goto(
-                        "https://int-mypage.post.japanpost.jp/mypage/M061100.do"
+                        "https://www.int-mypage.post.japanpost.jp/mypage/M061100.do"
                     )
                     page.wait_for_timeout(2000)
 
