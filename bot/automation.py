@@ -104,11 +104,16 @@ def run_automation(
         )
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
-        # 阻擋圖片/字型/媒體：防止 Streamlit Cloud 容器 OOM kill Chromium
-        page.route(
-            "**/*.{png,jpg,jpeg,gif,svg,ico,webp,woff,woff2,ttf,eot,mp4,mp3}",
-            lambda route: route.abort(),
-        )
+        # 以 resource_type 攔截非必要資源（比副檔名更全面），大幅降低 Chromium 記憶體
+        # stylesheet/image/font/media 全擋，保留 document/script/xhr/fetch（登入表單需要）
+        def _abort_heavy(route):
+            if route.request.resource_type in (
+                "image", "stylesheet", "font", "media", "ping", "eventsource", "other"
+            ):
+                route.abort()
+            else:
+                route.continue_()
+        page.route("**/*", _abort_heavy)
 
         # ── 診斷：驗證瀏覽器基礎導航能力 ────────────────
         try:
@@ -259,12 +264,26 @@ def run_automation(
         def attempt_login():
             _log(f"🔐 執行登入，帳號: {user[:3]}***")
             login_url = (
-                "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
+                "https://int-mypage.post.japanpost.jp/mypage/M010000.do"
                 "?request_locale=en"
             )
             page.goto(login_url, wait_until="commit", timeout=60000)
-            page.wait_for_timeout(5000)  # 固定等待，避免 domcontentloaded 觸發 OOM
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(4000)
+
+            # 語系確認：如非英文則切換
+            try:
+                lang_sel = page.locator('select[name="localeSel"]')
+                if lang_sel.count() > 0:
+                    current = lang_sel.first.input_value()
+                    if current != "en":
+                        lang_sel.first.select_option("en")
+                        move_btn = page.locator('input[type="submit"][value="Move"], button:has-text("Move"), input[value="Move"]')
+                        if move_btn.count() > 0:
+                            move_btn.first.click()
+                            page.wait_for_timeout(3000)
+                        _log("🌐 已切換為英文語系")
+            except Exception as _le:
+                _log(f"⚠️ 語系切換略過：{_le}")
 
             # 填帳號密碼
             user_loc = page.locator(
@@ -309,14 +328,26 @@ def run_automation(
 
         # ── 執行登入 ─────────────────────────────────
         login_url = (
-            "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
+            "https://int-mypage.post.japanpost.jp/mypage/M010000.do"
             "?request_locale=en"
         )
-        # wait_until="commit"：只等到 HTTP 回應頭收到即繼續
-        # 不呼叫 wait_for_load_state("domcontentloaded")：等待 DOM 事件會觸發大量 JS 執行，
-        # 在 Streamlit Cloud 記憶體有限環境下導致 Chromium OOM crash → TargetClosedError
+        # wait_until="commit"：只等 HTTP 回應頭（避免 domcontentloaded 觸發 OOM）
         page.goto(login_url, wait_until="commit", timeout=60000)
-        page.wait_for_timeout(5000)  # 固定等待取代 domcontentloaded
+        page.wait_for_timeout(4000)
+
+        # 語系確認：如非英文則切換
+        try:
+            lang_sel = page.locator('select[name="localeSel"]')
+            if lang_sel.count() > 0:
+                if lang_sel.first.input_value() != "en":
+                    lang_sel.first.select_option("en")
+                    move_btn = page.locator('input[type="submit"][value="Move"], input[value="Move"]')
+                    if move_btn.count() > 0:
+                        move_btn.first.click()
+                        page.wait_for_timeout(3000)
+                    _log("🌐 已切換為英文語系")
+        except Exception as _le:
+            _log(f"⚠️ 語系切換略過：{_le}")
         if not check_logged_in():
             attempt_login()
 
@@ -599,7 +630,7 @@ def run_automation(
                 except Exception:
                     _log("⚠️ 未偵測到自動跳轉，強制導航至完成頁")
                     page.goto(
-                        "https://www.int-mypage.post.japanpost.jp/mypage/M061100.do"
+                        "https://int-mypage.post.japanpost.jp/mypage/M061100.do"
                     )
                     page.wait_for_timeout(2000)
 
