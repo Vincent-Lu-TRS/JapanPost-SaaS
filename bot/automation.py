@@ -629,4 +629,29 @@ def run_automation(
                 try:
                     final_btn = page.locator(
                         "input[value='Print Completed'], input[value='Completed']"
-        
+                    )
+                    if final_btn.count() > 0:
+                        final_btn.first.click(timeout=5000)
+                        page.wait_for_timeout(800)
+                        _log("✅ 已點擊 Completed，返回首頁")
+                    else:
+                        _log("⚠️ 未找到 Completed 按鈕，略過")
+                except Exception as e:
+                    _log(f"⚠️ Step 9 點擊 Completed 失敗（略過）：{e}")
+
+                # ── 收集結果 ────────────────────────────
+                results.append({
+                    "name": _get_excel_val(row, ["Shipping Name", "Shipping Name_1"]),
+                    "order_id": order_id,
+                    "tracking": tracking,
+                    "country": _get_excel_val(row, ["收件人國家", "Country"]),
+                    "date": time.strftime("%Y-%m-%d"),
+                })
+                _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
+
+            except Exception as e:
+                import traceback as _tb
+                _log(f"❌ 訂單 {order_id} 例外：{type(e).__name__}: {e}")
+                _log(f"詳細：{_tb.format_exc()}")
+
+    return results
