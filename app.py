@@ -163,11 +163,31 @@ def _render_login_page():
         st.session_state.oauth_state = state
 
         if "client_id=" in auth_url and "client_id=&" not in auth_url:
-            # target="_top" 讓整個瀏覽器視窗導航（Streamlit 跑在 iframe 內，_self 只導航 iframe 會被 Google 以 403 拒絕）
-            st.markdown(
-                f'<a href="{auth_url}" target="_top" class="google-login-btn">'
-                f'🔑 使用 Google 帳號登入</a>',
-                unsafe_allow_html=True,
+            # 用 components.html 渲染獨立 iframe 內的按鈕，透過 window.top.location.href
+            # 直接導航整個瀏覽器視窗。<a target="_top"> 在 Streamlit Cloud 的 sandbox
+            # 設定下會被靜默攔截（無反應）；components.html 按鈕 + JS 可繞過此限制。
+            import json as _json
+            import streamlit.components.v1 as _components
+            _url_js = _json.dumps(auth_url)
+            _components.html(
+                f"""
+                <style>
+                body{{margin:0;padding:0;background:transparent;}}
+                .gbtn{{
+                    display:inline-block;padding:0.55rem 1.4rem;
+                    background:#4285F4;color:#fff;
+                    border:none;border-radius:6px;
+                    font-size:1rem;font-weight:500;
+                    cursor:pointer;font-family:sans-serif;
+                }}
+                .gbtn:hover{{background:#357ae8;}}
+                </style>
+                <button class="gbtn"
+                    onclick="window.top.location.href={_url_js}">
+                    &#128273; 使用 Google 帳號登入
+                </button>
+                """,
+                height=55,
             )
         else:
             st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")
@@ -279,23 +299,4 @@ def _render_main_app():
         if not df_pending.empty:
             with st.expander(f"📊 待打單預覽（共 {pending_count} 筆，顯示前 10）"):
                 preview_cols = [c for c in [
-                    "注文番号(貼上原始資料)", "Shipping Name", "收件人國家",
-                    "郵局運送方式(複數商品請自行確認是否走小包)", "郵局申告金額(USD)",
-                ] if c in df_pending.columns]
-                if preview_cols:
-                    st.dataframe(df_pending[preview_cols].head(10), hide_index=True)
-
-
-# ══════════════════════════════════════════════════════
-# 主程式入口
-# ══════════════════════════════════════════════════════
-
-_install_playwright()
-init_auth_state(_cm)
-
-if handle_oauth_callback(_cm):
-    st.rerun()
-elif st.session_state.get("authenticated"):
-    _render_main_app()
-else:
-    _render_login_page()
+                    "注文番号(貼
