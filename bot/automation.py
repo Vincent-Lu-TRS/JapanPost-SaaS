@@ -92,8 +92,9 @@ def run_automation(
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--no-zygote",
+                "--single-process",                # 減少進程數，降低 OOM/renderer 崩潰風險
                 "--disable-gpu",
+                "--disable-features=site-per-process",  # 進一步避免多渲染進程
                 "--disable-software-rasterizer",
                 "--disable-extensions",
                 "--disable-background-networking",
@@ -103,6 +104,15 @@ def run_automation(
         )
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
+
+        # ── 診斷：驗證瀏覽器基礎導航能力 ────────────────
+        try:
+            _log(f"🔍 Chromium 版本: {browser.version}")
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+            _log("✅ 瀏覽器基礎導航測試通過")
+        except Exception as _diag_e:
+            _log(f"❌ 瀏覽器基礎導航失敗（可能缺少系統函式庫）: {_diag_e}")
+            raise
 
         # ── 工具：重試包裝 ──────────────────────────
         def retry(fn, attempts=3, delay=1, name="action"):
@@ -247,7 +257,8 @@ def run_automation(
                 "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
                 "?request_locale=en"
             )
-            page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+            page.goto(login_url, wait_until="commit", timeout=60000)
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
             page.wait_for_timeout(1500)
 
             # 填帳號密碼
@@ -296,7 +307,10 @@ def run_automation(
             "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
             "?request_locale=en"
         )
-        page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+        # wait_until="commit"：只等到 HTTP 回應頭收到即繼續，最快速的選項
+        # 避免在雲端環境中渲染器崩潰前就拋出 TargetClosedError
+        page.goto(login_url, wait_until="commit", timeout=60000)
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
         if not check_logged_in():
             attempt_login()
 
