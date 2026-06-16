@@ -1,6 +1,9 @@
 # Web UI
 streamlit>=1.35.0
 
+# Cookie 持久化 session（30 天免重新登入）
+extra-streamlit-components>=0.1.71
+
 # Google Auth & APIs
 google-auth>=2.29.0
 google-auth-oauthlib>=1.2.0
