@@ -51,6 +51,16 @@ def _get_excel_val(row: pd.Series, keys: list[str]) -> str:
     return ""
 
 
+def _with_base_href(html: str, base_url: str) -> str:
+    """Ensure response HTML resolves relative Japan Post URLs inside Playwright."""
+    if re.search(r"<base\s", html, flags=re.IGNORECASE):
+        return html
+    base_tag = f'<base href="{base_url}">'
+    if re.search(r"<head[^>]*>", html, flags=re.IGNORECASE):
+        return re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.IGNORECASE)
+    return base_tag + html
+
+
 # ── 主要自動化流程 ────────────────────────────────────
 def run_automation(
     df: pd.DataFrame,
@@ -276,7 +286,7 @@ def run_automation(
         def _login_via_requests():
             """
             用 requests HTTP POST 直接登入，繞過 Playwright 導航至登入頁（會 crash）
-            回傳：(playwright_cookies, post_login_url, success_bool)
+            回傳：(playwright_cookies, post_login_url, success_bool, response_html)
             """
             import requests as _req
             import re as _re
@@ -352,7 +362,7 @@ def run_automation(
                     "path": c.path or "/",
                 })
             _log(f"  → {len(pw_cookies)} 個 cookies 提取完成")
-            return pw_cookies, r2.url, success
+            return pw_cookies, r2.url, success, r2.text
 
         def attempt_login():
             _log(f"🔐 執行登入，帳號: {user[:3]}***")
@@ -409,15 +419,34 @@ def run_automation(
         # ── 執行登入：優先用 requests 繞過 Playwright 登入頁 crash ──────
         _login_ok = False
         try:
-            pw_cookies, post_url, req_ok = _login_via_requests()
+            pw_cookies, post_url, req_ok, post_html = _login_via_requests()
             if pw_cookies:
                 context.add_cookies(pw_cookies)
                 _log("✅ Cookies 已注入 Playwright context")
             if req_ok:
-                # requests 登入成功 → 直接信任，不再用 Playwright 導航至 Japan Post 頁驗證
-                # （任何 Japan Post 頁在 Streamlit Cloud 容器都會 TargetClosedError crash）
+                # Struts login success is a server-side forward: the URL can remain M010000.do
+                # while the response body already contains the logged-in main menu.
+                page.set_content(
+                    _with_base_href(
+                        post_html,
+                        "https://www.int-mypage.post.japanpost.jp/mypage/",
+                    ),
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+                page.wait_for_timeout(500)
+                create_count = page.locator(
+                    "img[alt='Create New Labels'], a:has-text('Create New Labels')"
+                ).count()
+                _log(
+                    "🧭 Playwright 已載入登入後主選單 HTML："
+                    f"url={page.url}, title={page.title()!r}, create_buttons={create_count}"
+                )
+                if create_count == 0:
+                    body_snip = page.locator("body").inner_text(timeout=3000)[:300]
+                    _log(f"⚠️ 主選單 HTML 未找到 Create New Labels，body[:300]={body_snip!r}")
                 _login_ok = True
-                _log("✅ requests 登入成功，Cookies 已就位，略過 Playwright 驗證")
+                _log("✅ requests 登入成功，Cookies 與主選單 HTML 已就位")
         except Exception as _re_err:
             _log(f"⚠️ requests 登入例外：{_re_err}")
 
