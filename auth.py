@@ -71,6 +71,60 @@ def is_authorized(email: str) -> bool:
     return False
 
 
+def _st_user_get(key: str, default=""):
+    user = getattr(st, "user", None)
+    if user is None:
+        return default
+    if isinstance(user, dict):
+        return user.get(key, default)
+    return getattr(user, key, default)
+
+
+def has_native_auth_config() -> bool:
+    """Return True when Streamlit's native OIDC auth is configured."""
+    try:
+        auth_cfg = st.secrets.get("auth", {})
+    except Exception:
+        return False
+    required = (
+        "redirect_uri",
+        "cookie_secret",
+        "client_id",
+        "client_secret",
+        "server_metadata_url",
+    )
+    return all(str(auth_cfg.get(k, "")).strip() for k in required)
+
+
+def restore_native_auth_state() -> bool:
+    """Mirror st.user into the existing app session_state contract."""
+    if not bool(_st_user_get("is_logged_in", False)):
+        return False
+
+    email = str(_st_user_get("email", "")).strip()
+    if not is_authorized(email):
+        st.session_state._auth_error = (
+            f"🚫 帳號 {email} 不在授權名單中。"
+            f"請使用 @{ALLOWED_DOMAIN} 的公司帳號登入，或聯絡系統管理員。"
+        )
+        try:
+            st.logout()
+        except Exception:
+            pass
+        return False
+
+    st.session_state.authenticated = True
+    st.session_state.user_email = email
+    st.session_state.user_name = _st_user_get("name", email) or email
+    st.session_state.user_picture = _st_user_get("picture", "") or ""
+    return True
+
+
+def login_with_native_auth():
+    """Start Streamlit native OIDC login."""
+    st.login()
+
+
 # ── Cookie Session 工具 ──────────────────────────────────
 def get_cookie_manager():
     """
@@ -266,6 +320,9 @@ def init_auth_state(cookie_mgr=None):
     if st.session_state.get("authenticated"):
         return
 
+    if restore_native_auth_state():
+        return
+
     _restore_from_cookie(cookie_mgr)
 
 
@@ -329,3 +386,8 @@ def logout(cookie_mgr=None):
     for key in ["authenticated", "user_email", "user_name", "user_picture", "oauth_state"]:
         st.session_state[key] = None
     st.session_state.authenticated = False
+    if bool(_st_user_get("is_logged_in", False)):
+        try:
+            st.logout()
+        except Exception as e:
+            print(f"[AUTH] Native logout failed: {e}", file=sys.stderr)

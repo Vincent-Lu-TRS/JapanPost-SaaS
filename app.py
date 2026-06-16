@@ -27,6 +27,8 @@ from auth import (
     init_auth_state,
     handle_oauth_callback,
     get_login_url,
+    has_native_auth_config,
+    login_with_native_auth,
     render_login_link,
     logout,
     get_cookie_manager,
@@ -160,16 +162,21 @@ def _render_login_page():
         if _auth_error:
             st.error(_auth_error)
 
-        auth_url, state = get_login_url()
-        st.session_state.oauth_state = state
-
-        if "client_id=" in auth_url and "client_id=&" not in auth_url:
-            st.markdown(
-                render_login_link(auth_url),
-                unsafe_allow_html=True,
-            )
+        if has_native_auth_config():
+            if st.button("🔑 使用 Google 帳號登入", type="primary"):
+                login_with_native_auth()
         else:
-            st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")
+            auth_url, state = get_login_url()
+            st.session_state.oauth_state = state
+
+            if "client_id=" in auth_url and "client_id=&" not in auth_url:
+                st.warning("目前使用舊版 OAuth 入口；若要避免新分頁，請設定 Streamlit 原生 [auth]。")
+                st.markdown(
+                    render_login_link(auth_url),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")
         st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人員")
 
 
