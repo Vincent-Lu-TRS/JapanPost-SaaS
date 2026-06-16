@@ -86,7 +86,21 @@ def run_automation(
         return results
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(
+            headless=headless,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--no-zygote",
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--mute-audio",
+            ],
+        )
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
@@ -233,7 +247,7 @@ def run_automation(
                 "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
                 "?request_locale=en"
             )
-            page.goto(login_url, wait_until="networkidle", timeout=30000)
+            page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(1500)
 
             # 填帳號密碼
@@ -282,7 +296,7 @@ def run_automation(
             "https://www.int-mypage.post.japanpost.jp/mypage/M010000.do"
             "?request_locale=en"
         )
-        page.goto(login_url, wait_until="networkidle", timeout=30000)
+        page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
         if not check_logged_in():
             attempt_login()
 
