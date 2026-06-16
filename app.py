@@ -163,27 +163,12 @@ def _render_login_page():
         st.session_state.oauth_state = state
 
         if "client_id=" in auth_url and "client_id=&" not in auth_url:
-            # window.top.location.href={url_js} 會因為 json.dumps 產生的雙引號截斷 HTML 屬性
-            # 正確做法：用 <script> 儲存 URL，onclick 只呼叫函數
-            # window.open() 在 component iframe 的 allow-popups sandbox 下可正常開新分頁
-            import json as _json
-            _url_js = _json.dumps(auth_url)  # safe JS string literal
-            # st.iframe 取代已棄用的 st.components.v1.html
-            _srcdoc = (
-                "<style>"
-                "body{margin:0;padding:0;background:transparent;}"
-                ".gbtn{display:inline-block;padding:0.55rem 1.4rem;"
-                "background:#4285F4;color:#fff;border:none;border-radius:6px;"
-                "font-size:1rem;font-weight:500;cursor:pointer;font-family:sans-serif;}"
-                ".gbtn:hover{background:#357ae8;}"
-                "</style>"
-                f"<script>var AUTH_URL={_url_js};"
-                "function doLogin(){window.open(AUTH_URL,'_blank');}"
-                "</script>"
-                "<button class='gbtn' onclick='doLogin()'>"
-                "&#128273; 使用 Google 帳號登入</button>"
+            st.link_button(
+                "🔑 使用 Google 帳號登入",
+                auth_url,
+                type="primary",
+                use_container_width=False,
             )
-            st.iframe(srcdoc=_srcdoc, height=55)
         else:
             st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")
         st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人員")
