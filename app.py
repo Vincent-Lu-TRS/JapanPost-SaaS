@@ -163,12 +163,12 @@ def _render_login_page():
         st.session_state.oauth_state = state
 
         if "client_id=" in auth_url and "client_id=&" not in auth_url:
-            # 用 components.html 渲染獨立 iframe 內的按鈕，透過 window.top.location.href
-            # 直接導航整個瀏覽器視窗。<a target="_top"> 在 Streamlit Cloud 的 sandbox
-            # 設定下會被靜默攔截（無反應）；components.html 按鈕 + JS 可繞過此限制。
+            # window.top.location.href={url_js} 會因為 json.dumps 產生的雙引號截斷 HTML 屬性
+            # 正確做法：用 <script> 儲存 URL，onclick 只呼叫函數
+            # window.open() 在 component iframe 的 allow-popups sandbox 下可正常開新分頁
             import json as _json
             import streamlit.components.v1 as _components
-            _url_js = _json.dumps(auth_url)
+            _url_js = _json.dumps(auth_url)  # safe JS string literal
             _components.html(
                 f"""
                 <style>
@@ -182,8 +182,11 @@ def _render_login_page():
                 }}
                 .gbtn:hover{{background:#357ae8;}}
                 </style>
-                <button class="gbtn"
-                    onclick="window.top.location.href={_url_js}">
+                <script>
+                var AUTH_URL = {_url_js};
+                function doLogin() {{ window.open(AUTH_URL, '_blank'); }}
+                </script>
+                <button class="gbtn" onclick="doLogin()">
                     &#128273; 使用 Google 帳號登入
                 </button>
                 """,
