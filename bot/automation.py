@@ -414,20 +414,16 @@ def run_automation(
                 context.add_cookies(pw_cookies)
                 _log("✅ Cookies 已注入 Playwright context")
             if req_ok:
-                # 直接導航至登入後頁面，跳過會 crash 的 M010000.do
-                dest = post_url if "int-mypage.post.japanpost.jp/mypage" in post_url                        else "https://www.int-mypage.post.japanpost.jp/mypage/M010001.do"
-                page.goto(dest, wait_until="commit", timeout=30000)
-                page.wait_for_timeout(2000)
-                _login_ok = check_logged_in()
-                if _login_ok:
-                    _log("✅ requests 登入成功，已進入操作介面")
+                # requests 登入成功 → 直接信任，不再用 Playwright 導航至 Japan Post 頁驗證
+                # （任何 Japan Post 頁在 Streamlit Cloud 容器都會 TargetClosedError crash）
+                _login_ok = True
+                _log("✅ requests 登入成功，Cookies 已就位，略過 Playwright 驗證")
         except Exception as _re_err:
             _log(f"⚠️ requests 登入例外：{_re_err}")
 
         if not _login_ok:
-            _log("❌ requests 登入失敗，且 Playwright 直接登入在雲端環境會 crash（TargetClosedError）")
-            _log("❌ 請確認帳號密碼是否正確，或聯絡管理員")
-            raise RuntimeError("登入失敗：requests 登入未成功，已停用 Playwright 瀏覽器登入以避免 crash")
+            _log("❌ requests 登入失敗，請確認帳號密碼")
+            raise RuntimeError("登入失敗：requests HTTP 登入未成功，請確認帳號密碼是否正確")
 
         if _login_ok:
             _log("✅ 登入成功")
