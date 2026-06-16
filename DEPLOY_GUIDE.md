@@ -7,10 +7,13 @@
 2. 建立專案（或選擇既有專案）
 3. APIs & Services → Credentials → **Create Credentials → OAuth 2.0 Client ID**
 4. Application type 選 **Web application**
-5. **Authorized redirect URIs** 填入你的 Streamlit App URL：
-   - 本地測試：`http://localhost:8501/`
-   - Streamlit Cloud：`https://your-app.streamlit.app/`
-   - HF Spaces：`https://your-space.hf.space/`
+5. **Authorized redirect URIs** 填入你的 Streamlit App URL。
+   Streamlit 原生 OIDC 會使用 `/oauth2callback`，舊版自製 OAuth fallback 仍使用 `/`：
+   - 本地測試：`http://localhost:8501/oauth2callback`
+   - 本地 fallback：`http://localhost:8501/`
+   - Streamlit Cloud：`https://your-app.streamlit.app/oauth2callback`
+   - Streamlit Cloud fallback：`https://your-app.streamlit.app/`
+   - HF Spaces：`https://your-space.hf.space/oauth2callback`
 6. 複製 Client ID 與 Client Secret
 
 ### 2. 啟用必要 API
@@ -47,15 +50,46 @@ JP_POST_USER = "your@email.com"
 JP_POST_PASS = "your-password"
 GEMINI_API_KEY = "AIza..."
 
+[auth]
+redirect_uri = "https://your-app.streamlit.app/oauth2callback"
+cookie_secret = "replace-with-a-long-random-secret-at-least-32-chars"
+client_id = "xxx.apps.googleusercontent.com"
+client_secret = "GOCSPX-xxx"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
 [gcp_service_account]
 type = "service_account"
 project_id = "..."
 # ... 其他欄位從 credentials.json 複製
 ```
 
+### 目前正式站設定重點
+
+正式站 `https://jppost.streamlit.app/` 必須同時設定：
+
+```toml
+OAUTH_REDIRECT_URI = "https://jppost.streamlit.app/"
+
+[auth]
+redirect_uri = "https://jppost.streamlit.app/oauth2callback"
+cookie_secret = "自行產生的 32 字元以上隨機字串"
+client_id = "與 GOOGLE_CLIENT_ID 相同"
+client_secret = "與 GOOGLE_CLIENT_SECRET 相同"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+```
+
+Google Cloud Console 的 OAuth Client 也必須加入：
+
+```text
+https://jppost.streamlit.app/oauth2callback
+```
+
+若線上畫面仍顯示「目前使用舊版 OAuth 入口」，代表 Streamlit Cloud Secrets 尚未成功加入 `[auth]` 區塊，登入仍會走舊版 fallback。
+
 ### ⚠️ 注意
 - Streamlit Cloud 免費方案記憶體 1GB，Playwright 執行時可能接近上限
 - 若遇到記憶體問題，考慮改用 HF Spaces Docker
+- `requirements.txt` 目前固定 `streamlit[auth]==1.56.0`，避免原生登入 30 天 cookie 行為在新版本發生回歸。升級 Streamlit 前需重新測試登入持久化。
 
 ---
 
