@@ -1,22 +1,27 @@
 """
 Google OAuth 2.0 認證模組
 限制：僅允許 @tkrjm.co.jp 網域或白名單人員登入
+支援：30 天 Cookie Session（免重新登入）
 """
 import os
+import sys
 import hmac
 import hashlib
 import secrets
 import time
+import base64
 import requests
 import streamlit as st
 from urllib.parse import urlencode
 
-# ── 安全設定 ────────────────────────────────────────────
+# ── 劉全設定 ────────────────────────────────────────────
 ALLOWED_DOMAIN = "tkrjm.co.jp"
+SESSION_DURATION_DAYS = 30
+SESSION_COOKIE_NAME = "jp_auth_v1"
 
 # 手動白名單（非公司網域但需授權的外部帳號）
 ALLOWED_WHITELIST: list[str] = [
-    # "partner@example.com",  # 範例：加入外部合作夥伴
+    # "partner@example.com",
 ]
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -27,7 +32,6 @@ SCOPES = "openid email profile"
 
 
 def _get_client_id() -> str:
-    """從 Streamlit secrets 或環境變數取得 Client ID"""
     try:
         return st.secrets["GOOGLE_CLIENT_ID"]
     except Exception:
@@ -35,7 +39,6 @@ def _get_client_id() -> str:
 
 
 def _get_client_secret() -> str:
-    """從 Streamlit secrets 或環境變數取得 Client Secret"""
     try:
         return st.secrets["GOOGLE_CLIENT_SECRET"]
     except Exception:
@@ -43,19 +46,10 @@ def _get_client_secret() -> str:
 
 
 def _get_redirect_uri() -> str:
-    """
-    取得 OAuth 回呼 URI。
-    優先順序：
-    1. Streamlit secrets 中的 OAUTH_REDIRECT_URI（明確設定）
-    2. 從 Streamlit context 自動偵測（Streamlit Cloud 生產環境）
-    3. 環境變數 OAUTH_REDIRECT_URI
-    4. 預設 localhost（本地開發）
-    """
     try:
         return st.secrets["OAUTH_REDIRECT_URI"]
     except Exception:
         pass
-    # 自動偵測：從請求 headers 取得 host（適用於 Streamlit Cloud）
     try:
         host = st.context.headers.get("host", "")
         if host and "localhost" not in host and "127.0.0.1" not in host:
@@ -66,7 +60,6 @@ def _get_redirect_uri() -> str:
 
 
 def is_authorized(email: str) -> bool:
-    """驗證使用者電子郵件是否有登入權限"""
     if not email:
         return False
     email_lower = email.lower().strip()
@@ -77,11 +70,108 @@ def is_authorized(email: str) -> bool:
     return False
 
 
+# ── Cookie Session 工具 ──────────────────────────────────
+def get_cookie_manager():
+    """
+    回傳 CookieManager 實例。
+    必須在每次 Streamlit rerun 開始時（其他 UI 之前）呼叫。
+    若套件不相容，回傳 None（不影響基本登入功能）。
+    """
+    try:
+        import extra_streamlit_components as stx
+        return stx.CookieManager(key="jp_auth_cookie_manager")
+    except Exception as e:
+        print(f"[AUTH] CookieManager init failed: {e}", file=sys.stderr)
+        return None
+
+
+def _make_session_token(email: str, name: str, picture: str) -> str:
+    """建立 HMAC 簽名的 session token"""
+    expires = int(time.time()) + SESSION_DURATION_DAYS * 86400
+    payload = f"{email}|{expires}|{name}^{picture}"
+    secret = (_get_client_secret() or "jp-saas-fallback-secret").encode()
+    sig = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
+    b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"{b64}.{sig}"
+
+
+def _parse_session_token(token: str) -> dict | None:
+    """驗證並解碼 session token，回傳 user dict 或 None"""
+    if not token or "." not in token:
+        return None
+    try:
+        b64, sig = token.rsplit(".", 1)
+        padded = b64 + "=" * (4 - len(b64) % 4)
+        payload = base64.urlsafe_b64decode(padded).decode()
+        parts = payload.split("|", 2)
+        if len(parts) != 3:
+            return None
+        email, expires_str, name_picture = parts
+        name_parts = name_picture.split("^", 1)
+        name = name_parts[0]
+        picture = name_parts[1] if len(name_parts) > 1 else ""
+        secret = (_get_client_secret() or "jp-saas-fallback-secret").encode()
+        expected = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        if int(time.time()) > int(expires_str):
+            return None
+        return {"email": email, "name": name, "picture": picture}
+    except Exception as e:
+        print(f"[AUTH] Token parse error: {e}", file=sys.stderr)
+        return None
+
+
+def _save_cookie(cookie_mgr, email: str, name: str, picture: str):
+    """將認證 token 存入瀏覽器 cookie（30 天）"""
+    if cookie_mgr is None:
+        return
+    try:
+        from datetime import datetime, timedelta
+        token = _make_session_token(email, name, picture)
+        expires = datetime.now() + timedelta(days=SESSION_DURATION_DAYS)
+        cookie_mgr.set(SESSION_COOKIE_NAME, token, expires_at=expires)
+        print(f"[AUTH] Cookie saved for {email[:4]}***", file=sys.stderr)
+    except Exception as e:
+        print(f"[AUTH] Cookie save failed: {e}", file=sys.stderr)
+
+
+def _clear_cookie(cookie_mgr):
+    if cookie_mgr is None:
+        return
+    try:
+        cookie_mgr.delete(SESSION_COOKIE_NAME)
+    except Exception as e:
+        print(f"[AUTH] Cookie clear failed: {e}", file=sys.stderr)
+
+
+def _restore_from_cookie(cookie_mgr) -> bool:
+    """嘗試從 cookie 恢復 session，成功回傳 True"""
+    if cookie_mgr is None:
+        return False
+    try:
+        token = cookie_mgr.get(SESSION_COOKIE_NAME)
+        if not token:
+            return False
+        user = _parse_session_token(token)
+        if not user:
+            return False
+        if not is_authorized(user["email"]):
+            _clear_cookie(cookie_mgr)
+            return False
+        st.session_state.authenticated = True
+        st.session_state.user_email = user["email"]
+        st.session_state.user_name = user["name"]
+        st.session_state.user_picture = user["picture"]
+        print(f"[AUTH] Session restored from cookie: {user['email'][:4]}***", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"[AUTH] Cookie restore failed: {e}", file=sys.stderr)
+        return False
+
+
+# ── CSRF 防護 ─────────────────────────────────────────────
 def _generate_state() -> str:
-    """
-    產生自我驗證的 HMAC state token（無需伺服器端儲存）。
-    格式：{timestamp}.{hmac_hex}
-    """
     timestamp = str(int(time.time()))
     secret = (_get_client_secret() or "fallback-secret").encode()
     sig = hmac.new(secret, timestamp.encode(), hashlib.sha256).hexdigest()
@@ -89,16 +179,11 @@ def _generate_state() -> str:
 
 
 def _verify_state(state: str) -> bool:
-    """
-    驗證 HMAC state token。
-    允許 10 分鐘內的 state（防止 CSRF，同時不依賴 session 儲存）。
-    """
     if not state or "." not in state:
         return False
     try:
         timestamp_str, sig = state.rsplit(".", 1)
         ts = int(timestamp_str)
-        # 時間視窗：10 分鐘
         if abs(int(time.time()) - ts) > 600:
             return False
         secret = (_get_client_secret() or "fallback-secret").encode()
@@ -108,11 +193,8 @@ def _verify_state(state: str) -> bool:
         return False
 
 
+# ── OAuth 主流程 ──────────────────────────────────────────
 def get_login_url() -> tuple[str, str]:
-    """
-    產生 Google OAuth 授權 URL 及 state 防 CSRF 值。
-    回傳 (auth_url, state)
-    """
     state = _generate_state()
     params = {
         "client_id": _get_client_id(),
@@ -128,7 +210,6 @@ def get_login_url() -> tuple[str, str]:
 
 
 def exchange_code_for_token(code: str) -> dict:
-    """使用 authorization code 換取 access_token"""
     resp = requests.post(
         GOOGLE_TOKEN_URL,
         data={
@@ -146,7 +227,6 @@ def exchange_code_for_token(code: str) -> dict:
 
 
 def get_user_info(access_token: str) -> dict:
-    """使用 access_token 取得使用者資訊"""
     resp = requests.get(
         GOOGLE_USERINFO_URL,
         headers={"Authorization": f"Bearer {access_token}"},
@@ -158,8 +238,8 @@ def get_user_info(access_token: str) -> dict:
 
 
 # ── Streamlit Session 工具 ──────────────────────────────
-def init_auth_state():
-    """初始化 auth 相關的 session_state"""
+def init_auth_state(cookie_mgr=None):
+    """初始化 auth session_state，並嘗試從 cookie 恢復 30 天 session。"""
     defaults = {
         "authenticated": False,
         "user_email": None,
@@ -171,11 +251,16 @@ def init_auth_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
+    if st.session_state.get("authenticated"):
+        return
 
-def handle_oauth_callback() -> bool:
+    _restore_from_cookie(cookie_mgr)
+
+
+def handle_oauth_callback(cookie_mgr=None) -> bool:
     """
-    檢查 URL 參數中是否有 OAuth callback code。
-    若有則完成認證流程，回傳 True 表示處理成功（不論成功或失敗）。
+    處理 OAuth callback（URL 中的 code 參數）。
+    認證成功後存入 30 天 cookie。
     """
     params = st.query_params
     code = params.get("code")
@@ -184,7 +269,6 @@ def handle_oauth_callback() -> bool:
     if not code:
         return False
 
-    # CSRF 驗證（HMAC 自我驗證，不依賴 session_state）
     if not _verify_state(state or ""):
         st.session_state._auth_error = "⚠️ 安全驗證失敗（state invalid），請重新登入。"
         st.query_params.clear()
@@ -209,13 +293,16 @@ def handle_oauth_callback() -> bool:
             st.query_params.clear()
             return True
 
-        # 認證成功
+        name = user_info.get("name", email)
+        picture = user_info.get("picture", "")
         st.session_state.authenticated = True
         st.session_state.user_email = email
-        st.session_state.user_name = user_info.get("name", email)
-        st.session_state.user_picture = user_info.get("picture", "")
+        st.session_state.user_name = name
+        st.session_state.user_picture = picture
         st.session_state._auth_error = None
         st.query_params.clear()
+
+        _save_cookie(cookie_mgr, email, name, picture)
 
     except Exception as e:
         st.session_state._auth_error = f"❌ 認證過程發生錯誤：{e}"
@@ -224,8 +311,9 @@ def handle_oauth_callback() -> bool:
     return True
 
 
-def logout():
-    """清除 session 狀態，執行登出"""
+def logout(cookie_mgr=None):
+    """清除 session 及 cookie，執行登出"""
+    _clear_cookie(cookie_mgr)
     for key in ["authenticated", "user_email", "user_name", "user_picture", "oauth_state"]:
         st.session_state[key] = None
     st.session_state.authenticated = False
