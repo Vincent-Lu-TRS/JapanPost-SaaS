@@ -216,8 +216,7 @@ def render_login_link(auth_url: str) -> str:
     return (
         '<a class="google-login-btn" href="'
         f'{safe_url}'
-        '" target="_self" '
-        'onclick="window.top.location.href=this.href; return false;">'
+        '" target="_top">'
         '🔑 使用 Google 帳號登入</a>'
     )
 
