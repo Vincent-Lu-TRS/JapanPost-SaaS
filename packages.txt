@@ -10,3 +10,4 @@ libxfixes3
 libxrandr2
 libgbm1
 libxss1
+libasound2
