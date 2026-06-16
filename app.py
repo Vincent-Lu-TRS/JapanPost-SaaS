@@ -163,9 +163,9 @@ def _render_login_page():
         st.session_state.oauth_state = state
 
         if "client_id=" in auth_url and "client_id=&" not in auth_url:
-            # target="_self" 確保 OAuth 在同一分頁完成，不開新分頁
+            # target="_top" 讓整個瀏覽器視窗導航（Streamlit 跑在 iframe 內，_self 只導航 iframe 會被 Google 以 403 拒絕）
             st.markdown(
-                f'<a href="{auth_url}" target="_self" class="google-login-btn">'
+                f'<a href="{auth_url}" target="_top" class="google-login-btn">'
                 f'🔑 使用 Google 帳號登入</a>',
                 unsafe_allow_html=True,
             )
