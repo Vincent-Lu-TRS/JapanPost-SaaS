@@ -18,6 +18,8 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
+AUTOMATION_BUILD_ID = "2026-06-17-8fcdd4d-no-page-title"
+
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
 
@@ -259,6 +261,7 @@ def run_automation(
     results: list[dict] = []
     user, pwd = _get_jp_post_creds()
     pw_cookies = []
+    _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
 
     if not user or not pwd:
         _log("❌ 未設定 JP_POST_USER / JP_POST_PASS，無法登入日本郵政")

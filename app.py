@@ -94,8 +94,9 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
 
         try:
             _log("🚀 任務啟動，正在載入模組...")
-            from bot.automation import run_automation
+            from bot.automation import AUTOMATION_BUILD_ID, run_automation
             from bot.sheets import backfill_results
+            _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
 
             _log("✅ 模組載入成功，開始 Playwright 自動化...")
             results = run_automation(df, max_rows=max_rows, log_cb=_log, headless=True)
