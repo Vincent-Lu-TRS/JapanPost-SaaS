@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-m061000-register-submit"
+AUTOMATION_BUILD_ID = "2026-06-18-m061100-print-submit"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -451,6 +451,21 @@ def _build_m061000_register_payload(
     payload = dict(form["fields"])
     payload.pop("command", None)
     payload["method:regist"] = ""
+    return urljoin(page_url, form.get("action") or page_url), payload
+
+
+def _build_m061100_print_payload(
+    html: str,
+    page_url: str,
+) -> tuple[str, dict[str, str]]:
+    form = _pick_form(
+        html,
+        preferred_action="M061100",
+        required_fields=["csrfToken"],
+    )
+    payload = dict(form["fields"])
+    payload.pop("command", None)
+    payload["method:print"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 
 
@@ -1218,6 +1233,63 @@ def run_automation(
                 raise RuntimeError(f"M061000 register submit failed: HTTP {resp.status_code}")
             return resp
 
+        def submit_m061100_print_via_requests(html: str, page_url: str, row: pd.Series, order_id: str):
+            action, payload = _build_m061100_print_payload(
+                html,
+                page_url,
+            )
+            _log(f"🌐 requests 提交 M061100 Print payload：action={action}")
+            resp = req_session.post(
+                action,
+                data=payload,
+                headers={
+                    "Referer": page_url,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=30,
+                allow_redirects=True,
+            )
+            content_type = resp.headers.get("Content-Type", "")
+            pdf_bytes = resp.content if "%PDF" in resp.content[:16].decode("latin1", errors="ignore") else b""
+            text = "" if pdf_bytes else (resp.text or "")
+            body_snip = text[:240].replace("\n", " ").replace("\r", "") if text else "<binary>"
+            tracking_match = re.search(r"([A-Z]{2}\d{9}JP)", text)
+            _log(
+                "  → M061100 HTTP "
+                f"{resp.status_code}, url={resp.url}, content-type={content_type}, "
+                f"pdf_bytes={len(pdf_bytes)}, body[:240]={body_snip}"
+            )
+            marker_summary = ", ".join(
+                marker
+                for marker in [
+                    "M061100",
+                    "DOWNLOAD?pdf=",
+                    "Completed",
+                    "Print Completed",
+                    "returnTop",
+                ]
+                if marker in text
+            ) or "-"
+            _log(
+                "🔎 M061100 response diagnostics："
+                f"commands={_summarize_submit_commands(text) or '-'}; "
+                f"markers={marker_summary}; "
+                f"tracking={tracking_match.group(1) if tracking_match else '-'}; "
+                f"forms={_summarize_forms(text)}"
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(f"M061100 print submit failed: HTTP {resp.status_code}")
+            if pdf_bytes:
+                tracking_for_name = tracking_match.group(1) if tracking_match else "NO_TRACKING"
+                content_name = _get_excel_val(row, ["郵局內容物"]) or _get_excel_val(row, ["內容物1"]) or "Item"
+                ship_name = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
+                fname = _sanitize_filename(
+                    f"{content_name}_{order_id}_{tracking_for_name}_{ship_name}.pdf"
+                )
+                upload_pdf(pdf_bytes, fname, log_cb=log_cb)
+                _log(f"✅ PDF 已透過 requests 取得並上傳：{fname}")
+            return resp
+
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
             _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
@@ -1263,9 +1335,20 @@ def run_automation(
                             main_menu_html = register_resp.text
                             main_menu_url = register_resp.url
                             _log("✅ M061000 Register Shipment 已用 requests payload submit；不回灌 Playwright HTML")
+                            if "M061100" in register_resp.text and "Print after agreeing" in register_resp.text:
+                                print_resp = submit_m061100_print_via_requests(
+                                    register_resp.text,
+                                    register_resp.url,
+                                    row,
+                                    order_id,
+                                )
+                                if "text/html" in print_resp.headers.get("Content-Type", ""):
+                                    main_menu_html = print_resp.text
+                                    main_menu_url = print_resp.url
+                                _log("✅ M061100 Print 已用 requests payload submit；不回灌 Playwright HTML")
                 _log(
-                    "⏸️ 已停止於 M061000 requests submit 後；"
-                    "後續 PDF/完成頁流程需再遷移為 requests 後才能繼續"
+                    "⏸️ 已停止於 M061100 requests submit 後；"
+                    "若尚未取得 PDF，請依 M061100 diagnostics 繼續遷移下載/完成頁"
                 )
                 return results
 

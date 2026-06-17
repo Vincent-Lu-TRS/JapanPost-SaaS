@@ -13,6 +13,7 @@ from bot.automation import (
     _build_m060800_item_payload,
     _build_m060900_weight_payload,
     _build_m061000_register_payload,
+    _build_m061100_print_payload,
     _build_struts_submit,
     _choose_label_flow_command,
     _extract_preferred_submit_command,
@@ -350,6 +351,24 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M061000.do")
         self.assertEqual(payload["csrfToken"], "token")
         self.assertEqual(payload["method:regist"], "")
+        self.assertNotIn("command", payload)
+
+    def test_build_m061100_print_payload_uses_print(self):
+        html = """
+        <form action="/mypage/M061100.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+        </form>
+        """
+
+        action, payload = _build_m061100_print_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M061000.do",
+        )
+
+        self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M061100.do")
+        self.assertEqual(payload["csrfToken"], "token")
+        self.assertEqual(payload["method:print"], "")
         self.assertNotIn("command", payload)
 
     def test_run_automation_does_not_call_playwright_html_injection(self):
