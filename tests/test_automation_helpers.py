@@ -344,6 +344,75 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.transType"], "air")
         self.assertEqual(payload["shippingBean.pkgType"], "gift")
 
+    def test_build_m060800_item_payload_reads_assignments_from_image_anchor_controls(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="0">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <a href="javascript:changeValue('shippingBean.sendType','2');changeValue('shippingBean.pkgType','1');">
+            <img alt="POSTAL PARCEL" src="parcel.gif">
+          </a>
+          <a href="javascript:changeValue('shippingBean.transType','1');">
+            <img alt="AIR" src="air.gif">
+          </a>
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "國際小包",
+            "內容物1": "Groundsheet",
+            "申告金額1": "23.41",
+            "數量1": "1",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+            row,
+            is_eu=False,
+        )
+
+        self.assertEqual(payload["shippingBean.sendType"], "2")
+        self.assertEqual(payload["shippingBean.transType"], "1")
+        self.assertEqual(payload["shippingBean.pkgType"], "1")
+
+    def test_build_m060800_item_payload_stops_if_postal_parcel_keeps_ems_defaults(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="0">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <img alt="POSTAL PARCEL" src="parcel.gif">
+          <img alt="AIR" src="air.gif">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "國際小包",
+            "內容物1": "Groundsheet",
+            "申告金額1": "23.41",
+            "數量1": "1",
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "Unable to resolve Postal Parcel/Air payload"):
+            _build_m060800_item_payload(
+                html,
+                "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+                row,
+                is_eu=False,
+            )
+
     def test_build_m060900_weight_payload_sets_total_weight_and_uses_regist(self):
         html = """
         <form action="/mypage/M060900.do" method="post">

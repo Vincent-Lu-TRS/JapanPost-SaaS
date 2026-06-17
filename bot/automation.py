@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-results-append"
+AUTOMATION_BUILD_ID = "2026-06-18-postal-parcel-air-guard"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -142,6 +142,22 @@ def _set_value_assignments(script: str) -> dict[str, str]:
     return assignments
 
 
+def _known_field_assignments(script: str) -> dict[str, str]:
+    assignments = _set_value_assignments(script)
+    known_fields = {
+        "shippingBean.sendType",
+        "shippingBean.transType",
+        "shippingBean.pkgType",
+    }
+    for name, value in re.findall(
+        r"['\"](shippingBean\.(?:sendType|transType|pkgType))['\"]\s*,\s*['\"]([^'\"]*)['\"]",
+        script or "",
+    ):
+        if name in known_fields:
+            assignments[name] = value
+    return assignments
+
+
 def _set_value_assignments_for_labels(html: str, labels: list[str]) -> dict[str, str]:
     assignments: dict[str, str] = {}
     label_norms = [" ".join(label.lower().split()) for label in labels if label]
@@ -154,12 +170,17 @@ def _set_value_assignments_for_labels(html: str, labels: list[str]) -> dict[str,
             " ".join(value.lower().split())
             for _, value in re.findall(r"""(\w+)\s*=\s*['"]([^'"]*)['"]""", tag_text)
         ]
-        if any(label == attr_value for label in label_norms for attr_value in attr_values):
-            assignments.update(_set_value_assignments(tag_text))
+        exact_attr_match = any(label == attr_value for label in label_norms for attr_value in attr_values)
+        if exact_attr_match:
+            assignments.update(_known_field_assignments(tag_text))
+            if not assignments:
+                start = max(0, tag_match.start() - 800)
+                end = min(len(html or ""), tag_match.end() + 800)
+                assignments.update(_known_field_assignments((html or "")[start:end]))
             if assignments:
                 return assignments
         if any(len(label) > 3 and label in tag_norm for label in label_norms):
-            assignments.update(_set_value_assignments(tag_text))
+            assignments.update(_known_field_assignments(tag_text))
             if assignments:
                 return assignments
 
@@ -169,7 +190,7 @@ def _set_value_assignments_for_labels(html: str, labels: list[str]) -> dict[str,
         for label_match in re.finditer(re.escape(label), (html or "").lower()):
             start = max(0, label_match.start() - 800)
             end = min(len(html or ""), label_match.end() + 800)
-            assignments.update(_set_value_assignments((html or "")[start:end]))
+            assignments.update(_known_field_assignments((html or "")[start:end]))
             if assignments:
                 return assignments
     return assignments
@@ -471,6 +492,13 @@ def _build_m060800_item_payload(
     if profile == "postal_parcel_air":
         payload.update(_set_value_assignments_for_labels(html, ["Postal Parcel", "POSTAL PARCEL"]))
         payload.update(_set_value_assignments_for_labels(html, ["Air"]))
+        if payload.get("shippingBean.sendType", "") == "0" or not payload.get("shippingBean.transType", ""):
+            raise RuntimeError(
+                "Unable to resolve Postal Parcel/Air payload from M060800 HTML; "
+                f"sendType={payload.get('shippingBean.sendType', '')}, "
+                f"transType={payload.get('shippingBean.transType', '')}, "
+                f"pkgType={payload.get('shippingBean.pkgType', '')}"
+            )
     elif profile == "epacket_light":
         payload.update(_set_value_assignments_for_labels(html, ["International ePacket light", "ePacket light"]))
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
@@ -1198,6 +1226,7 @@ def run_automation(
                 f"action={action}, pkg={payload.get('itemBean.pkg', '')}, "
                 f"cost={payload.get('itemBean.cost.value', '')}, "
                 f"num={payload.get('itemBean.num.value', '')}, "
+                f"profile={_shipping_profile(row) or '-'}, "
                 f"sendType={payload.get('shippingBean.sendType', '')}, "
                 f"transType={payload.get('shippingBean.transType', '')}, "
                 f"pkgType={payload.get('shippingBean.pkgType', '')}"
