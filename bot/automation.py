@@ -232,6 +232,119 @@ def _build_struts_submit(html: str, command: str, base_url: str) -> tuple[str, d
     return action, payload
 
 
+class _HtmlFormParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms: list[dict] = []
+        self._form: dict | None = None
+        self._select_name: str | None = None
+        self._option_value: str | None = None
+        self._option_text: list[str] = []
+        self._textarea_name: str | None = None
+        self._textarea_text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs_d = {k.lower(): (v or "") for k, v in attrs}
+        tag = tag.lower()
+        if tag == "form":
+            self._form = {
+                "action": attrs_d.get("action", ""),
+                "method": attrs_d.get("method", "get").lower(),
+                "fields": {},
+                "selects": {},
+            }
+            return
+        if self._form is None:
+            return
+        if tag == "input":
+            name = attrs_d.get("name", "")
+            if not name:
+                return
+            input_type = attrs_d.get("type", "text").lower()
+            if input_type in {"button", "submit", "image", "reset"}:
+                return
+            if input_type in {"checkbox", "radio"} and "checked" not in attrs_d:
+                return
+            self._form["fields"][name] = attrs_d.get("value", "")
+        elif tag == "select":
+            self._select_name = attrs_d.get("name", "")
+            if self._select_name:
+                self._form["selects"].setdefault(self._select_name, [])
+                self._form["fields"].setdefault(self._select_name, "")
+        elif tag == "option" and self._select_name:
+            self._option_value = attrs_d.get("value", "")
+            self._option_text = []
+            if "selected" in attrs_d or not self._form["fields"].get(self._select_name):
+                self._form["fields"][self._select_name] = self._option_value
+        elif tag == "textarea":
+            self._textarea_name = attrs_d.get("name", "")
+            self._textarea_text = []
+
+    def handle_data(self, data):
+        if self._textarea_name:
+            self._textarea_text.append(data)
+        if self._select_name and self._option_value is not None:
+            self._option_text.append(data)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "form" and self._form is not None:
+            self.forms.append(self._form)
+            self._form = None
+        elif (
+            tag == "option"
+            and self._form is not None
+            and self._select_name
+            and self._option_value is not None
+        ):
+            self._form["selects"].setdefault(self._select_name, []).append({
+                "value": self._option_value,
+                "text": " ".join("".join(self._option_text).split()),
+            })
+            self._option_value = None
+            self._option_text = []
+        elif tag == "select":
+            self._select_name = None
+            self._option_value = None
+            self._option_text = []
+        elif tag == "textarea" and self._form is not None and self._textarea_name:
+            self._form["fields"][self._textarea_name] = "".join(self._textarea_text)
+            self._textarea_name = None
+            self._textarea_text = []
+
+
+def _parse_forms(html: str) -> list[dict]:
+    parser = _HtmlFormParser()
+    parser.feed(html or "")
+    return parser.forms
+
+
+def _pick_form(html: str, preferred_action: str = "", required_fields: list[str] | None = None) -> dict:
+    forms = _parse_forms(html)
+    required_fields = required_fields or []
+    for form in forms:
+        if preferred_action and preferred_action not in form.get("action", ""):
+            continue
+        if all(field in form["fields"] for field in required_fields):
+            return form
+    for form in forms:
+        if all(field in form["fields"] for field in required_fields):
+            return form
+    if forms:
+        return forms[0]
+    raise RuntimeError("找不到可提交的日本郵政表單")
+
+
+def _select_option_value(form: dict, field_name: str, label: str, fallback: str = "") -> str:
+    label_norm = " ".join(_clean(label).split()).lower()
+    for option in form.get("selects", {}).get(field_name, []):
+        text_norm = " ".join(_clean(option.get("text", "")).split()).lower()
+        value = _clean(option.get("value", ""))
+        if label_norm and (label_norm == text_norm or label_norm in text_norm):
+            return value
+    return fallback
+
+
 def run_automation(
     df: pd.DataFrame,
     max_rows: int | None = None,
@@ -670,20 +783,19 @@ def run_automation(
                 main_menu_url = post_url or main_menu_url
                 # Struts login success is a server-side forward: the URL can remain M010000.do
                 # while the response body already contains the logged-in main menu.
-                set_content_from_requests(post_html)
-                page.wait_for_timeout(500)
-                create_count = page.locator(
-                    "img[alt='Create New Labels'], a:has-text('Create New Labels')"
-                ).count()
+                create_count = 1 if (
+                    "Create New Labels" in post_html
+                    or _extract_submit_command_for_label(post_html, "Create New Labels")
+                ) else 0
                 _log(
-                    "🧭 Playwright 已載入登入後主選單 HTML："
-                    f"url={safe_page_url()}, create_buttons={create_count}"
+                    "🧭 requests 已取得登入後主選單 HTML："
+                    f"url={main_menu_url}, create_buttons={create_count}"
                 )
                 if create_count == 0:
-                    body_snip = page.locator("body").inner_text(timeout=3000)[:300]
+                    body_snip = post_html[:300].replace("\n", " ").replace("\r", "")
                     _log(f"⚠️ 主選單 HTML 未找到 Create New Labels，body[:300]={body_snip!r}")
                 _login_ok = True
-                _log("✅ requests 登入成功，Cookies 與主選單 HTML 已就位")
+                _log("✅ requests 登入成功，Cookies 與主選單 HTML 已就位；不回灌 Playwright HTML")
         except Exception as _re_err:
             _log(f"⚠️ requests 登入例外：{_re_err}")
 
@@ -697,7 +809,11 @@ def run_automation(
             _log("⚠️ 登入狀態未確認，嘗試繼續...")
 
         # ── 逐筆處理訂單 ─────────────────────────────
+        label_form_html = ""
+        label_form_url = ""
+
         def open_create_label_form_via_requests() -> bool:
+            nonlocal label_form_html, label_form_url
             if not req_session or not main_menu_html:
                 return False
             current_html = main_menu_html
@@ -749,10 +865,11 @@ def run_automation(
                         or "#M060505_" in r.text
                     )
                     if looks_like_sender_form:
-                        set_content_from_requests(r.text)
+                        label_form_html = r.text
+                        label_form_url = r.url
                         _log(
-                            "✅ requests 已載入寄件人表單 HTML："
-                            f"url={safe_page_url()}"
+                            "✅ requests 已取得 M060505/addrToBean 表單 HTML；"
+                            f"url={label_form_url}，不回灌 Playwright"
                         )
                         return True
                     current_html = r.text
@@ -766,6 +883,69 @@ def run_automation(
                 _log(f"❌ requests 開啟打單頁例外：{e}")
                 raise
 
+        def submit_addr_to_bean_via_requests(row: pd.Series, order_id: str):
+            if not req_session or not label_form_html:
+                raise RuntimeError("尚未取得 M060505/addrToBean 表單 HTML，無法提交收件人 payload")
+
+            from .sheets import COUNTRY_CODE_MAP
+
+            country_raw = _get_excel_val(row, ["收件人國家", "Country"])
+            country_code = COUNTRY_CODE_MAP.get(country_raw, "")
+            name_val = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
+            final_name = f"{name_val} {order_id}".strip()
+
+            form = _pick_form(
+                label_form_html,
+                preferred_action="M060505",
+                required_fields=["addrToBean.nam"],
+            )
+            command = (
+                _extract_submit_command_for_label(label_form_html, "Next")
+                or _extract_preferred_submit_command(label_form_html, ["next", "regist", "addrToBean"])
+                or "next"
+            )
+            data = dict(form["fields"])
+            data.pop("command", None)
+            country_value = _select_option_value(
+                form,
+                "addrToBean.couCode",
+                country_raw,
+                fallback=country_code if country_code != "EU" else data.get("addrToBean.couCode", ""),
+            )
+            data.update({
+                f"method:{command}": "",
+                "addrToBean.couCode": country_value,
+                "addrToBean.nam": final_name,
+                "addrToBean.add1": "",
+                "addrToBean.add2": _get_excel_val(row, ["Shipping Street", "收件地址"]),
+                "addrToBean.add3": _get_excel_val(row, ["Shipping City", "城市"]),
+                "addrToBean.pref": _get_excel_val(row, ["收件人洲/省", "State"]),
+                "addrToBean.postal": _get_excel_val(row, ["Shipping Zip", "郵遞區號"]),
+                "addrToBean.tel": _get_excel_val(row, ["Shipping Phone", "電話"]),
+            })
+            post_target = urljoin(label_form_url or main_menu_url, form.get("action") or label_form_url)
+            _log(
+                "🌐 requests 提交 M060505/addrToBean 收件人 payload："
+                f"command={command}, action={post_target}, name={final_name}, country={country_raw}"
+            )
+            resp = req_session.post(
+                post_target,
+                data=data,
+                headers={
+                    "Referer": label_form_url or main_menu_url,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=30,
+                allow_redirects=True,
+            )
+            body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
+            _log(f"  → addrToBean HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+            if resp.status_code >= 400:
+                raise RuntimeError(f"M060505 addrToBean submit failed: HTTP {resp.status_code}")
+            if "addrToBean" in resp.text and "error" in resp.text[:5000].lower():
+                _log("⚠️ M060505 回應仍停留在收件人頁，可能有欄位驗證錯誤")
+            return resp, country_raw, country_code
+
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
             _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
@@ -777,80 +957,18 @@ def run_automation(
 
                 # ── 點擊「Create New Labels」────────────
                 if not open_create_label_form_via_requests():
-                    safe_click(
-                        "img[alt='Create New Labels'], "
-                        "a:has-text('Create New Labels')",
-                        label="main_menu_create",
-                        critical=True,
-                    )
-                    page.wait_for_timeout(800)
-                    handle_previous_label_dialog()  # 進入製單後再次檢查
+                    raise RuntimeError("requests 無法取得 M060505/addrToBean 表單，停止以避免 Playwright crash")
 
-                # ── Step 1: 寄件人頁 → Next ───────────
-                if page.locator("#M060505_addrToBean_nam").count() == 0:
-                    safe_click(
-                        "input[value='Next']:not([disabled])",
-                        label="sender_next",
-                        critical=True,
-                    )
-                    page.wait_for_timeout(1000)
-                else:
-                    _log("✅ requests 已載入收件人輸入表單，略過 sender_next")
-
-                # ── Step 2: 收件人資訊注入 ────────────
-                # 先選國家（必須在填姓名前）
-                country_raw = _get_excel_val(row, ["收件人國家", "Country"])
-                from .sheets import COUNTRY_CODE_MAP
-                country_code = COUNTRY_CODE_MAP.get(country_raw, "")
-
-                country_sel = "#M060505_addrToBean_couCode"
-                if country_raw:
-                    try:
-                        safe_select(country_sel, label=country_raw)
-                    except Exception:
-                        if country_code and country_code != "EU":
-                            try:
-                                safe_select(country_sel, value=country_code)
-                            except Exception:
-                                _log(f"⚠️ 國家選擇失敗: {country_raw}")
-
-                # 姓名格式：「Shipping Name + 注文番号」
-                name_val = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
-                final_name = f"{name_val} {order_id}".strip()
-
-                # 使用精確 HTML ID 注入（防合併儲存格欄位錯位）
-                safe_fill("#M060505_addrToBean_nam", final_name, label="name")
-                safe_fill("#M060505_addrToBean_add1", "", label="add1_placeholder")
-                safe_fill(
-                    "#M060505_addrToBean_add2",
-                    _get_excel_val(row, ["Shipping Street", "收件地址"]),
-                    label="address",
+                # ── Step 2: M060505 收件人資訊改用純 requests payload submit ─────
+                addr_resp, country_raw, country_code = submit_addr_to_bean_via_requests(row, order_id)
+                main_menu_html = addr_resp.text
+                main_menu_url = addr_resp.url
+                _log("✅ M060505 收件人表單已用 requests payload submit；不回灌 Playwright HTML")
+                _log(
+                    "⏸️ 已停止於 M060505 requests submit 後；"
+                    "後續運送方式/內容物/PDF 流程需再遷移為 requests 後才能繼續"
                 )
-                safe_fill(
-                    "#M060505_addrToBean_add3",
-                    _get_excel_val(row, ["Shipping City", "城市"]),
-                    label="city",
-                )
-                safe_fill(
-                    "#M060505_addrToBean_pref",
-                    _get_excel_val(row, ["收件人洲/省", "State"]),
-                    label="state",
-                )
-                safe_fill(
-                    "#M060505_addrToBean_postal",
-                    _get_excel_val(row, ["Shipping Zip", "郵遞區號"]),
-                    label="postal",
-                )
-                safe_fill(
-                    "#M060505_addrToBean_tel",
-                    _get_excel_val(row, ["Shipping Phone", "電話"]),
-                    label="phone",
-                )
-
-                # ── Step 2 → Next ─────────────────────
-                safe_click("input[type='button'][value='Next']", label="addr_next", critical=True)
-                page.wait_for_timeout(1500)
-                dismiss_dialogs()
+                return results
 
                 # ── Step 3: 運送方式分流 ──────────────
                 shipping = _get_excel_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)"])

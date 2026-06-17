@@ -15,6 +15,9 @@ from bot.automation import (
     _extract_preferred_submit_command,
     _extract_submit_command_for_label,
     _html_for_playwright_form,
+    _parse_forms,
+    _pick_form,
+    _select_option_value,
     _summarize_submit_commands,
     _with_base_href,
 )
@@ -211,6 +214,39 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["sel"], "3693083")
         self.assertEqual(payload["selID"], "sender@example.com")
         self.assertEqual(payload["method:regist"], "")
+
+    def test_parse_forms_extracts_m060505_recipient_fields_and_country_options(self):
+        html = """
+        <form action="M060505.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input name="addrToBean.nam" value="">
+          <select name="addrToBean.couCode">
+            <option value="">Select</option>
+            <option value="US">United States</option>
+            <option value="FR" selected>France</option>
+          </select>
+          <textarea name="memo">hello</textarea>
+        </form>
+        """
+
+        form = _pick_form(html, preferred_action="M060505", required_fields=["addrToBean.nam"])
+
+        self.assertEqual(form["action"], "M060505.do")
+        self.assertEqual(form["fields"]["addrToBean.nam"], "")
+        self.assertEqual(form["fields"]["addrToBean.couCode"], "FR")
+        self.assertEqual(form["fields"]["memo"], "hello")
+        self.assertEqual(
+            _select_option_value(form, "addrToBean.couCode", "United States"),
+            "US",
+        )
+
+    def test_run_automation_does_not_call_playwright_html_injection(self):
+        from pathlib import Path
+
+        source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(encoding="utf-8")
+        body = source.split("def set_content_from_requests", 1)[1]
+
+        self.assertNotIn("set_content_from_requests(", body)
 
 
 if __name__ == "__main__":
