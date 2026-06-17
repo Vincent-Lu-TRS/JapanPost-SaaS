@@ -12,6 +12,7 @@ sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_cod
 from bot.automation import (
     _build_struts_submit,
     _extract_submit_command_for_label,
+    _summarize_submit_commands,
     _with_base_href,
 )
 
@@ -58,6 +59,17 @@ class AutomationHtmlTests(unittest.TestCase):
         command = _extract_submit_command_for_label(html, "Next")
 
         self.assertEqual(command, "goSender")
+
+    def test_summarize_submit_commands_lists_unique_commands(self):
+        html = """
+        <a href="javascript:submitCommand('onlineS')">Create New Labels</a>
+        <input type="button" value="Next" onclick="submitCommand('regist')">
+        <input type="button" value="Back" onclick="submitCommand('onlineS')">
+        """
+
+        summary = _summarize_submit_commands(html)
+
+        self.assertEqual(summary, "onlineS, regist")
 
     def test_build_struts_submit_renames_command_field_to_method_command(self):
         html = """

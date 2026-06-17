@@ -123,6 +123,14 @@ def _extract_submit_command_for_label(html: str, label: str) -> str:
     return parser.command
 
 
+def _summarize_submit_commands(html: str) -> str:
+    commands: list[str] = []
+    for command in re.findall(r"submitCommand\(['\"]([^'\"]+)['\"]\)", html or ""):
+        if command not in commands:
+            commands.append(command)
+    return ", ".join(commands[:12])
+
+
 def _build_struts_submit(html: str, command: str, base_url: str) -> tuple[str, dict[str, str]]:
     parser = _StrutsFormParser("")
     parser.feed(html or "")
@@ -544,10 +552,9 @@ def run_automation(
                 return False
             current_html = main_menu_html
             referer_url = main_menu_url
-            command_labels = [
-                ["Create New Labels"],
-                ["Enter the sender", "sender", "Next"],
-                ["Enter the sender", "sender", "Next"],
+            command_labels = [["Create New Labels"]] + [
+                ["Enter the sender", "sender", "Next", "Register", "Select"]
+                for _ in range(7)
             ]
             try:
                 for step_idx, labels in enumerate(command_labels, start=1):
@@ -559,9 +566,10 @@ def run_automation(
                     if not command:
                         _log(
                             "⚠️ requests 開啟打單頁：找不到下一步 command "
-                            f"(step={step_idx}, labels={labels})，改用 Playwright click"
+                            f"(step={step_idx}, labels={labels}, "
+                            f"commands={_summarize_submit_commands(current_html)})"
                         )
-                        return False
+                        raise RuntimeError("requests 無法找到下一步 command，停止以避免 Playwright crash")
                     action, payload = _build_struts_submit(
                         current_html,
                         command,
@@ -603,11 +611,14 @@ def run_automation(
                         return True
                     current_html = r.text
                     referer_url = r.url
-                _log("⚠️ requests 開啟打單頁：多步提交後仍未到寄件人表單，改用 Playwright click")
-                return False
+                _log(
+                    "⚠️ requests 開啟打單頁：多步提交後仍未到寄件人表單，"
+                    f"commands={_summarize_submit_commands(current_html)}"
+                )
+                raise RuntimeError("requests 多步提交後仍未到寄件人表單，停止以避免 Playwright crash")
             except Exception as e:
-                _log(f"⚠️ requests 開啟打單頁例外：{e}，改用 Playwright click")
-                return False
+                _log(f"❌ requests 開啟打單頁例外：{e}")
+                raise
 
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
