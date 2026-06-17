@@ -48,6 +48,17 @@ class AutomationHtmlTests(unittest.TestCase):
 
         self.assertEqual(command, "createNewLabel")
 
+    def test_extract_submit_command_from_input_value_and_onclick(self):
+        html = """
+        <form action="M010100.do" method="post">
+          <input type="button" value="Next" onclick="submitCommand('goSender')">
+        </form>
+        """
+
+        command = _extract_submit_command_for_label(html, "Next")
+
+        self.assertEqual(command, "goSender")
+
     def test_build_struts_submit_renames_command_field_to_method_command(self):
         html = """
         <form action="M010001.do" method="post">

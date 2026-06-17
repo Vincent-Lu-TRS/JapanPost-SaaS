@@ -92,6 +92,9 @@ class _StrutsFormParser(HTMLParser):
             name = attrs_d.get("name", "")
             if name:
                 self.fields[name] = attrs_d.get("value", "")
+            label_value = attrs_d.get("value", "").lower()
+            if self.label and self.label in label_value:
+                self.command = self.command or _command_from_href(attrs_d.get("onclick", ""))
         elif self.in_first_form and tag == "select":
             name = attrs_d.get("name", "")
             if name and name not in self.fields:
@@ -539,51 +542,69 @@ def run_automation(
         def open_create_label_form_via_requests() -> bool:
             if not req_session or not main_menu_html:
                 return False
-            command = _extract_submit_command_for_label(main_menu_html, "Create New Labels")
-            if not command:
-                _log("⚠️ requests 開啟打單頁：主選單找不到 Create New Labels command，改用 Playwright click")
-                return False
+            current_html = main_menu_html
+            referer_url = main_menu_url
+            command_labels = [
+                ["Create New Labels"],
+                ["Enter the sender", "sender", "Next"],
+                ["Enter the sender", "sender", "Next"],
+            ]
             try:
-                action, payload = _build_struts_submit(
-                    main_menu_html,
-                    command,
-                    "https://www.int-mypage.post.japanpost.jp/mypage/",
-                )
-                _log(f"🌐 requests 開啟打單頁：command={command}, action={action}")
-                r = req_session.post(
-                    action,
-                    data=payload,
-                    headers={
-                        "Referer": main_menu_url,
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                    timeout=30,
-                    allow_redirects=True,
-                )
-                body_snip = r.text[:240].replace("\n", " ").replace("\r", "")
-                _log(f"  → {r.status_code}, final URL: {r.url}, body[:240]: {body_snip}")
-                looks_like_sender_form = (
-                    "M060505" in r.url
-                    or "addrToBean" in r.text
-                    or "Enter the sender" in r.text
-                    or ("input" in r.text and "Next" in r.text)
-                )
-                if r.status_code != 200 or not looks_like_sender_form:
-                    _log("⚠️ requests 開啟打單頁：回應不像寄件人表單，改用 Playwright click")
-                    return False
-                page.set_content(
-                    _with_base_href(
-                        r.text,
+                for step_idx, labels in enumerate(command_labels, start=1):
+                    command = ""
+                    for label in labels:
+                        command = _extract_submit_command_for_label(current_html, label)
+                        if command:
+                            break
+                    if not command:
+                        _log(
+                            "⚠️ requests 開啟打單頁：找不到下一步 command "
+                            f"(step={step_idx}, labels={labels})，改用 Playwright click"
+                        )
+                        return False
+                    action, payload = _build_struts_submit(
+                        current_html,
+                        command,
                         "https://www.int-mypage.post.japanpost.jp/mypage/",
-                    ),
-                    wait_until="domcontentloaded",
-                    timeout=15000,
-                )
-                _log(
-                    "✅ requests 已載入寄件人表單 HTML："
-                    f"url={page.url}, title={page.title()!r}"
-                )
-                return True
+                    )
+                    _log(f"🌐 requests 開啟打單頁：step={step_idx}, command={command}, action={action}")
+                    r = req_session.post(
+                        action,
+                        data=payload,
+                        headers={
+                            "Referer": referer_url,
+                            "Content-Type": "application/x-www-form-urlencoded",
+                        },
+                        timeout=30,
+                        allow_redirects=True,
+                    )
+                    body_snip = r.text[:240].replace("\n", " ").replace("\r", "")
+                    _log(f"  → {r.status_code}, final URL: {r.url}, body[:240]: {body_snip}")
+                    if r.status_code != 200:
+                        return False
+                    looks_like_sender_form = (
+                        "M060505" in r.url
+                        or "addrToBean" in r.text
+                        or "#M060505_" in r.text
+                    )
+                    if looks_like_sender_form:
+                        page.set_content(
+                            _with_base_href(
+                                r.text,
+                                "https://www.int-mypage.post.japanpost.jp/mypage/",
+                            ),
+                            wait_until="domcontentloaded",
+                            timeout=15000,
+                        )
+                        _log(
+                            "✅ requests 已載入寄件人表單 HTML："
+                            f"url={page.url}, title={page.title()!r}"
+                        )
+                        return True
+                    current_html = r.text
+                    referer_url = r.url
+                _log("⚠️ requests 開啟打單頁：多步提交後仍未到寄件人表單，改用 Playwright click")
+                return False
             except Exception as e:
                 _log(f"⚠️ requests 開啟打單頁例外：{e}，改用 Playwright click")
                 return False
