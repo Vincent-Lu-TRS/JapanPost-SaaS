@@ -64,6 +64,16 @@ def _with_base_href(html: str, base_url: str) -> str:
 
 
 # ── 主要自動化流程 ────────────────────────────────────
+def _set_value_assignments(script: str) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    for name, value in re.findall(
+        r"setValue\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)",
+        script or "",
+    ):
+        assignments[name] = value
+    return assignments
+
+
 class _StrutsFormParser(HTMLParser):
     def __init__(self, label: str):
         super().__init__(convert_charrefs=True)
@@ -95,6 +105,7 @@ class _StrutsFormParser(HTMLParser):
                 if input_type in ("radio", "checkbox"):
                     if "checked" in attrs_d:
                         self.fields[name] = attrs_d.get("value", "")
+                        self.fields.update(_set_value_assignments(attrs_d.get("onclick", "")))
                     elif name not in self.fields:
                         self.fields[name] = ""
                 else:
@@ -121,7 +132,11 @@ class _StrutsFormParser(HTMLParser):
 
 def _command_from_href(href: str) -> str:
     match = re.search(r"submitCommand\(['\"]([^'\"]+)['\"]\)", href or "")
-    return match.group(1) if match else ""
+    if match:
+        return match.group(1)
+    if re.search(r"\bregist\(\s*\)", href or ""):
+        return "regist"
+    return ""
 
 
 def _extract_submit_command_for_label(html: str, label: str) -> str:
@@ -135,11 +150,15 @@ def _summarize_submit_commands(html: str) -> str:
     for command in re.findall(r"submitCommand\(['\"]([^'\"]+)['\"]\)", html or ""):
         if command not in commands:
             commands.append(command)
+    if re.search(r"\bregist\(\s*\)", html or "") and "regist" not in commands:
+        commands.append("regist")
     return ", ".join(commands[:12])
 
 
 def _extract_preferred_submit_command(html: str, preferred: list[str]) -> str:
     available = re.findall(r"submitCommand\(['\"]([^'\"]+)['\"]\)", html or "")
+    if re.search(r"\bregist\(\s*\)", html or ""):
+        available.append("regist")
     for command in preferred:
         if command in available:
             return command
@@ -571,7 +590,7 @@ def run_automation(
                 ["Enter the sender", "sender", "Next", "Register", "Select"]
                 for _ in range(7)
             ]
-            preferred_commands = ["addrSet", "directInput", "regist"]
+            preferred_commands = ["addrSet", "regist", "directInput"]
             try:
                 for step_idx, labels in enumerate(command_labels, start=1):
                     command = ""

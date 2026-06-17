@@ -61,6 +61,17 @@ class AutomationHtmlTests(unittest.TestCase):
 
         self.assertEqual(command, "goSender")
 
+    def test_extract_submit_command_from_input_value_and_regist_onclick(self):
+        html = """
+        <form action="M060000.do" method="post">
+          <input type="button" value="Next" onclick="regist()">
+        </form>
+        """
+
+        command = _extract_submit_command_for_label(html, "Next")
+
+        self.assertEqual(command, "regist")
+
     def test_summarize_submit_commands_lists_unique_commands(self):
         html = """
         <a href="javascript:submitCommand('onlineS')">Create New Labels</a>
@@ -120,6 +131,31 @@ class AutomationHtmlTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["addressBookNo"], "selected")
+
+    def test_build_struts_submit_applies_checked_input_set_value_side_effect(self):
+        html = """
+        <form action="M060000.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="selID" value="">
+          <input
+            type="radio"
+            name="sel"
+            value="3693083"
+            checked
+            onclick="setValue('selID', 'sender@example.com');"
+          >
+        </form>
+        """
+
+        _, payload = _build_struts_submit(
+            html,
+            "regist",
+            "https://www.int-mypage.post.japanpost.jp/mypage/",
+        )
+
+        self.assertEqual(payload["sel"], "3693083")
+        self.assertEqual(payload["selID"], "sender@example.com")
+        self.assertEqual(payload["method:regist"], "")
 
 
 if __name__ == "__main__":
