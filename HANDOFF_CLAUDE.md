@@ -196,3 +196,191 @@ git push
 - Keep login restricted to `@tkrjm.co.jp` or explicit whitelist.
 - Keep Playwright server-side/headless for SaaS users.
 - Prefer focused fixes over broad refactors; this app is constrained by Streamlit Cloud memory and Japan Post's legacy pages.
+
+---
+
+## 2026-06-17 Latest Claude Handoff Addendum
+
+This section supersedes the older "Current Known Follow-Up Work" notes above for Japan Post automation.
+
+### Current Production Status
+
+Google login is working and the protected Streamlit UI can be entered. The active blocker is Japan Post automation after successful requests login.
+
+The latest live run reached the create-label flow successfully:
+
+```text
+step=1 command=onlineS -> M010100.do
+step=2 command=regist -> M060000.do
+step=3 command=regist -> M060400.do
+step=4 command=directInput -> M060400.do
+```
+
+After `directInput`, the returned response appears to be the recipient input stage (`M060505` / `addrToBean` indicators). The failure happens when the code tries to hand that HTML back to Playwright.
+
+Latest failure signature:
+
+```text
+🔄 Playwright page 已關閉，重建頁面：set_content target closed
+🔄 Chromium browser process 已關閉，重新啟動
+🔄 Playwright page 已關閉，重建頁面：set_content target closed
+🔄 Chromium browser process 已關閉，重新啟動
+❌ requests 開啟打單頁例外：Locator.count: Target page, context or browser has been closed
+
+File "/mount/src/japanpost-saas/bot/automation.py", line 752, in open_create_label_form_via_requests
+    set_content_from_requests(r.text)
+File "/mount/src/japanpost-saas/bot/automation.py", line 359, in set_content_from_requests
+    page.locator("body").count()
+```
+
+Interpretation: this is not just one closed page. The entire Chromium browser process is being killed on Streamlit Cloud after Japan Post form HTML is injected. This still happens after:
+
+- stripping source `<script>` tags,
+- injecting only a small `submitCommand()` / `regist()` stub,
+- reducing the HTML to only the recipient form,
+- rebuilding the Playwright page/context,
+- relaunching Chromium and rehydrating cookies.
+
+### Important Recent Commits
+
+Recent relevant commits on `main`:
+
+```text
+42c9bdd chore: log automation build id
+8fcdd4d fix: inject minimal recipient form html
+a98d881 fix: sanitize Japan Post html before Playwright injection
+92e16f0 fix: rebuild closed Playwright page before html injection
+8b9d97f fix: choose recipient direct input flow
+4d3fda9 fix: submit selected sender in requests flow
+9aef9c9 fix: preserve checked Struts radio values
+```
+
+Do not revert these casually. They document the path already tried and keep the requests flow moving to `M060400 -> directInput`.
+
+### Current Automation Helpers
+
+Read these first in `bot/automation.py`:
+
+- `AUTOMATION_BUILD_ID`
+- `_command_from_href()`
+- `_set_value_assignments()`
+- `_StrutsFormParser`
+- `_summarize_submit_commands()`
+- `_extract_preferred_submit_command()`
+- `_choose_label_flow_command()`
+- `_build_struts_submit()`
+- `open_create_label_form_via_requests()`
+- `set_content_from_requests()`
+
+Current behavior:
+
+- `regist()` is treated as the Struts command `regist`.
+- checked radio/checkbox values are preserved.
+- checked input `onclick="setValue('hiddenName', 'value')"` side effects are applied to request payloads.
+- sender selection now correctly uses `regist` instead of `directInput`.
+- recipient address-book page `M060400` now correctly chooses `directInput`.
+- `AUTOMATION_BUILD_ID` is logged from both `app.py` and `run_automation()`.
+
+### Deployment Freshness Check
+
+Every new production run should show:
+
+```text
+🧭 automation build: 2026-06-17-8fcdd4d-no-page-title
+```
+
+If a log does not show this, or if it references old calls such as `page.title()`, verify Streamlit Cloud is deployed from GitHub `main` and force a redeploy before debugging automation logic.
+
+### Recommended Next Development Direction
+
+Stop trying to stabilize `page.set_content()` for Japan Post HTML on Streamlit Cloud. The evidence points to a cloud Chromium/runtime instability triggered by this legacy form HTML, not a normal selector bug.
+
+Recommended next implementation:
+
+1. Continue from the successful requests response after:
+
+```text
+step=4 command=directInput
+```
+
+2. Parse the returned recipient form with a requests/form parser instead of Playwright.
+
+3. Build and POST the recipient payload directly with requests. Start with these fields already used by the Playwright fill code:
+
+```text
+addrToBean.couCode
+addrToBean.nam
+addrToBean.add1
+addrToBean.add2
+addrToBean.add3
+addrToBean.pref
+addrToBean.postal
+addrToBean.tel
+```
+
+The existing Playwright selectors indicate the likely Struts field ids:
+
+```text
+#M060505_addrToBean_couCode
+#M060505_addrToBean_nam
+#M060505_addrToBean_add1
+#M060505_addrToBean_add2
+#M060505_addrToBean_add3
+#M060505_addrToBean_pref
+#M060505_addrToBean_postal
+#M060505_addrToBean_tel
+```
+
+These ids usually map to names like:
+
+```text
+addrToBean.couCode
+addrToBean.nam
+addrToBean.add1
+addrToBean.add2
+addrToBean.add3
+addrToBean.pref
+addrToBean.postal
+addrToBean.tel
+```
+
+Confirm against the returned HTML before posting.
+
+4. Submit one Japan Post step at a time with requests:
+
+- recipient form submit,
+- shipping method selection,
+- contents/items entry,
+- weight/confirmation,
+- register shipment,
+- PDF download.
+
+5. Use Playwright again only if a later step truly requires browser rendering or a download event. Prefer direct requests download for PDF if a URL/form action can be extracted.
+
+### Why PAexample Worked But SaaS Is Harder
+
+PAexample runs local GUI automation in a full desktop browser. Japan Post's old Struts pages execute their legacy JavaScript naturally in that environment.
+
+The SaaS version runs inside Streamlit Cloud's limited headless Chromium environment. The live logs now show that this environment can terminate the entire Chromium process when Japan Post form HTML is injected, even after aggressive minimization. Therefore, "make Playwright click like PAexample" is likely the wrong path for the current free-cloud constraint.
+
+### MCP Notes
+
+Chrome MCP was tested. In this session it could open/list tabs and expose `playwright.evaluate` / `locator`, but navigation attempts were blocked by the MCP evaluate sandbox:
+
+- assigning `location.href` failed because `href` was getter-only,
+- `window.location.assign()` was unavailable,
+- assigning `document.location` failed,
+- setting `document.body.innerHTML` failed,
+- GUI `Ctrl+L`/typing did not navigate the blank tab.
+
+So MCP can be retried later, but do not assume it can currently drive the production app end-to-end from this Codex session.
+
+### Suggested Tests For Next Fix
+
+Add focused tests to `tests/test_automation_helpers.py` before changing production flow:
+
+- parse a recipient `M060505` form and preserve hidden fields,
+- map row data into `addrToBean.*` payload keys,
+- apply selected country code fallback from `COUNTRY_CODE_MAP`,
+- add `method:regist` or the actual next command expected by the recipient form,
+- ensure no Playwright call is required for the recipient form submit path.
