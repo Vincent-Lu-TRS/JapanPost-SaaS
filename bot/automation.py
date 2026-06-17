@@ -196,6 +196,26 @@ def _set_value_assignments_for_labels(html: str, labels: list[str]) -> dict[str,
     return assignments
 
 
+def _html_context_for_labels(html: str, labels: list[str], max_chars: int = 700) -> str:
+    contexts: list[str] = []
+    text = html or ""
+    lower_text = text.lower()
+    for label in labels:
+        if not label:
+            continue
+        label_norm = label.lower()
+        idx = lower_text.find(label_norm)
+        if idx < 0:
+            continue
+        start = max(0, idx - max_chars // 2)
+        end = min(len(text), idx + len(label) + max_chars // 2)
+        snippet = unescape(text[start:end])
+        snippet = re.sub(r"csrfToken['\"]?\s+value=['\"][^'\"]+", "csrfToken value='[redacted]", snippet)
+        snippet = re.sub(r"\s+", " ", snippet).strip()
+        contexts.append(f"{label}=>{snippet[:max_chars]}")
+    return " || ".join(contexts) or "no label context"
+
+
 def _shipping_profile(row) -> str:
     shipping = _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)"])
     normalized = shipping.lower()
@@ -497,7 +517,8 @@ def _build_m060800_item_payload(
                 "Unable to resolve Postal Parcel/Air payload from M060800 HTML; "
                 f"sendType={payload.get('shippingBean.sendType', '')}, "
                 f"transType={payload.get('shippingBean.transType', '')}, "
-                f"pkgType={payload.get('shippingBean.pkgType', '')}"
+                f"pkgType={payload.get('shippingBean.pkgType', '')}; "
+                f"context={_html_context_for_labels(html, ['POSTAL PARCEL', 'Postal Parcel', 'AIR', 'Air'])}"
             )
     elif profile == "epacket_light":
         payload.update(_set_value_assignments_for_labels(html, ["International ePacket light", "ePacket light"]))

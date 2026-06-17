@@ -405,7 +405,7 @@ class AutomationHtmlTests(unittest.TestCase):
             "數量1": "1",
         }
 
-        with self.assertRaisesRegex(RuntimeError, "Unable to resolve Postal Parcel/Air payload"):
+        with self.assertRaisesRegex(RuntimeError, "POSTAL PARCEL=>"):
             _build_m060800_item_payload(
                 html,
                 "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
