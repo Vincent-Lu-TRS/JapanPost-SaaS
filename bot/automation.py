@@ -165,6 +165,16 @@ def _extract_preferred_submit_command(html: str, preferred: list[str]) -> str:
     return ""
 
 
+def _choose_label_flow_command(html: str, current_url: str) -> str:
+    if "M060400" in (current_url or ""):
+        preferred = ["directInput", "add", "regist"]
+    elif "M060105" in (current_url or ""):
+        preferred = ["addrSet", "regist", "directInput"]
+    else:
+        preferred = ["addrSet", "regist", "directInput"]
+    return _extract_preferred_submit_command(html, preferred)
+
+
 def _build_struts_submit(html: str, command: str, base_url: str) -> tuple[str, dict[str, str]]:
     parser = _StrutsFormParser("")
     parser.feed(html or "")
@@ -590,12 +600,11 @@ def run_automation(
                 ["Enter the sender", "sender", "Next", "Register", "Select"]
                 for _ in range(7)
             ]
-            preferred_commands = ["addrSet", "regist", "directInput"]
             try:
                 for step_idx, labels in enumerate(command_labels, start=1):
                     command = ""
                     if step_idx > 1:
-                        command = _extract_preferred_submit_command(current_html, preferred_commands)
+                        command = _choose_label_flow_command(current_html, referer_url)
                     if not command:
                         for label in labels:
                             command = _extract_submit_command_for_label(current_html, label)
@@ -679,12 +688,15 @@ def run_automation(
                     handle_previous_label_dialog()  # 進入製單後再次檢查
 
                 # ── Step 1: 寄件人頁 → Next ───────────
-                safe_click(
-                    "input[value='Next']:not([disabled])",
-                    label="sender_next",
-                    critical=True,
-                )
-                page.wait_for_timeout(1000)
+                if page.locator("#M060505_addrToBean_nam").count() == 0:
+                    safe_click(
+                        "input[value='Next']:not([disabled])",
+                        label="sender_next",
+                        critical=True,
+                    )
+                    page.wait_for_timeout(1000)
+                else:
+                    _log("✅ requests 已載入收件人輸入表單，略過 sender_next")
 
                 # ── Step 2: 收件人資訊注入 ────────────
                 # 先選國家（必須在填姓名前）

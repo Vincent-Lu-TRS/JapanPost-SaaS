@@ -11,6 +11,7 @@ sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_cod
 
 from bot.automation import (
     _build_struts_submit,
+    _choose_label_flow_command,
     _extract_preferred_submit_command,
     _extract_submit_command_for_label,
     _summarize_submit_commands,
@@ -93,6 +94,21 @@ class AutomationHtmlTests(unittest.TestCase):
         command = _extract_preferred_submit_command(html, ["addrSet", "directInput", "regist"])
 
         self.assertEqual(command, "addrSet")
+
+    def test_choose_label_flow_command_prefers_direct_input_on_recipient_select(self):
+        html = """
+        <form action="M060400.do" method="post">
+          <input type="button" value="Next" onclick="regist()">
+          <input type="button" value="Direct input" onclick="submitCommand('directInput')">
+        </form>
+        """
+
+        command = _choose_label_flow_command(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060400.do",
+        )
+
+        self.assertEqual(command, "directInput")
 
     def test_build_struts_submit_renames_command_field_to_method_command(self):
         html = """
