@@ -12,13 +12,14 @@ import os
 import re
 import time
 import logging
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-m061100-print-submit"
+AUTOMATION_BUILD_ID = "2026-06-18-pdf-download-completed"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -466,6 +467,30 @@ def _build_m061100_print_payload(
     payload = dict(form["fields"])
     payload.pop("command", None)
     payload["method:print"] = ""
+    return urljoin(page_url, form.get("action") or page_url), payload
+
+
+def _extract_pdf_download_url(html: str, page_url: str) -> str:
+    match = re.search(r"""["']([^"']*DOWNLOAD\?pdf=[^"']+)["']""", html or "", flags=re.IGNORECASE)
+    if not match:
+        match = re.search(r"""(DOWNLOAD\?pdf=[^\s"'<>]+)""", html or "", flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return urljoin(page_url, unescape(match.group(1)))
+
+
+def _build_m061101_completed_payload(
+    html: str,
+    page_url: str,
+) -> tuple[str, dict[str, str]]:
+    form = _pick_form(
+        html,
+        preferred_action="M061101",
+        required_fields=["csrfToken"],
+    )
+    payload = dict(form["fields"])
+    payload.pop("command", None)
+    payload["method:regist"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 
 
@@ -1279,8 +1304,27 @@ def run_automation(
             )
             if resp.status_code >= 400:
                 raise RuntimeError(f"M061100 print submit failed: HTTP {resp.status_code}")
+            pdf_url = _extract_pdf_download_url(text, resp.url) if text else ""
+            tracking_for_name = tracking_match.group(1) if tracking_match else "NO_TRACKING"
+            if pdf_url and not pdf_bytes:
+                _log(f"🌐 requests 下載 PDF：{pdf_url}")
+                pdf_resp = req_session.get(
+                    pdf_url,
+                    headers={"Referer": resp.url},
+                    timeout=30,
+                    allow_redirects=True,
+                )
+                pdf_prefix = pdf_resp.content[:16].decode("latin1", errors="ignore")
+                _log(
+                    "  → PDF GET "
+                    f"HTTP {pdf_resp.status_code}, content-type={pdf_resp.headers.get('Content-Type', '')}, "
+                    f"bytes={len(pdf_resp.content)}, prefix={pdf_prefix!r}"
+                )
+                if pdf_resp.status_code < 400 and pdf_resp.content.startswith(b"%PDF"):
+                    pdf_bytes = pdf_resp.content
+                else:
+                    _log("⚠️ PDF 下載回應不是 PDF，保留 diagnostics 後停止")
             if pdf_bytes:
-                tracking_for_name = tracking_match.group(1) if tracking_match else "NO_TRACKING"
                 content_name = _get_excel_val(row, ["郵局內容物"]) or _get_excel_val(row, ["內容物1"]) or "Item"
                 ship_name = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
                 fname = _sanitize_filename(
@@ -1288,6 +1332,26 @@ def run_automation(
                 )
                 upload_pdf(pdf_bytes, fname, log_cb=log_cb)
                 _log(f"✅ PDF 已透過 requests 取得並上傳：{fname}")
+            if text and "M061101" in text:
+                action, completed_payload = _build_m061101_completed_payload(text, resp.url)
+                _log(f"🌐 requests 提交 M061101 Completed payload：action={action}")
+                done_resp = req_session.post(
+                    action,
+                    data=completed_payload,
+                    headers={
+                        "Referer": resp.url,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    timeout=30,
+                    allow_redirects=True,
+                )
+                done_snip = (done_resp.text or "")[:240].replace("\n", " ").replace("\r", "")
+                _log(
+                    f"  → M061101 HTTP {done_resp.status_code}, url={done_resp.url}, "
+                    f"body[:240]={done_snip}"
+                )
+                if done_resp.status_code >= 400:
+                    raise RuntimeError(f"M061101 completed submit failed: HTTP {done_resp.status_code}")
             return resp
 
         for row_idx, row in rows.iterrows():

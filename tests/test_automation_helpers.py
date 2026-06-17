@@ -14,9 +14,11 @@ from bot.automation import (
     _build_m060900_weight_payload,
     _build_m061000_register_payload,
     _build_m061100_print_payload,
+    _build_m061101_completed_payload,
     _build_struts_submit,
     _choose_label_flow_command,
     _extract_preferred_submit_command,
+    _extract_pdf_download_url,
     _extract_submit_command_for_label,
     _html_for_playwright_form,
     _parse_forms,
@@ -369,6 +371,41 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M061100.do")
         self.assertEqual(payload["csrfToken"], "token")
         self.assertEqual(payload["method:print"], "")
+        self.assertNotIn("command", payload)
+
+    def test_extract_pdf_download_url_from_m061100_html(self):
+        html = """
+        <html><body>
+          <a href="/mypage/DOWNLOAD?pdf=abc123&amp;locale=en">PDF</a>
+        </body></html>
+        """
+
+        url = _extract_pdf_download_url(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M061100.do",
+        )
+
+        self.assertEqual(
+            url,
+            "https://www.int-mypage.post.japanpost.jp/mypage/DOWNLOAD?pdf=abc123&locale=en",
+        )
+
+    def test_build_m061101_completed_payload_uses_regist(self):
+        html = """
+        <form action="/mypage/M061101.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+        </form>
+        """
+
+        action, payload = _build_m061101_completed_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M061100.do",
+        )
+
+        self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M061101.do")
+        self.assertEqual(payload["csrfToken"], "token")
+        self.assertEqual(payload["method:regist"], "")
         self.assertNotIn("command", payload)
 
     def test_run_automation_does_not_call_playwright_html_injection(self):
