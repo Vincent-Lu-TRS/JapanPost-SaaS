@@ -12,7 +12,9 @@ import os
 import re
 import time
 import logging
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
@@ -62,6 +64,75 @@ def _with_base_href(html: str, base_url: str) -> str:
 
 
 # ── 主要自動化流程 ────────────────────────────────────
+class _StrutsFormParser(HTMLParser):
+    def __init__(self, label: str):
+        super().__init__(convert_charrefs=True)
+        self.label = label.lower()
+        self.in_first_form = False
+        self.seen_form = False
+        self.form_action = ""
+        self.fields: dict[str, str] = {}
+        self.href_stack: list[str] = []
+        self.command = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs_d = {k.lower(): (v or "") for k, v in attrs}
+        tag = tag.lower()
+        if tag == "form" and not self.seen_form:
+            self.seen_form = True
+            self.in_first_form = True
+            self.form_action = attrs_d.get("action", "")
+        elif tag == "a":
+            self.href_stack.append(attrs_d.get("href", ""))
+        elif tag == "img" and self.href_stack:
+            alt = attrs_d.get("alt", "").lower()
+            if self.label and self.label in alt:
+                self.command = self.command or _command_from_href(self.href_stack[-1])
+        elif self.in_first_form and tag == "input":
+            name = attrs_d.get("name", "")
+            if name:
+                self.fields[name] = attrs_d.get("value", "")
+        elif self.in_first_form and tag == "select":
+            name = attrs_d.get("name", "")
+            if name and name not in self.fields:
+                self.fields[name] = attrs_d.get("value", "")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "form" and self.in_first_form:
+            self.in_first_form = False
+        elif tag == "a" and self.href_stack:
+            self.href_stack.pop()
+
+    def handle_data(self, data):
+        if self.label and self.href_stack and self.label in data.lower():
+            self.command = self.command or _command_from_href(self.href_stack[-1])
+
+
+def _command_from_href(href: str) -> str:
+    match = re.search(r"submitCommand\(['\"]([^'\"]+)['\"]\)", href or "")
+    return match.group(1) if match else ""
+
+
+def _extract_submit_command_for_label(html: str, label: str) -> str:
+    parser = _StrutsFormParser(label)
+    parser.feed(html or "")
+    return parser.command
+
+
+def _build_struts_submit(html: str, command: str, base_url: str) -> tuple[str, dict[str, str]]:
+    parser = _StrutsFormParser("")
+    parser.feed(html or "")
+    action = urljoin(base_url, parser.form_action or "")
+    payload = {
+        name: value
+        for name, value in parser.fields.items()
+        if name != "command"
+    }
+    payload[f"method:{command}"] = ""
+    return action, payload
+
+
 def run_automation(
     df: pd.DataFrame,
     max_rows: int | None = None,
@@ -362,7 +433,7 @@ def run_automation(
                     "path": c.path or "/",
                 })
             _log(f"  → {len(pw_cookies)} 個 cookies 提取完成")
-            return pw_cookies, r2.url, success, r2.text
+            return s, pw_cookies, r2.url, success, r2.text
 
         def attempt_login():
             _log(f"🔐 執行登入，帳號: {user[:3]}***")
@@ -418,12 +489,17 @@ def run_automation(
 
         # ── 執行登入：優先用 requests 繞過 Playwright 登入頁 crash ──────
         _login_ok = False
+        req_session = None
+        main_menu_html = ""
+        main_menu_url = "https://www.int-mypage.post.japanpost.jp/mypage/"
         try:
-            pw_cookies, post_url, req_ok, post_html = _login_via_requests()
+            req_session, pw_cookies, post_url, req_ok, post_html = _login_via_requests()
             if pw_cookies:
                 context.add_cookies(pw_cookies)
                 _log("✅ Cookies 已注入 Playwright context")
             if req_ok:
+                main_menu_html = post_html
+                main_menu_url = post_url or main_menu_url
                 # Struts login success is a server-side forward: the URL can remain M010000.do
                 # while the response body already contains the logged-in main menu.
                 page.set_content(
@@ -460,6 +536,58 @@ def run_automation(
             _log("⚠️ 登入狀態未確認，嘗試繼續...")
 
         # ── 逐筆處理訂單 ─────────────────────────────
+        def open_create_label_form_via_requests() -> bool:
+            if not req_session or not main_menu_html:
+                return False
+            command = _extract_submit_command_for_label(main_menu_html, "Create New Labels")
+            if not command:
+                _log("⚠️ requests 開啟打單頁：主選單找不到 Create New Labels command，改用 Playwright click")
+                return False
+            try:
+                action, payload = _build_struts_submit(
+                    main_menu_html,
+                    command,
+                    "https://www.int-mypage.post.japanpost.jp/mypage/",
+                )
+                _log(f"🌐 requests 開啟打單頁：command={command}, action={action}")
+                r = req_session.post(
+                    action,
+                    data=payload,
+                    headers={
+                        "Referer": main_menu_url,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    timeout=30,
+                    allow_redirects=True,
+                )
+                body_snip = r.text[:240].replace("\n", " ").replace("\r", "")
+                _log(f"  → {r.status_code}, final URL: {r.url}, body[:240]: {body_snip}")
+                looks_like_sender_form = (
+                    "M060505" in r.url
+                    or "addrToBean" in r.text
+                    or "Enter the sender" in r.text
+                    or ("input" in r.text and "Next" in r.text)
+                )
+                if r.status_code != 200 or not looks_like_sender_form:
+                    _log("⚠️ requests 開啟打單頁：回應不像寄件人表單，改用 Playwright click")
+                    return False
+                page.set_content(
+                    _with_base_href(
+                        r.text,
+                        "https://www.int-mypage.post.japanpost.jp/mypage/",
+                    ),
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+                _log(
+                    "✅ requests 已載入寄件人表單 HTML："
+                    f"url={page.url}, title={page.title()!r}"
+                )
+                return True
+            except Exception as e:
+                _log(f"⚠️ requests 開啟打單頁例外：{e}，改用 Playwright click")
+                return False
+
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
             _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
@@ -470,14 +598,15 @@ def run_automation(
                 handle_previous_label_dialog()
 
                 # ── 點擊「Create New Labels」────────────
-                safe_click(
-                    "img[alt='Create New Labels'], "
-                    "a:has-text('Create New Labels')",
-                    label="main_menu_create",
-                    critical=True,
-                )
-                page.wait_for_timeout(800)
-                handle_previous_label_dialog()  # 進入製單後再次檢查
+                if not open_create_label_form_via_requests():
+                    safe_click(
+                        "img[alt='Create New Labels'], "
+                        "a:has-text('Create New Labels')",
+                        label="main_menu_create",
+                        critical=True,
+                    )
+                    page.wait_for_timeout(800)
+                    handle_previous_label_dialog()  # 進入製單後再次檢查
 
                 # ── Step 1: 寄件人頁 → Next ───────────
                 safe_click(

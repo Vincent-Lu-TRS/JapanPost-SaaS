@@ -9,7 +9,11 @@ sys.modules.setdefault(
 sys.modules.setdefault("bot.drive", types.SimpleNamespace(upload_pdf=lambda *a, **k: None))
 sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_code=lambda *a, **k: ""))
 
-from bot.automation import _with_base_href
+from bot.automation import (
+    _build_struts_submit,
+    _extract_submit_command_for_label,
+    _with_base_href,
+)
 
 
 class AutomationHtmlTests(unittest.TestCase):
@@ -30,6 +34,39 @@ class AutomationHtmlTests(unittest.TestCase):
         result = _with_base_href(html, "https://www.int-mypage.post.japanpost.jp/mypage/")
 
         self.assertEqual(result.count("<base "), 1)
+
+    def test_extract_submit_command_from_image_alt_inside_link(self):
+        html = """
+        <form action="M010001.do" method="post">
+          <a href="javascript:submitCommand('createNewLabel')">
+            <img alt="Create New Labels" src="btn.gif">
+          </a>
+        </form>
+        """
+
+        command = _extract_submit_command_for_label(html, "Create New Labels")
+
+        self.assertEqual(command, "createNewLabel")
+
+    def test_build_struts_submit_renames_command_field_to_method_command(self):
+        html = """
+        <form action="M010001.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="">
+          <input type="hidden" name="request_locale" value="en">
+        </form>
+        """
+
+        action, payload = _build_struts_submit(
+            html,
+            "createNewLabel",
+            "https://www.int-mypage.post.japanpost.jp/mypage/",
+        )
+
+        self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M010001.do")
+        self.assertEqual(payload["method:createNewLabel"], "")
+        self.assertEqual(payload["request_locale"], "en")
+        self.assertNotIn("command", payload)
 
 
 if __name__ == "__main__":
