@@ -14,6 +14,7 @@ from bot.automation import (
     _choose_label_flow_command,
     _extract_preferred_submit_command,
     _extract_submit_command_for_label,
+    _html_for_playwright_form,
     _summarize_submit_commands,
     _with_base_href,
 )
@@ -37,6 +38,26 @@ class AutomationHtmlTests(unittest.TestCase):
         result = _with_base_href(html, "https://www.int-mypage.post.japanpost.jp/mypage/")
 
         self.assertEqual(result.count("<base "), 1)
+
+    def test_html_for_playwright_form_removes_source_scripts_and_adds_submit_stub(self):
+        html = """
+        <html>
+          <head><script src="legacy.js"></script></head>
+          <body>
+            <form action="M060505.do">
+              <input type="button" value="Next" onclick="regist()">
+            </form>
+            <script>throw new Error("legacy");</script>
+          </body>
+        </html>
+        """
+
+        result = _html_for_playwright_form(html)
+
+        self.assertNotIn("legacy.js", result)
+        self.assertNotIn('throw new Error("legacy")', result)
+        self.assertIn("function submitCommand(command)", result)
+        self.assertIn("function regist()", result)
 
     def test_extract_submit_command_from_image_alt_inside_link(self):
         html = """

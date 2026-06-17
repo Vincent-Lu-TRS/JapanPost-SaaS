@@ -64,6 +64,38 @@ def _with_base_href(html: str, base_url: str) -> str:
 
 
 # ── 主要自動化流程 ────────────────────────────────────
+def _html_for_playwright_form(html: str) -> str:
+    """Strip legacy site scripts but keep enough Struts helpers for button onclicks."""
+    sanitized = re.sub(
+        r"<script\b[^>]*>.*?</script\s*>",
+        "",
+        html or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    submit_stub = """
+<script>
+function setValue(name, value) {
+  var el = document.getElementsByName(name)[0] || document.getElementById(name);
+  if (el) el.value = value;
+}
+function submitCommand(command) {
+  var form = document.forms[0];
+  if (!form) return;
+  var input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "method:" + command;
+  input.value = "";
+  form.appendChild(input);
+  form.submit();
+}
+function regist() { submitCommand("regist"); }
+</script>
+"""
+    if re.search(r"</head\s*>", sanitized, flags=re.IGNORECASE):
+        return re.sub(r"</head\s*>", submit_stub + r"</head>", sanitized, count=1, flags=re.IGNORECASE)
+    return submit_stub + sanitized
+
+
 def _set_value_assignments(script: str) -> dict[str, str]:
     assignments: dict[str, str] = {}
     for name, value in re.findall(
@@ -216,15 +248,14 @@ def run_automation(
     rows = df if max_rows is None else df.head(max_rows)
     results: list[dict] = []
     user, pwd = _get_jp_post_creds()
+    pw_cookies = []
 
     if not user or not pwd:
         _log("❌ 未設定 JP_POST_USER / JP_POST_PASS，無法登入日本郵政")
         return results
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
+        chromium_args = [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
@@ -240,9 +271,19 @@ def run_automation(
                 "--disable-background-timer-throttling",
                 "--disable-hang-monitor",
                 "--disable-ipc-flooding-protection",
-            ],
-        )
-        context = browser.new_context(accept_downloads=True, ignore_https_errors=True)
+            ]
+
+        def launch_browser():
+            return p.chromium.launch(headless=headless, args=chromium_args)
+
+        def new_context_with_cookies():
+            new_context = browser.new_context(accept_downloads=True, ignore_https_errors=True)
+            if pw_cookies:
+                new_context.add_cookies(pw_cookies)
+            return new_context
+
+        browser = launch_browser()
+        context = new_context_with_cookies()
         page = context.new_page()
         # 以 resource_type 攔截非必要資源（比副檔名更全面），大幅降低 Chromium 記憶體
         # stylesheet/image/font/media 全擋，保留 document/script/xhr/fetch（登入表單需要）
@@ -259,7 +300,7 @@ def run_automation(
         page.route("**/*", _abort_heavy)
 
         def reset_playwright_page(reason: str):
-            nonlocal context, page
+            nonlocal browser, context, page
             _log(f"🔄 Playwright page 已關閉，重建頁面：{reason}")
             try:
                 if not page.is_closed():
@@ -269,8 +310,14 @@ def run_automation(
             try:
                 page = context.new_page()
             except Exception:
-                context = browser.new_context(accept_downloads=True, ignore_https_errors=True)
-                page = context.new_page()
+                try:
+                    context = new_context_with_cookies()
+                    page = context.new_page()
+                except Exception:
+                    _log("🔄 Chromium browser process 已關閉，重新啟動")
+                    browser = launch_browser()
+                    context = new_context_with_cookies()
+                    page = context.new_page()
             page.route("**/*", _abort_heavy)
             return page
 
@@ -284,7 +331,7 @@ def run_automation(
 
         def set_content_from_requests(html: str):
             content = _with_base_href(
-                html,
+                _html_for_playwright_form(html),
                 "https://www.int-mypage.post.japanpost.jp/mypage/",
             )
             last_exc = None
