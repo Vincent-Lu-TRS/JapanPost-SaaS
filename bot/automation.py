@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-postal-parcel-air-guard"
+AUTOMATION_BUILD_ID = "2026-06-18-postal-parcel-button-block"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -169,6 +169,24 @@ def _set_value_assignments_for_labels(html: str, labels: list[str]) -> dict[str,
     label_norms = [" ".join(label.lower().split()) for label in labels if label]
     if not label_norms:
         return assignments
+    for button_match in re.finditer(
+        r"<button\b[^>]*>.*?</button\s*>",
+        html or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        button_text = unescape(button_match.group(0))
+        button_norm = " ".join(button_text.split()).lower()
+        attr_values = [
+            " ".join(value.lower().split())
+            for _, value in re.findall(r"""(\w+)\s*=\s*['"]([^'"]*)['"]""", button_text)
+        ]
+        if (
+            any(label == attr_value for label in label_norms for attr_value in attr_values)
+            or any(label in button_norm for label in label_norms)
+        ):
+            assignments.update(_known_field_assignments(button_text))
+            if assignments:
+                return assignments
     for tag_match in re.finditer(r"<[^>]+>", html or "", flags=re.IGNORECASE | re.DOTALL):
         tag_text = unescape(tag_match.group(0))
         tag_norm = " ".join(tag_text.split()).lower()
