@@ -131,6 +131,14 @@ def _summarize_submit_commands(html: str) -> str:
     return ", ".join(commands[:12])
 
 
+def _extract_preferred_submit_command(html: str, preferred: list[str]) -> str:
+    available = re.findall(r"submitCommand\(['\"]([^'\"]+)['\"]\)", html or "")
+    for command in preferred:
+        if command in available:
+            return command
+    return ""
+
+
 def _build_struts_submit(html: str, command: str, base_url: str) -> tuple[str, dict[str, str]]:
     parser = _StrutsFormParser("")
     parser.feed(html or "")
@@ -556,13 +564,17 @@ def run_automation(
                 ["Enter the sender", "sender", "Next", "Register", "Select"]
                 for _ in range(7)
             ]
+            preferred_commands = ["addrSet", "directInput", "regist"]
             try:
                 for step_idx, labels in enumerate(command_labels, start=1):
                     command = ""
-                    for label in labels:
-                        command = _extract_submit_command_for_label(current_html, label)
-                        if command:
-                            break
+                    if step_idx > 1:
+                        command = _extract_preferred_submit_command(current_html, preferred_commands)
+                    if not command:
+                        for label in labels:
+                            command = _extract_submit_command_for_label(current_html, label)
+                            if command:
+                                break
                     if not command:
                         _log(
                             "⚠️ requests 開啟打單頁：找不到下一步 command "

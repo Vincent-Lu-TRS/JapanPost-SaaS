@@ -11,6 +11,7 @@ sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_cod
 
 from bot.automation import (
     _build_struts_submit,
+    _extract_preferred_submit_command,
     _extract_submit_command_for_label,
     _summarize_submit_commands,
     _with_base_href,
@@ -70,6 +71,17 @@ class AutomationHtmlTests(unittest.TestCase):
         summary = _summarize_submit_commands(html)
 
         self.assertEqual(summary, "onlineS, regist")
+
+    def test_extract_preferred_submit_command_uses_priority_order(self):
+        html = """
+        <a href="javascript:submitCommand('returnTop')">Top</a>
+        <input type="button" value="Register" onclick="submitCommand('regist')">
+        <input type="button" value="Set address" onclick="submitCommand('addrSet')">
+        """
+
+        command = _extract_preferred_submit_command(html, ["addrSet", "directInput", "regist"])
+
+        self.assertEqual(command, "addrSet")
 
     def test_build_struts_submit_renames_command_field_to_method_command(self):
         html = """
