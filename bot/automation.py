@@ -91,7 +91,14 @@ class _StrutsFormParser(HTMLParser):
         elif self.in_first_form and tag == "input":
             name = attrs_d.get("name", "")
             if name:
-                self.fields[name] = attrs_d.get("value", "")
+                input_type = attrs_d.get("type", "").lower()
+                if input_type in ("radio", "checkbox"):
+                    if "checked" in attrs_d:
+                        self.fields[name] = attrs_d.get("value", "")
+                    elif name not in self.fields:
+                        self.fields[name] = ""
+                else:
+                    self.fields[name] = attrs_d.get("value", "")
             label_value = attrs_d.get("value", "").lower()
             if self.label and self.label in label_value:
                 self.command = self.command or _command_from_href(attrs_d.get("onclick", ""))

@@ -103,6 +103,24 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["request_locale"], "en")
         self.assertNotIn("command", payload)
 
+    def test_build_struts_submit_uses_checked_radio_value(self):
+        html = """
+        <form action="M060105.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="radio" name="addressBookNo" value="old">
+          <input type="radio" name="addressBookNo" value="selected" checked>
+          <input type="radio" name="addressBookNo" value="later">
+        </form>
+        """
+
+        _, payload = _build_struts_submit(
+            html,
+            "addrSet",
+            "https://www.int-mypage.post.japanpost.jp/mypage/",
+        )
+
+        self.assertEqual(payload["addressBookNo"], "selected")
+
 
 if __name__ == "__main__":
     unittest.main()
