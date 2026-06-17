@@ -155,6 +155,12 @@ def _known_field_assignments(script: str) -> dict[str, str]:
     ):
         if name in known_fields:
             assignments[name] = value
+    send_type_match = re.search(r"chgSendTypeBtn\(\s*([0-9]+)\s*\)", script or "")
+    if send_type_match:
+        assignments["shippingBean.sendType"] = send_type_match.group(1)
+    trans_type_match = re.search(r"chgTransTypeBtn\(\s*([0-9]+)\s*\)", script or "")
+    if trans_type_match:
+        assignments["shippingBean.transType"] = trans_type_match.group(1)
     return assignments
 
 
