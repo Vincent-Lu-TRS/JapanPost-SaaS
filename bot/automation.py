@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-pdf-download-completed"
+AUTOMATION_BUILD_ID = "2026-06-18-results-append"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -65,6 +65,16 @@ def _row_val(row, keys: list[str]) -> str:
             if value:
                 return value
     return ""
+
+
+def _build_result_record(row, order_id: str, tracking: str) -> dict:
+    return {
+        "name": _row_val(row, ["Shipping Name", "Shipping Name_1"]),
+        "order_id": order_id,
+        "tracking": tracking,
+        "country": _row_val(row, ["收件人國家", "Country"]),
+        "date": time.strftime("%Y-%m-%d"),
+    }
 
 
 def _with_base_href(html: str, base_url: str) -> str:
@@ -1324,6 +1334,7 @@ def run_automation(
                     pdf_bytes = pdf_resp.content
                 else:
                     _log("⚠️ PDF 下載回應不是 PDF，保留 diagnostics 後停止")
+            pdf_uploaded = False
             if pdf_bytes:
                 content_name = _get_excel_val(row, ["郵局內容物"]) or _get_excel_val(row, ["內容物1"]) or "Item"
                 ship_name = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
@@ -1331,7 +1342,9 @@ def run_automation(
                     f"{content_name}_{order_id}_{tracking_for_name}_{ship_name}.pdf"
                 )
                 upload_pdf(pdf_bytes, fname, log_cb=log_cb)
+                pdf_uploaded = True
                 _log(f"✅ PDF 已透過 requests 取得並上傳：{fname}")
+            completed = False
             if text and "M061101" in text:
                 action, completed_payload = _build_m061101_completed_payload(text, resp.url)
                 _log(f"🌐 requests 提交 M061101 Completed payload：action={action}")
@@ -1352,7 +1365,13 @@ def run_automation(
                 )
                 if done_resp.status_code >= 400:
                     raise RuntimeError(f"M061101 completed submit failed: HTTP {done_resp.status_code}")
-            return resp
+                completed = True
+            return {
+                "response": resp,
+                "tracking": tracking_for_name if tracking_for_name != "NO_TRACKING" else "",
+                "pdf_uploaded": pdf_uploaded,
+                "completed": completed,
+            }
 
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
@@ -1400,20 +1419,28 @@ def run_automation(
                             main_menu_url = register_resp.url
                             _log("✅ M061000 Register Shipment 已用 requests payload submit；不回灌 Playwright HTML")
                             if "M061100" in register_resp.text and "Print after agreeing" in register_resp.text:
-                                print_resp = submit_m061100_print_via_requests(
+                                print_result = submit_m061100_print_via_requests(
                                     register_resp.text,
                                     register_resp.url,
                                     row,
                                     order_id,
                                 )
+                                print_resp = print_result["response"]
                                 if "text/html" in print_resp.headers.get("Content-Type", ""):
                                     main_menu_html = print_resp.text
                                     main_menu_url = print_resp.url
                                 _log("✅ M061100 Print 已用 requests payload submit；不回灌 Playwright HTML")
-                _log(
-                    "⏸️ 已停止於 M061100 requests submit 後；"
-                    "若尚未取得 PDF，請依 M061100 diagnostics 繼續遷移下載/完成頁"
-                )
+                                if print_result.get("tracking") and print_result.get("pdf_uploaded"):
+                                    tracking = print_result["tracking"]
+                                    results.append(_build_result_record(row, order_id, tracking))
+                                    _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
+                if results:
+                    _log("✅ requests 打單流程已完成並回傳結果")
+                else:
+                    _log(
+                        "⏸️ requests 流程已停止但未取得完整結果；"
+                        "請依最後一段 diagnostics 繼續排查"
+                    )
                 return results
 
                 # ── Step 3: 運送方式分流 ──────────────

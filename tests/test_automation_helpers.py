@@ -15,6 +15,7 @@ from bot.automation import (
     _build_m061000_register_payload,
     _build_m061100_print_payload,
     _build_m061101_completed_payload,
+    _build_result_record,
     _build_struts_submit,
     _choose_label_flow_command,
     _extract_preferred_submit_command,
@@ -407,6 +408,20 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["csrfToken"], "token")
         self.assertEqual(payload["method:regist"], "")
         self.assertNotIn("command", payload)
+
+    def test_build_result_record_uses_tracking_and_order_fields(self):
+        row = {
+            "Shipping Name": "Klas Eklof",
+            "收件人國家": "UNITED STATES OF AMERICA",
+        }
+
+        result = _build_result_record(row, "WhoWhy1566", "EN521206692JP")
+
+        self.assertEqual(result["name"], "Klas Eklof")
+        self.assertEqual(result["order_id"], "WhoWhy1566")
+        self.assertEqual(result["tracking"], "EN521206692JP")
+        self.assertEqual(result["country"], "UNITED STATES OF AMERICA")
+        self.assertRegex(result["date"], r"^\d{4}-\d{2}-\d{2}$")
 
     def test_run_automation_does_not_call_playwright_html_injection(self):
         from pathlib import Path
