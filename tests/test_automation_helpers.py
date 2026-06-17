@@ -10,6 +10,7 @@ sys.modules.setdefault("bot.drive", types.SimpleNamespace(upload_pdf=lambda *a, 
 sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_code=lambda *a, **k: ""))
 
 from bot.automation import (
+    _build_m060800_item_payload,
     _build_struts_submit,
     _choose_label_flow_command,
     _extract_preferred_submit_command,
@@ -257,6 +258,47 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertIn("itemBean.pkg", summary)
         self.assertIn("shippingBean.pkgTotalPrice.value", summary)
         self.assertIn("selects=itemBean.curUnit", summary)
+
+    def test_build_m060800_item_payload_fills_first_item_and_uses_regist(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="parcel">
+          <input type="hidden" name="shippingBean.transType" value="air">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <input name="shippingBean.pkgTotalPrice.value" value="">
+          <input type="checkbox" name="ShippingBean.danger" value="1">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "內容物1": "T-shirt",
+            "申告金額1": "12.5",
+            "數量1": "2",
+            "訂單合計申告金額(JPY)": "1800",
+        }
+
+        action, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+            row,
+            is_eu=False,
+        )
+
+        self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do")
+        self.assertEqual(payload["csrfToken"], "token")
+        self.assertEqual(payload["shippingBean.sendType"], "parcel")
+        self.assertEqual(payload["itemBean.pkg"], "T-shirt")
+        self.assertEqual(payload["itemBean.cost.value"], "12.5")
+        self.assertEqual(payload["itemBean.num.value"], "2")
+        self.assertEqual(payload["itemBean.curUnit"], "USD")
+        self.assertEqual(payload["shippingBean.pkgTotalPrice.value"], "1800")
+        self.assertEqual(payload["ShippingBean.danger"], "1")
+        self.assertEqual(payload["method:regist"], "")
+        self.assertNotIn("command", payload)
 
     def test_run_automation_does_not_call_playwright_html_injection(self):
         from pathlib import Path

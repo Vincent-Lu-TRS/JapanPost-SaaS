@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-addr-submit-diagnostics"
+AUTOMATION_BUILD_ID = "2026-06-18-m060800-item-submit"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -52,6 +52,17 @@ def _get_excel_val(row: pd.Series, keys: list[str]) -> str:
             v = _clean(row[k])
             if v:
                 return v
+    return ""
+
+
+def _row_val(row, keys: list[str]) -> str:
+    if hasattr(row, "index"):
+        return _get_excel_val(row, keys)
+    if hasattr(row, "get"):
+        for key in keys:
+            value = _clean(row.get(key, ""))
+            if value:
+                return value
     return ""
 
 
@@ -263,7 +274,7 @@ class _HtmlFormParser(HTMLParser):
             input_type = attrs_d.get("type", "text").lower()
             if input_type in {"button", "submit", "image", "reset"}:
                 return
-            if input_type in {"checkbox", "radio"} and "checked" not in attrs_d:
+            if input_type == "radio" and "checked" not in attrs_d:
                 return
             self._form["fields"][name] = attrs_d.get("value", "")
         elif tag == "select":
@@ -359,6 +370,56 @@ def _summarize_forms(html: str, max_forms: int = 4, max_fields: int = 8) -> str:
             f"fields={field_summary or '-'} selects={select_summary or '-'}"
         )
     return " | ".join(parts) if parts else "(no forms)"
+
+
+def _build_m060800_item_payload(
+    html: str,
+    page_url: str,
+    row,
+    is_eu: bool = False,
+    hs_code: str = "",
+) -> tuple[str, dict[str, str]]:
+    form = _pick_form(
+        html,
+        preferred_action="M060800",
+        required_fields=["itemBean.pkg"],
+    )
+    payload = dict(form["fields"])
+    payload.pop("command", None)
+
+    pkg = _row_val(row, ["內容物1", "郵局內容物"])
+    cost = _row_val(row, ["申告金額1"]) or "0"
+    raw_num = _row_val(row, ["數量1"]) or "1"
+    try:
+        num = str(int(float(raw_num)))
+    except Exception:
+        num = "1"
+
+    payload.update({
+        "itemBean.pkg": pkg,
+        "itemBean.cost.value": cost,
+        "itemBean.num.value": num,
+        "itemBean.curUnit": _select_option_value(
+            form,
+            "itemBean.curUnit",
+            "USD",
+            fallback=payload.get("itemBean.curUnit", "USD") or "USD",
+        ),
+    })
+    total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
+    if total_jpy:
+        payload["shippingBean.pkgTotalPrice.value"] = total_jpy
+    if "ShippingBean.danger" in form["fields"]:
+        payload["ShippingBean.danger"] = form["fields"].get("ShippingBean.danger") or "1"
+    if "shippingBean.danger" in form["fields"]:
+        payload["shippingBean.danger"] = form["fields"].get("shippingBean.danger") or "1"
+    if is_eu and hs_code:
+        for field_name in ("itemBean.hsCode", "itemBean.hsCode.value"):
+            if field_name in form["fields"]:
+                payload[field_name] = hs_code
+                break
+    payload["method:regist"] = ""
+    return urljoin(page_url, form.get("action") or page_url), payload
 
 
 def run_automation(
@@ -981,6 +1042,62 @@ def run_automation(
                 _log("⚠️ M060505 回應仍停留在收件人頁，可能有欄位驗證錯誤")
             return resp, country_raw, country_code
 
+        def submit_m060800_item_via_requests(html: str, page_url: str, row: pd.Series, is_eu: bool):
+            hs_code = ""
+            if is_eu:
+                pkg_for_hs = _row_val(row, ["內容物1", "郵局內容物"])
+                if pkg_for_hs:
+                    hs_code = predict_hs_code(pkg_for_hs, log_cb=log_cb) or ""
+            action, payload = _build_m060800_item_payload(
+                html,
+                page_url,
+                row,
+                is_eu=is_eu,
+                hs_code=hs_code,
+            )
+            _log(
+                "🌐 requests 提交 M060800 內容物/運送 payload："
+                f"action={action}, pkg={payload.get('itemBean.pkg', '')}, "
+                f"cost={payload.get('itemBean.cost.value', '')}, "
+                f"num={payload.get('itemBean.num.value', '')}"
+            )
+            resp = req_session.post(
+                action,
+                data=payload,
+                headers={
+                    "Referer": page_url,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=30,
+                allow_redirects=True,
+            )
+            body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
+            _log(f"  → M060800 HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+            marker_summary = ", ".join(
+                marker
+                for marker in [
+                    "addrToBean",
+                    "itemBean",
+                    "shippingBean",
+                    "M060800",
+                    "M060900",
+                    "M061000",
+                    "Register Shipment",
+                    "totalWeight",
+                    "DOWNLOAD?pdf=",
+                ]
+                if marker in resp.text
+            ) or "-"
+            _log(
+                "🔎 M060800 response diagnostics："
+                f"commands={_summarize_submit_commands(resp.text) or '-'}; "
+                f"markers={marker_summary}; "
+                f"forms={_summarize_forms(resp.text)}"
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(f"M060800 item submit failed: HTTP {resp.status_code}")
+            return resp
+
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
             _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
@@ -999,9 +1116,20 @@ def run_automation(
                 main_menu_html = addr_resp.text
                 main_menu_url = addr_resp.url
                 _log("✅ M060505 收件人表單已用 requests payload submit；不回灌 Playwright HTML")
+                is_eu = (country_code == "EU")
+                if "itemBean" in addr_resp.text and "M060800" in addr_resp.text:
+                    item_resp = submit_m060800_item_via_requests(
+                        addr_resp.text,
+                        addr_resp.url,
+                        row,
+                        is_eu,
+                    )
+                    main_menu_html = item_resp.text
+                    main_menu_url = item_resp.url
+                    _log("✅ M060800 內容物/運送表單已用 requests payload submit；不回灌 Playwright HTML")
                 _log(
-                    "⏸️ 已停止於 M060505 requests submit 後；"
-                    "後續運送方式/內容物/PDF 流程需再遷移為 requests 後才能繼續"
+                    "⏸️ 已停止於 M060800 requests submit 後；"
+                    "後續重量/確認/PDF 流程需再遷移為 requests 後才能繼續"
                 )
                 return results
 
