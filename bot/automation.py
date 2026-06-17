@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-m060900-weight-submit"
+AUTOMATION_BUILD_ID = "2026-06-18-m061000-register-submit"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -435,6 +435,21 @@ def _build_m060900_weight_payload(
     payload = dict(form["fields"])
     payload.pop("command", None)
     payload["shippingBean.totalWeight.value"] = _clean(weight_grams) or "100"
+    payload["method:regist"] = ""
+    return urljoin(page_url, form.get("action") or page_url), payload
+
+
+def _build_m061000_register_payload(
+    html: str,
+    page_url: str,
+) -> tuple[str, dict[str, str]]:
+    form = _pick_form(
+        html,
+        preferred_action="M061000",
+        required_fields=["csrfToken"],
+    )
+    payload = dict(form["fields"])
+    payload.pop("command", None)
     payload["method:regist"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 
@@ -1161,6 +1176,48 @@ def run_automation(
                 raise RuntimeError(f"M060900 weight submit failed: HTTP {resp.status_code}")
             return resp
 
+        def submit_m061000_register_via_requests(html: str, page_url: str):
+            action, payload = _build_m061000_register_payload(
+                html,
+                page_url,
+            )
+            _log(f"🌐 requests 提交 M061000 Register Shipment payload：action={action}")
+            resp = req_session.post(
+                action,
+                data=payload,
+                headers={
+                    "Referer": page_url,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=30,
+                allow_redirects=True,
+            )
+            body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
+            _log(f"  → M061000 HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+            tracking_match = re.search(r"([A-Z]{2}\d{9}JP)", resp.text or "")
+            marker_summary = ", ".join(
+                marker
+                for marker in [
+                    "M061000",
+                    "M061100",
+                    "Print after agreeing",
+                    "DOWNLOAD?pdf=",
+                    "tracking",
+                    "Completed",
+                ]
+                if marker in resp.text
+            ) or "-"
+            _log(
+                "🔎 M061000 response diagnostics："
+                f"commands={_summarize_submit_commands(resp.text) or '-'}; "
+                f"markers={marker_summary}; "
+                f"tracking={tracking_match.group(1) if tracking_match else '-'}; "
+                f"forms={_summarize_forms(resp.text)}"
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(f"M061000 register submit failed: HTTP {resp.status_code}")
+            return resp
+
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
             _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
@@ -1198,9 +1255,17 @@ def run_automation(
                         main_menu_html = weight_resp.text
                         main_menu_url = weight_resp.url
                         _log("✅ M060900 重量表單已用 requests payload submit；不回灌 Playwright HTML")
+                        if "M061000" in weight_resp.text and "Register Shipment" in weight_resp.text:
+                            register_resp = submit_m061000_register_via_requests(
+                                weight_resp.text,
+                                weight_resp.url,
+                            )
+                            main_menu_html = register_resp.text
+                            main_menu_url = register_resp.url
+                            _log("✅ M061000 Register Shipment 已用 requests payload submit；不回灌 Playwright HTML")
                 _log(
-                    "⏸️ 已停止於 M060900 requests submit 後；"
-                    "後續確認/PDF 流程需再遷移為 requests 後才能繼續"
+                    "⏸️ 已停止於 M061000 requests submit 後；"
+                    "後續 PDF/完成頁流程需再遷移為 requests 後才能繼續"
                 )
                 return results
 
