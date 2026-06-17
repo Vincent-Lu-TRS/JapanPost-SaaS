@@ -11,6 +11,7 @@ sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_cod
 
 from bot.automation import (
     _build_m060800_item_payload,
+    _build_m060900_weight_payload,
     _build_struts_submit,
     _choose_label_flow_command,
     _extract_preferred_submit_command,
@@ -297,6 +298,38 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["itemBean.curUnit"], "USD")
         self.assertEqual(payload["shippingBean.pkgTotalPrice.value"], "1800")
         self.assertEqual(payload["ShippingBean.danger"], "1")
+        self.assertEqual(payload["method:regist"], "")
+        self.assertNotIn("command", payload)
+
+    def test_build_m060900_weight_payload_sets_total_weight_and_uses_regist(self):
+        html = """
+        <form action="/mypage/M060900.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input name="emsNo.value" value="">
+          <input name="shippingBean.sendDate.YMD" value="2026/06/18">
+          <input name="shippingBean.num.value" value="1">
+          <input name="shippingBean.totalNum.value" value="1">
+          <input name="shippingBean.totalWeight.value" value="">
+          <input name="shippingBean.cost.value" value="23.41">
+          <select name="shippingBean.sendDate.YMD">
+            <option value="2026/06/18" selected>2026/06/18</option>
+          </select>
+        </form>
+        """
+
+        action, payload = _build_m060900_weight_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            weight_grams="100",
+        )
+
+        self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do")
+        self.assertEqual(payload["csrfToken"], "token")
+        self.assertEqual(payload["shippingBean.sendDate.YMD"], "2026/06/18")
+        self.assertEqual(payload["shippingBean.num.value"], "1")
+        self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
+        self.assertEqual(payload["shippingBean.cost.value"], "23.41")
         self.assertEqual(payload["method:regist"], "")
         self.assertNotIn("command", payload)
 
