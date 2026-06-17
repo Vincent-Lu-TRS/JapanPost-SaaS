@@ -258,6 +258,52 @@ def run_automation(
                 pass  # route 可能已被解析
         page.route("**/*", _abort_heavy)
 
+        def reset_playwright_page(reason: str):
+            nonlocal context, page
+            _log(f"🔄 Playwright page 已關閉，重建頁面：{reason}")
+            try:
+                if not page.is_closed():
+                    page.close()
+            except Exception:
+                pass
+            try:
+                page = context.new_page()
+            except Exception:
+                context = browser.new_context(accept_downloads=True, ignore_https_errors=True)
+                page = context.new_page()
+            page.route("**/*", _abort_heavy)
+            return page
+
+        def ensure_playwright_page(reason: str):
+            try:
+                if page.is_closed():
+                    reset_playwright_page(reason)
+            except Exception:
+                reset_playwright_page(reason)
+            return page
+
+        def set_content_from_requests(html: str):
+            content = _with_base_href(
+                html,
+                "https://www.int-mypage.post.japanpost.jp/mypage/",
+            )
+            last_exc = None
+            for attempt in range(2):
+                ensure_playwright_page(f"set_content attempt {attempt + 1}")
+                try:
+                    page.set_content(
+                        content,
+                        wait_until="domcontentloaded",
+                        timeout=15000,
+                    )
+                    return
+                except Exception as e:
+                    last_exc = e
+                    if "Target page, context or browser has been closed" not in str(e):
+                        raise
+                    reset_playwright_page("set_content target closed")
+            raise last_exc
+
         # ── 診斷：驗證瀏覽器基礎導航能力 ────────────────
         try:
             _log(f"🔍 Chromium 版本: {browser.version}")
@@ -557,14 +603,7 @@ def run_automation(
                 main_menu_url = post_url or main_menu_url
                 # Struts login success is a server-side forward: the URL can remain M010000.do
                 # while the response body already contains the logged-in main menu.
-                page.set_content(
-                    _with_base_href(
-                        post_html,
-                        "https://www.int-mypage.post.japanpost.jp/mypage/",
-                    ),
-                    wait_until="domcontentloaded",
-                    timeout=15000,
-                )
+                set_content_from_requests(post_html)
                 page.wait_for_timeout(500)
                 create_count = page.locator(
                     "img[alt='Create New Labels'], a:has-text('Create New Labels')"
@@ -643,14 +682,7 @@ def run_automation(
                         or "#M060505_" in r.text
                     )
                     if looks_like_sender_form:
-                        page.set_content(
-                            _with_base_href(
-                                r.text,
-                                "https://www.int-mypage.post.japanpost.jp/mypage/",
-                            ),
-                            wait_until="domcontentloaded",
-                            timeout=15000,
-                        )
+                        set_content_from_requests(r.text)
                         _log(
                             "✅ requests 已載入寄件人表單 HTML："
                             f"url={page.url}, title={page.title()!r}"
