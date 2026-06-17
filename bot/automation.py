@@ -72,6 +72,16 @@ def _html_for_playwright_form(html: str) -> str:
         html or "",
         flags=re.IGNORECASE | re.DOTALL,
     )
+    if "M060505_addrToBean_nam" in sanitized:
+        forms = re.findall(
+            r"<form\b[^>]*>.*?</form\s*>",
+            sanitized,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for form in forms:
+            if "M060505_addrToBean_nam" in form:
+                sanitized = f"<html><head><title>Japan Post Form</title></head><body>{form}</body></html>"
+                break
     submit_stub = """
 <script>
 function setValue(name, value) {
@@ -343,6 +353,7 @@ def run_automation(
                         wait_until="domcontentloaded",
                         timeout=15000,
                     )
+                    page.locator("body").count()
                     return
                 except Exception as e:
                     last_exc = e
@@ -350,6 +361,12 @@ def run_automation(
                         raise
                     reset_playwright_page("set_content target closed")
             raise last_exc
+
+        def safe_page_url() -> str:
+            try:
+                return page.url
+            except Exception:
+                return "<closed>"
 
         # ── 診斷：驗證瀏覽器基礎導航能力 ────────────────
         try:
@@ -657,7 +674,7 @@ def run_automation(
                 ).count()
                 _log(
                     "🧭 Playwright 已載入登入後主選單 HTML："
-                    f"url={page.url}, title={page.title()!r}, create_buttons={create_count}"
+                    f"url={safe_page_url()}, create_buttons={create_count}"
                 )
                 if create_count == 0:
                     body_snip = page.locator("body").inner_text(timeout=3000)[:300]
@@ -732,7 +749,7 @@ def run_automation(
                         set_content_from_requests(r.text)
                         _log(
                             "✅ requests 已載入寄件人表單 HTML："
-                            f"url={page.url}, title={page.title()!r}"
+                            f"url={safe_page_url()}"
                         )
                         return True
                     current_html = r.text

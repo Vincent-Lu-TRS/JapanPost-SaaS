@@ -59,6 +59,24 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertIn("function submitCommand(command)", result)
         self.assertIn("function regist()", result)
 
+    def test_html_for_playwright_form_keeps_only_target_recipient_form(self):
+        html = """
+        <html><body>
+          <form action="unrelated.do">
+            <input name="noise" value="1">
+          </form>
+          <form action="M060505.do">
+            <input id="M060505_addrToBean_nam" name="addrToBean.nam">
+          </form>
+        </body></html>
+        """
+
+        result = _html_for_playwright_form(html)
+
+        self.assertIn("M060505_addrToBean_nam", result)
+        self.assertIn('action="M060505.do"', result)
+        self.assertNotIn('name="noise"', result)
+
     def test_extract_submit_command_from_image_alt_inside_link(self):
         html = """
         <form action="M010001.do" method="post">
