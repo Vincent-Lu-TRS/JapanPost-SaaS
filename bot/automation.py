@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-17-8fcdd4d-no-page-title"
+AUTOMATION_BUILD_ID = "2026-06-18-addr-submit-diagnostics"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -343,6 +343,22 @@ def _select_option_value(form: dict, field_name: str, label: str, fallback: str 
         if label_norm and (label_norm == text_norm or label_norm in text_norm):
             return value
     return fallback
+
+
+def _summarize_forms(html: str, max_forms: int = 4, max_fields: int = 8) -> str:
+    parts: list[str] = []
+    for idx, form in enumerate(_parse_forms(html)[:max_forms], start=1):
+        fields = list(form.get("fields", {}).keys())
+        selects = list(form.get("selects", {}).keys())
+        field_summary = ",".join(fields[:max_fields])
+        if len(fields) > max_fields:
+            field_summary += ",..."
+        select_summary = ",".join(selects[:max_fields])
+        parts.append(
+            f"#{idx} action={form.get('action', '')} "
+            f"fields={field_summary or '-'} selects={select_summary or '-'}"
+        )
+    return " | ".join(parts) if parts else "(no forms)"
 
 
 def run_automation(
@@ -940,6 +956,25 @@ def run_automation(
             )
             body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
             _log(f"  → addrToBean HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+            marker_summary = ", ".join(
+                marker
+                for marker in [
+                    "addrToBean",
+                    "itemBean",
+                    "shippingBean",
+                    "M060505",
+                    "M060800",
+                    "International ePacket light",
+                    "POSTAL PARCEL",
+                ]
+                if marker in resp.text
+            ) or "-"
+            _log(
+                "🔎 addrToBean response diagnostics："
+                f"commands={_summarize_submit_commands(resp.text) or '-'}; "
+                f"markers={marker_summary}; "
+                f"forms={_summarize_forms(resp.text)}"
+            )
             if resp.status_code >= 400:
                 raise RuntimeError(f"M060505 addrToBean submit failed: HTTP {resp.status_code}")
             if "addrToBean" in resp.text and "error" in resp.text[:5000].lower():

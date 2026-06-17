@@ -18,6 +18,7 @@ from bot.automation import (
     _parse_forms,
     _pick_form,
     _select_option_value,
+    _summarize_forms,
     _summarize_submit_commands,
     _with_base_href,
 )
@@ -239,6 +240,23 @@ class AutomationHtmlTests(unittest.TestCase):
             _select_option_value(form, "addrToBean.couCode", "United States"),
             "US",
         )
+
+    def test_summarize_forms_lists_actions_and_key_fields(self):
+        html = """
+        <form action="M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input name="itemBean.pkg" value="">
+          <input name="shippingBean.pkgTotalPrice.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+
+        summary = _summarize_forms(html)
+
+        self.assertIn("M060800.do", summary)
+        self.assertIn("itemBean.pkg", summary)
+        self.assertIn("shippingBean.pkgTotalPrice.value", summary)
+        self.assertIn("selects=itemBean.curUnit", summary)
 
     def test_run_automation_does_not_call_playwright_html_injection(self):
         from pathlib import Path
