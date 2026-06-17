@@ -68,11 +68,13 @@ def _row_val(row, keys: list[str]) -> str:
 
 
 def _build_result_record(row, order_id: str, tracking: str) -> dict:
+    country_raw = _row_val(row, ["收件人國家", "Country"])
     return {
         "name": _row_val(row, ["Shipping Name", "Shipping Name_1"]),
         "order_id": order_id,
         "tracking": tracking,
-        "country": _row_val(row, ["收件人國家", "Country"]),
+        "country": country_raw,
+        "country_raw": country_raw,
         "date": time.strftime("%Y-%m-%d"),
     }
 

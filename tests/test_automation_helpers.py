@@ -421,6 +421,7 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(result["order_id"], "WhoWhy1566")
         self.assertEqual(result["tracking"], "EN521206692JP")
         self.assertEqual(result["country"], "UNITED STATES OF AMERICA")
+        self.assertEqual(result["country_raw"], "UNITED STATES OF AMERICA")
         self.assertRegex(result["date"], r"^\d{4}-\d{2}-\d{2}$")
 
     def test_run_automation_does_not_call_playwright_html_injection(self):
