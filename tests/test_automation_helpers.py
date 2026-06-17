@@ -306,6 +306,44 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["method:regist"], "")
         self.assertNotIn("command", payload)
 
+    def test_build_m060800_item_payload_selects_postal_parcel_air_for_international_parcel(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="ems">
+          <input type="hidden" name="shippingBean.transType" value="ems-default">
+          <input type="hidden" name="shippingBean.pkgType" value="">
+          <input type="button" value="Postal Parcel"
+            onclick="setValue('shippingBean.sendType', 'parcel');setValue('shippingBean.pkgType', 'gift');">
+          <input type="button" value="Air Packet"
+            onclick="setValue('shippingBean.transType', 'air-packet');">
+          <input type="button" value="Air"
+            onclick="setValue('shippingBean.transType', 'air');">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "國際小包",
+            "內容物1": "Groundsheet",
+            "申告金額1": "23.41",
+            "數量1": "1",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+            row,
+            is_eu=False,
+        )
+
+        self.assertEqual(payload["shippingBean.sendType"], "parcel")
+        self.assertEqual(payload["shippingBean.transType"], "air")
+        self.assertEqual(payload["shippingBean.pkgType"], "gift")
+
     def test_build_m060900_weight_payload_sets_total_weight_and_uses_regist(self):
         html = """
         <form action="/mypage/M060900.do" method="post">

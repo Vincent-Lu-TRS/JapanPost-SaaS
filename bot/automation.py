@@ -142,6 +142,54 @@ def _set_value_assignments(script: str) -> dict[str, str]:
     return assignments
 
 
+def _set_value_assignments_for_labels(html: str, labels: list[str]) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    label_norms = [" ".join(label.lower().split()) for label in labels if label]
+    if not label_norms:
+        return assignments
+    for tag_match in re.finditer(r"<[^>]+>", html or "", flags=re.IGNORECASE | re.DOTALL):
+        tag_text = unescape(tag_match.group(0))
+        tag_norm = " ".join(tag_text.split()).lower()
+        attr_values = [
+            " ".join(value.lower().split())
+            for _, value in re.findall(r"""(\w+)\s*=\s*['"]([^'"]*)['"]""", tag_text)
+        ]
+        if any(label == attr_value for label in label_norms for attr_value in attr_values):
+            assignments.update(_set_value_assignments(tag_text))
+            if assignments:
+                return assignments
+        if any(len(label) > 3 and label in tag_norm for label in label_norms):
+            assignments.update(_set_value_assignments(tag_text))
+            if assignments:
+                return assignments
+
+    for label in label_norms:
+        if len(label) <= 3:
+            continue
+        for label_match in re.finditer(re.escape(label), (html or "").lower()):
+            start = max(0, label_match.start() - 800)
+            end = min(len(html or ""), label_match.end() + 800)
+            assignments.update(_set_value_assignments((html or "")[start:end]))
+            if assignments:
+                return assignments
+    return assignments
+
+
+def _shipping_profile(row) -> str:
+    shipping = _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)"])
+    normalized = shipping.lower()
+    if "epacket" in normalized or "eパケット" in normalized:
+        return "epacket_light"
+    if (
+        "國際小包" in shipping
+        or "国際小包" in shipping
+        or "postal parcel" in normalized
+        or "international parcel" in normalized
+    ):
+        return "postal_parcel_air"
+    return ""
+
+
 class _StrutsFormParser(HTMLParser):
     def __init__(self, label: str):
         super().__init__(convert_charrefs=True)
@@ -419,6 +467,12 @@ def _build_m060800_item_payload(
             fallback=payload.get("itemBean.curUnit", "USD") or "USD",
         ),
     })
+    profile = _shipping_profile(row)
+    if profile == "postal_parcel_air":
+        payload.update(_set_value_assignments_for_labels(html, ["Postal Parcel", "POSTAL PARCEL"]))
+        payload.update(_set_value_assignments_for_labels(html, ["Air"]))
+    elif profile == "epacket_light":
+        payload.update(_set_value_assignments_for_labels(html, ["International ePacket light", "ePacket light"]))
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         payload["shippingBean.pkgTotalPrice.value"] = total_jpy
@@ -1143,7 +1197,10 @@ def run_automation(
                 "🌐 requests 提交 M060800 內容物/運送 payload："
                 f"action={action}, pkg={payload.get('itemBean.pkg', '')}, "
                 f"cost={payload.get('itemBean.cost.value', '')}, "
-                f"num={payload.get('itemBean.num.value', '')}"
+                f"num={payload.get('itemBean.num.value', '')}, "
+                f"sendType={payload.get('shippingBean.sendType', '')}, "
+                f"transType={payload.get('shippingBean.transType', '')}, "
+                f"pkgType={payload.get('shippingBean.pkgType', '')}"
             )
             resp = req_session.post(
                 action,
