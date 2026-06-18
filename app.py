@@ -209,10 +209,11 @@ def _render_main_app():
 
     df_pending = pd.DataFrame()
     pending_count = 0
+    pending_logs: list[str] = []
     with st.spinner("讀取 Google Sheets 待打單資料..."):
         try:
             from bot.sheets import get_pending_orders
-            df_pending = get_pending_orders()
+            df_pending = get_pending_orders(log_cb=pending_logs.append)
             pending_count = len(df_pending)
         except Exception as e:
             st.warning(f"無法讀取 Google Sheets：{e}")
@@ -291,6 +292,9 @@ def _render_main_app():
                 ] if c in df_pending.columns]
                 if preview_cols:
                     st.dataframe(df_pending[preview_cols].head(10), hide_index=True)
+        elif pending_logs:
+            with st.expander("🔎 待製單讀取診斷"):
+                st.code("\n".join(pending_logs), language="text")
 
 
 # ══════════════════════════════════════════════════════
