@@ -352,7 +352,7 @@ class AutomationHtmlTests(unittest.TestCase):
           <input name="itemBean.pkg" value="Pillow TRSN9842">
           <input name="itemBean.cost.value" value="1.55">
           <input name="itemBean.num.value" value="1">
-          <select name="itemBean.curUnit"><option value="USD" selected>USD</option></select>
+          <select name="itemBean.curUnit"><option value="JPY">JPY</option><option value="USD">USD</option></select>
           <select name="itemBean.couCd"><option value=""></option><option value="AF">AFGHANISTAN</option></select>
           <input name="itemBean.hsCode.value" value="940490">
           <input type="checkbox" name="ShippingBean.danger" value="1">
@@ -374,11 +374,54 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["itemBean.pkg"], "")
         self.assertEqual(payload["itemBean.cost.value"], "")
         self.assertEqual(payload["itemBean.num.value"], "")
-        self.assertEqual(payload["itemBean.curUnit"], "")
+        self.assertEqual(payload["itemBean.curUnit"], "JPY")
         self.assertEqual(payload["itemBean.couCd"], "")
         self.assertEqual(payload["itemBean.hsCode.value"], "")
         self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
+
+    def test_build_m060800_next_payload_preserves_browser_default_selects(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="5">
+          <input type="hidden" name="shippingBean.transType" value="1">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <input type="hidden" name="shippingBean.itemList[0].no.value" value="-1">
+          <input type="hidden" name="cost.value" value="1.55">
+          <input type="hidden" name="curUnit" value="USD">
+          <input type="hidden" name="printCurUnit" value="USD">
+          <input name="itemCount" value="1">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <input name="itemBean.weight.value" value="">
+          <select name="itemBean.curUnit">
+            <option value="JPY">JPY</option>
+            <option value="USD">USD</option>
+          </select>
+          <select name="itemBean.couCd">
+            <option value="" selected></option>
+            <option value="AF">AFGHANISTAN</option>
+          </select>
+          <input name="itemBean.hsCode" value="">
+        </form>
+        """
+
+        _, payload = _build_m060800_next_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            {},
+        )
+
+        self.assertEqual(payload["itemBean.pkg"], "")
+        self.assertEqual(payload["itemBean.cost.value"], "")
+        self.assertEqual(payload["itemBean.num.value"], "")
+        self.assertEqual(payload["itemBean.weight.value"], "")
+        self.assertEqual(payload["itemBean.curUnit"], "JPY")
+        self.assertEqual(payload["itemBean.couCd"], "")
+        self.assertEqual(payload["itemBean.hsCode"], "")
 
     def test_build_m060800_item_payload_selects_postal_parcel_air_for_international_parcel(self):
         html = """

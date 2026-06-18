@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-item-warning-cookie"
+AUTOMATION_BUILD_ID = "2026-06-18-m060800-next-select-default"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -694,20 +694,26 @@ def _build_m060800_next_payload(
     )
     payload = dict(form["fields"])
     payload.pop("command", None)
-    for field_name in list(payload):
-        if field_name.startswith("itemBean."):
-            payload[field_name] = ""
     for field_name in (
         "itemBean.pkg",
         "itemBean.cost.value",
         "itemBean.num.value",
-        "itemBean.curUnit",
-        "itemBean.couCd",
+        "itemBean.weight.value",
+        "itemBean.curUnitEtc",
         "itemBean.hsCode",
         "itemBean.hsCode.value",
     ):
         if field_name in payload:
             payload[field_name] = ""
+    if "itemBean.curUnit" in payload:
+        payload["itemBean.curUnit"] = _select_option_value(
+            form,
+            "itemBean.curUnit",
+            "JPY",
+            fallback=payload.get("itemBean.curUnit", "JPY") or "JPY",
+        )
+    if "itemBean.couCd" in payload:
+        payload["itemBean.couCd"] = ""
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         payload["shippingBean.pkgTotalPrice.value"] = total_jpy
