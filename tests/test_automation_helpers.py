@@ -266,6 +266,21 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(form["fields"]["shippingBean.senderInstruction"], "1")
         self.assertEqual(form["fields"]["shippingBean.fwTransType"], "air")
 
+    def test_parse_forms_keeps_blank_first_select_option_as_browser_default(self):
+        html = """
+        <form action="M060800.do" method="post">
+          <select name="itemBean.couCd">
+            <option value=""></option>
+            <option value="AF">AFGHANISTAN</option>
+            <option value="JP">JAPAN</option>
+          </select>
+        </form>
+        """
+
+        form = _parse_forms(html)[0]
+
+        self.assertEqual(form["fields"]["itemBean.couCd"], "")
+
     def test_summarize_forms_lists_actions_and_key_fields(self):
         html = """
         <form action="M060800.do" method="post">
@@ -336,6 +351,8 @@ class AutomationHtmlTests(unittest.TestCase):
           <input name="itemBean.pkg" value="Pillow TRSN9842">
           <input name="itemBean.cost.value" value="1.55">
           <input name="itemBean.num.value" value="1">
+          <select name="itemBean.curUnit"><option value="USD" selected>USD</option></select>
+          <select name="itemBean.couCd"><option value=""></option><option value="AF">AFGHANISTAN</option></select>
           <input name="itemBean.hsCode.value" value="940490">
           <input type="checkbox" name="ShippingBean.danger" value="1">
         </form>
@@ -356,6 +373,8 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["itemBean.pkg"], "")
         self.assertEqual(payload["itemBean.cost.value"], "")
         self.assertEqual(payload["itemBean.num.value"], "")
+        self.assertEqual(payload["itemBean.curUnit"], "")
+        self.assertEqual(payload["itemBean.couCd"], "")
         self.assertEqual(payload["itemBean.hsCode.value"], "")
         self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")

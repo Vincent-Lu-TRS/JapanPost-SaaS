@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-stable-ui-clear-next-item"
+AUTOMATION_BUILD_ID = "2026-06-18-select-default-and-next-cleanup"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -413,7 +413,10 @@ class _HtmlFormParser(HTMLParser):
         elif tag == "option" and self._select_name:
             self._option_value = attrs_d.get("value", "")
             self._option_text = []
-            if "selected" in attrs_d or not self._form["fields"].get(self._select_name):
+            select_seen = self._form.setdefault("_select_seen", {})
+            first_option = not select_seen.get(self._select_name)
+            select_seen[self._select_name] = True
+            if "selected" in attrs_d or first_option:
                 self._form["fields"][self._select_name] = self._option_value
         elif tag == "textarea":
             self._textarea_name = attrs_d.get("name", "")
@@ -428,6 +431,7 @@ class _HtmlFormParser(HTMLParser):
     def handle_endtag(self, tag):
         tag = tag.lower()
         if tag == "form" and self._form is not None:
+            self._form.pop("_select_seen", None)
             self.forms.append(self._form)
             self._form = None
         elif (
@@ -678,10 +682,15 @@ def _build_m060800_next_payload(
     )
     payload = dict(form["fields"])
     payload.pop("command", None)
+    for field_name in list(payload):
+        if field_name.startswith("itemBean."):
+            payload[field_name] = ""
     for field_name in (
         "itemBean.pkg",
         "itemBean.cost.value",
         "itemBean.num.value",
+        "itemBean.curUnit",
+        "itemBean.couCd",
         "itemBean.hsCode",
         "itemBean.hsCode.value",
     ):
