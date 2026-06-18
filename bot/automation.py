@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-m060900-invoice-count"
+AUTOMATION_BUILD_ID = "2026-06-18-returntop-recovery"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -1157,10 +1157,47 @@ def run_automation(
         label_form_html = ""
         label_form_url = ""
 
-        def open_create_label_form_via_requests() -> bool:
-            nonlocal label_form_html, label_form_url
+        def return_to_main_menu_via_requests() -> bool:
+            nonlocal main_menu_html, main_menu_url
             if not req_session or not main_menu_html:
                 return False
+            if (
+                "Create New Labels" in main_menu_html
+                or _extract_submit_command_for_label(main_menu_html, "Create New Labels")
+            ):
+                return True
+            command = _extract_preferred_submit_command(main_menu_html, ["returnTop"])
+            if not command:
+                return False
+            action, payload = _build_struts_submit(
+                main_menu_html,
+                command,
+                "https://www.int-mypage.post.japanpost.jp/mypage/",
+            )
+            _log(f"↩️ requests 回主選單：command={command}, action={action}")
+            r = req_session.post(
+                action,
+                data=payload,
+                headers={
+                    "Referer": main_menu_url,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=30,
+                allow_redirects=True,
+            )
+            body_snip = r.text[:240].replace("\n", " ").replace("\r", "")
+            _log(f"  → returnTop HTTP {r.status_code}, url={r.url}, body[:240]={body_snip}")
+            if r.status_code >= 400:
+                return False
+            main_menu_html = r.text
+            main_menu_url = r.url
+            return True
+
+        def open_create_label_form_via_requests() -> bool:
+            nonlocal label_form_html, label_form_url, main_menu_html, main_menu_url
+            if not req_session or not main_menu_html:
+                return False
+            return_to_main_menu_via_requests()
             current_html = main_menu_html
             referer_url = main_menu_url
             command_labels = [["Create New Labels"]] + [
@@ -1424,7 +1461,8 @@ def run_automation(
             )
             _log(
                 "🌐 requests 提交 M060900 重量 payload："
-                f"action={action}, weight={payload.get('shippingBean.totalWeight.value', '')}"
+                f"action={action}, weight={payload.get('shippingBean.totalWeight.value', '')}, "
+                f"invPrintNum={payload.get('shippingBean.invPrintNum.value', '')}"
             )
             resp = req_session.post(
                 action,
