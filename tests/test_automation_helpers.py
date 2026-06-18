@@ -23,6 +23,7 @@ from bot.automation import (
     _extract_pdf_download_url,
     _extract_submit_command_for_label,
     _html_for_playwright_form,
+    _has_m060800_item_book_warning,
     _iter_content_items,
     _parse_forms,
     _pick_form,
@@ -798,6 +799,21 @@ class AutomationHtmlTests(unittest.TestCase):
         """
 
         self.assertIn("Please enter the total weight", _summarize_error_text(html))
+
+    def test_detects_m060800_item_book_warning_markup(self):
+        html = """
+        <html><body>
+          <div id="itemWarnDialog">
+            Number of items in content list exceeds allowable limit.
+            Edited data is not saved in content list.
+            <input id="warningMsgOff" type="checkbox">
+          </div>
+          <script>if (!isStopAlert('ItemBookAlert')) $('#itemWarnDialog').dialog('open');</script>
+        </body></html>
+        """
+
+        self.assertTrue(_has_m060800_item_book_warning(html))
+        self.assertFalse(_has_m060800_item_book_warning("<html><body>M060800</body></html>"))
 
     def test_build_m060900_weight_payload_sets_total_weight_and_uses_regist(self):
         html = """

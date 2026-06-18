@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-select-default-and-next-cleanup"
+AUTOMATION_BUILD_ID = "2026-06-18-item-warning-cookie"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -548,6 +548,18 @@ def _summarize_error_text(html: str, limit: int = 6) -> str:
         if len(found) >= limit:
             break
     return " | ".join(found) if found else "-"
+
+
+def _has_m060800_item_book_warning(html: str) -> bool:
+    text = html or ""
+    warning_markers = (
+        "itemWarnDialog",
+        "ItemBookAlert",
+        "warningMsgOff",
+        "Number of items in content list exceeds allowable limit",
+        "Edited data is not saved in content list",
+    )
+    return any(marker in text for marker in warning_markers)
 
 
 def _row_item_value(row, base_name: str, item_index: int) -> str:
@@ -1104,7 +1116,7 @@ def run_automation(
                 csrf = m.group(1)
                 _log(f"  → CSRF: {csrf[:10]}...")
             else:
-                _log("  ⚠️ 找不到 CSRF token")
+                _log("  ℹ️ login page has no CSRF token; continuing because this flow accepts a blank token")
 
             # Step 2: POST 登入表單
             # submitCommand('login') 的實際行為：把 command 欄位名改為 method:login
@@ -1507,6 +1519,17 @@ def run_automation(
                 )
                 if resp.status_code >= 400:
                     raise RuntimeError(f"M060800 item submit failed: HTTP {resp.status_code}")
+                if _has_m060800_item_book_warning(resp.text):
+                    req_session.cookies.set(
+                        "stopedAlert",
+                        ",ItemBookAlert",
+                        domain="www.int-mypage.post.japanpost.jp",
+                        path="/",
+                    )
+                    _log(
+                        "✅ 偵測到 M060800 內容物 Warning Message；已等價套用 "
+                        "Don't show this again（stopedAlert=ItemBookAlert）"
+                    )
                 current_html = resp.text
                 current_url = resp.url
 
