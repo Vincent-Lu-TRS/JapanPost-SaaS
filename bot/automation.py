@@ -844,6 +844,9 @@ def _build_m060900_weight_payload(
     payload = dict(form["fields"])
     payload.pop("command", None)
     payload["shippingBean.totalWeight.value"] = _clean(weight_grams) or "100"
+    for count_field in ("shippingBean.num.value", "shippingBean.totalNum.value"):
+        if count_field in payload and not _clean(payload.get(count_field, "")):
+            payload[count_field] = "1"
     if "shippingBean.invPrintNum.value" in form.get("selects", {}):
         payload["shippingBean.invPrintNum.value"] = (
             _first_non_empty_option_value(form, "shippingBean.invPrintNum.value", "1") or "1"
@@ -1706,6 +1709,9 @@ def run_automation(
             _log(
                 "🌐 requests 提交 M060900 重量 payload："
                 f"action={action}, weight={payload.get('shippingBean.totalWeight.value', '')}, "
+                f"num={payload.get('shippingBean.num.value', '')}, "
+                f"totalNum={payload.get('shippingBean.totalNum.value', '')}, "
+                f"cost={payload.get('shippingBean.cost.value', '')}, "
                 f"command={payload.get('command', '')}, "
                 f"invPrintNum={payload.get('shippingBean.invPrintNum.value', '')}"
             )
