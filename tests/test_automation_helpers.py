@@ -547,6 +547,48 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendType"], "5")
         self.assertEqual(payload["shippingBean.transType"], "1")
 
+    def test_build_m060800_item_payload_defaults_postal_air_when_only_trans_function_exists(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="0">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <button type="button" id="ID_SENDTYPE_BTN_PAR" onclick="chgSendTypeBtn(5);">
+            <img src="images/mypage_en/sendType/PAR_W.PNG" id="ID_SENDTYPE_IMG_PAR" alt="POSTAL PARCEL">
+          </button>
+          <script>
+            function chgTransTypeBtn(transTypeValue) {
+              setValue('shippingBean.transType', transTypeValue);
+              if (transTypeValue == 1) {
+                document.getElementById('ID_TRANSTYPE_IMG_AIR').src = "images/mypage_en/transType/AIR.PNG";
+              }
+            }
+          </script>
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "國際小包",
+            "內容物1": "Frying Pan",
+            "申告金額1": "1.56",
+            "數量1": "1",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+            row,
+            is_eu=False,
+        )
+
+        self.assertEqual(payload["shippingBean.sendType"], "5")
+        self.assertEqual(payload["shippingBean.transType"], "1")
+
     def test_build_m060800_item_payload_selects_epacket_light_for_epacket(self):
         html = """
         <form action="/mypage/M060800.do" method="post">

@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-loop-main-menu-refresh"
+AUTOMATION_BUILD_ID = "2026-06-18-postal-air-default"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -543,6 +543,8 @@ def _build_m060800_item_payload(
         air_assignments = _set_value_assignments_for_labels(html, ["Air"])
         if "shippingBean.transType" in air_assignments:
             payload["shippingBean.transType"] = air_assignments["shippingBean.transType"]
+        elif "chgTransTypeBtn" in html:
+            payload["shippingBean.transType"] = "1"
         if payload.get("shippingBean.sendType", "") == "0" or not payload.get("shippingBean.transType", ""):
             raise RuntimeError(
                 "Unable to resolve Postal Parcel/Air payload from M060800 HTML; "
