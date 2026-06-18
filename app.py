@@ -75,8 +75,7 @@ def _get_job(email: str) -> dict | None:
     return _JOB_REGISTRY.get(email)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _load_pending_orders_cached(refresh_token: int) -> tuple[pd.DataFrame, list[str]]:
+def _load_pending_orders() -> tuple[pd.DataFrame, list[str]]:
     from bot.sheets import get_pending_orders
 
     pending_logs: list[str] = []
@@ -224,20 +223,17 @@ def _render_main_app():
     df_pending = pd.DataFrame()
     pending_count = 0
     pending_logs: list[str] = []
-    st.session_state.setdefault("pending_refresh_token", 0)
     if is_running:
         df_pending = st.session_state.get("last_pending_df", pd.DataFrame())
         pending_logs = st.session_state.get("last_pending_logs", [])
         pending_count = len(df_pending)
     else:
         if job and job.pop("pending_refresh_needed", False):
-            st.session_state.pending_refresh_token += 1
-            _load_pending_orders_cached.clear()
+            st.session_state.pop("last_pending_df", None)
+            st.session_state.pop("last_pending_logs", None)
         with st.spinner("讀取 Google Sheets 待打單資料..."):
             try:
-                df_pending, pending_logs = _load_pending_orders_cached(
-                    st.session_state.pending_refresh_token
-                )
+                df_pending, pending_logs = _load_pending_orders()
                 pending_count = len(df_pending)
                 st.session_state.last_pending_df = df_pending
                 st.session_state.last_pending_logs = pending_logs
@@ -257,11 +253,11 @@ def _render_main_app():
         else:
             st.dataframe(df_pending.head(20), hide_index=True, width="stretch")
         if pending_logs:
-            with st.expander("🔎 待製單讀取診斷"):
+            with st.expander("🔎 待製單讀取診斷", expanded=True):
                 st.code("\n".join(pending_logs), language="text")
     elif pending_logs:
         st.info("目前沒有待製單資料。")
-        with st.expander("🔎 待製單讀取診斷"):
+        with st.expander("🔎 待製單讀取診斷", expanded=True):
             st.code("\n".join(pending_logs), language="text")
     else:
         st.info("目前沒有待製單資料。")
@@ -283,8 +279,8 @@ def _render_main_app():
         st.divider()
         st.markdown("**執行設定**")
         if not is_running and st.button("🔁 重新讀取待製單", width="stretch"):
-            st.session_state.pending_refresh_token += 1
-            _load_pending_orders_cached.clear()
+            st.session_state.pop("last_pending_df", None)
+            st.session_state.pop("last_pending_logs", None)
             st.rerun()
         max_rows_input = st.number_input(
             "最多處理筆數（0 = 全部）",

@@ -156,6 +156,16 @@ def _filter_pending_orders_dataframe(
             "🔎 基礎篩選排除 "
             f"{len(excluded)} 筆：{_format_sample(excluded[order_id_col].tolist())}"
         )
+        reason_masks = [
+            ("狀態不是未打單排除", df[status_col] != "未打單"),
+            ("申告金額空白排除", df[amount_col] == ""),
+            ("製單檢核 TRUE 排除", df[check_col].str.upper() == "TRUE"),
+            ("Shipping Name 空白排除", df[shipname_col] == ""),
+        ]
+        for label, reason_mask in reason_masks:
+            rows = df[reason_mask]
+            if not rows.empty:
+                _log(f"   - {label}：{_format_sample(rows[order_id_col].tolist())}")
     df_filtered = df[base_mask].copy()
     _log(f"📋 篩選後（未打單+必填）：{len(df_filtered)} 筆")
 

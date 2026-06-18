@@ -151,6 +151,36 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(result.empty)
         self.assertTrue(any("已在目標表完成而排除" in line and "WhoWhy-Test6" in line for line in logs))
 
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_logs_base_exclusion_reasons(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test6",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "TRUE",
+                    "Shipping Name": "Ioannis Zervos",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test8",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+            ]
+        )
+        logs = []
+
+        result = _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
+
+        self.assertTrue(result.empty)
+        self.assertTrue(any("製單檢核 TRUE 排除" in line and "WhoWhy-Test6" in line for line in logs))
+        self.assertTrue(any("Shipping Name 空白排除" in line and "WhoWhy-Test8" in line for line in logs))
+
 
 if __name__ == "__main__":
     unittest.main()
