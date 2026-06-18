@@ -30,6 +30,7 @@ from bot.automation import (
     _select_option_value,
     _summarize_error_text,
     _summarize_forms,
+    _summarize_m060800_item_state,
     _summarize_submit_commands,
     _with_base_href,
 )
@@ -422,6 +423,47 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["itemBean.curUnit"], "JPY")
         self.assertEqual(payload["itemBean.couCd"], "")
         self.assertEqual(payload["itemBean.hsCode"], "")
+
+    def test_build_m060800_next_payload_preserves_duplicate_item_list_fields(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="5">
+          <input type="hidden" name="shippingBean.transType" value="1">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <input type="hidden" name="shippingBean.itemList[0].no.value" value="-1">
+          <input type="hidden" name="cost.value" value="1.55">
+          <input type="hidden" name="curUnit" value="USD">
+          <input type="hidden" name="printCurUnit" value="USD">
+          <input name="itemCount" value="1">
+          <input type="hidden" name="shippingBean.itemList[1].no.value" value="-2">
+          <input type="hidden" name="cost.value" value="2.55">
+          <input type="hidden" name="curUnit" value="USD">
+          <input type="hidden" name="printCurUnit" value="USD">
+          <input name="itemCount" value="1">
+          <input name="shippingBean.pkgTotalPrice.value" value="">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="JPY">JPY</option><option value="USD">USD</option></select>
+          <select name="itemBean.couCd"><option value="" selected></option><option value="AF">AFGHANISTAN</option></select>
+          <input type="checkbox" name="ShippingBean.danger" value="1">
+        </form>
+        """
+
+        _, payload = _build_m060800_next_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            {},
+        )
+
+        self.assertEqual(payload["ShippingBean.danger"], "1")
+        self.assertEqual([name for name, _ in payload].count("cost.value"), 2)
+        self.assertEqual([name for name, _ in payload].count("curUnit"), 2)
+        self.assertEqual([name for name, _ in payload].count("printCurUnit"), 2)
+        self.assertEqual([name for name, _ in payload].count("itemCount"), 2)
+        self.assertIn("items=[0, 1]", _summarize_m060800_item_state(html))
 
     def test_build_m060800_item_payload_selects_postal_parcel_air_for_international_parcel(self):
         html = """

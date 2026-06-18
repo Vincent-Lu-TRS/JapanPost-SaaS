@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-m060800-next-select-default"
+AUTOMATION_BUILD_ID = "2026-06-18-m060800-ordered-payload"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -388,6 +388,7 @@ class _HtmlFormParser(HTMLParser):
                 "action": attrs_d.get("action", ""),
                 "method": attrs_d.get("method", "get").lower(),
                 "fields": {},
+                "pairs": [],
                 "selects": {},
             }
             return
@@ -403,8 +404,11 @@ class _HtmlFormParser(HTMLParser):
             if input_type == "radio":
                 if "checked" in attrs_d or name not in self._form["fields"]:
                     self._form["fields"][name] = attrs_d.get("value", "")
+                if "checked" in attrs_d:
+                    self._form["pairs"].append((name, attrs_d.get("value", "")))
                 return
             self._form["fields"][name] = attrs_d.get("value", "")
+            self._form["pairs"].append((name, attrs_d.get("value", "")))
         elif tag == "select":
             self._select_name = attrs_d.get("name", "")
             if self._select_name:
@@ -447,13 +451,63 @@ class _HtmlFormParser(HTMLParser):
             self._option_value = None
             self._option_text = []
         elif tag == "select":
+            if self._form is not None and self._select_name:
+                self._form["pairs"].append((
+                    self._select_name,
+                    self._form["fields"].get(self._select_name, ""),
+                ))
             self._select_name = None
             self._option_value = None
             self._option_text = []
         elif tag == "textarea" and self._form is not None and self._textarea_name:
             self._form["fields"][self._textarea_name] = "".join(self._textarea_text)
+            self._form["pairs"].append((self._textarea_name, "".join(self._textarea_text)))
             self._textarea_name = None
             self._textarea_text = []
+
+
+class _OrderedPayload(list):
+    def get(self, key: str, default: str = "") -> str:
+        for name, value in reversed(self):
+            if name == key:
+                return value
+        return default
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            value = self.get(key, None)
+            if value is None:
+                raise KeyError(key)
+            return value
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        if isinstance(key, str):
+            _ordered_payload_set(self, key, value)
+            return
+        super().__setitem__(key, value)
+
+    def __contains__(self, key):
+        if isinstance(key, str):
+            return any(name == key for name, _ in self)
+        return super().__contains__(key)
+
+
+def _ordered_payload_set(payload, key: str, value: str) -> None:
+    if isinstance(payload, dict):
+        payload[key] = value
+        return
+    found = False
+    for idx, (name, _) in enumerate(payload):
+        if name == key:
+            payload[idx] = (name, value)
+            found = True
+    if not found:
+        payload.append((key, value))
+
+
+def _ordered_payload_remove(payload: list[tuple[str, str]], key: str) -> None:
+    payload[:] = [(name, value) for name, value in payload if name != key]
 
 
 def _parse_forms(html: str) -> list[dict]:
@@ -510,6 +564,45 @@ def _summarize_forms(html: str, max_forms: int = 4, max_fields: int = 8) -> str:
             f"fields={field_summary or '-'} selects={select_summary or '-'}"
         )
     return " | ".join(parts) if parts else "(no forms)"
+
+
+def _summarize_m060800_item_state(html: str) -> str:
+    try:
+        form = _pick_form(html, preferred_action="M060800", required_fields=["shippingBean.sendType"])
+    except Exception:
+        return "items=-; repeats=-; pending=-"
+    pairs = form.get("pairs") or list(form.get("fields", {}).items())
+    field_counts: dict[str, int] = {}
+    for name, _ in pairs:
+        field_counts[name] = field_counts.get(name, 0) + 1
+    item_indexes = sorted({
+        int(match.group(1))
+        for match in re.finditer(r"shippingBean\.itemList\[(\d+)\]", html or "")
+    })
+    repeat_names = [
+        f"{name}:{field_counts[name]}"
+        for name in ("cost.value", "curUnit", "printCurUnit", "itemCount")
+        if field_counts.get(name, 0) > 1
+    ]
+    pending_names = [
+        "itemBean.pkg",
+        "itemBean.cost.value",
+        "itemBean.num.value",
+        "itemBean.curUnit",
+        "itemBean.couCd",
+        "itemBean.hsCode",
+        "itemBean.hsCode.value",
+    ]
+    pending = ",".join(
+        f"{name}={_clean(form['fields'].get(name, '')) or '-'}"
+        for name in pending_names
+        if name in form.get("fields", {})
+    )
+    return (
+        f"items={item_indexes or '-'}; "
+        f"repeats={','.join(repeat_names) or '-'}; "
+        f"pending={pending or '-'}"
+    )
 
 
 def _summarize_error_text(html: str, limit: int = 6) -> str:
@@ -668,9 +761,13 @@ def _build_m060800_item_payload(
             )
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
-        payload["shippingBean.pkgTotalPrice.value"] = total_jpy
+        _ordered_payload_set(payload, "shippingBean.pkgTotalPrice.value", total_jpy)
     if "ShippingBean.danger" in form["fields"]:
-        payload["ShippingBean.danger"] = form["fields"].get("ShippingBean.danger") or "1"
+        _ordered_payload_set(
+            payload,
+            "ShippingBean.danger",
+            form["fields"].get("ShippingBean.danger") or "1",
+        )
     if "shippingBean.danger" in form["fields"]:
         payload["shippingBean.danger"] = form["fields"].get("shippingBean.danger") or "1"
     if is_eu and hs_code:
@@ -686,14 +783,14 @@ def _build_m060800_next_payload(
     html: str,
     page_url: str,
     row,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, _OrderedPayload]:
     form = _pick_form(
         html,
         preferred_action="M060800",
         required_fields=["shippingBean.sendType"],
     )
-    payload = dict(form["fields"])
-    payload.pop("command", None)
+    payload = _OrderedPayload(form.get("pairs") or list(form["fields"].items()))
+    _ordered_payload_remove(payload, "command")
     for field_name in (
         "itemBean.pkg",
         "itemBean.cost.value",
@@ -704,25 +801,33 @@ def _build_m060800_next_payload(
         "itemBean.hsCode.value",
     ):
         if field_name in payload:
-            payload[field_name] = ""
+            _ordered_payload_set(payload, field_name, "")
     if "itemBean.curUnit" in payload:
-        payload["itemBean.curUnit"] = _select_option_value(
-            form,
+        _ordered_payload_set(
+            payload,
             "itemBean.curUnit",
-            "JPY",
-            fallback=payload.get("itemBean.curUnit", "JPY") or "JPY",
+            _select_option_value(
+                form,
+                "itemBean.curUnit",
+                "JPY",
+                fallback=payload.get("itemBean.curUnit", "JPY") or "JPY",
+            ),
         )
     if "itemBean.couCd" in payload:
-        payload["itemBean.couCd"] = ""
+        _ordered_payload_set(payload, "itemBean.couCd", "")
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         payload["shippingBean.pkgTotalPrice.value"] = total_jpy
     if "ShippingBean.danger" in form["fields"]:
         payload["ShippingBean.danger"] = form["fields"].get("ShippingBean.danger") or "1"
     if "shippingBean.danger" in form["fields"]:
-        payload["shippingBean.danger"] = form["fields"].get("shippingBean.danger") or "1"
-    payload["command"] = "regist"
-    payload["method:regist"] = ""
+        _ordered_payload_set(
+            payload,
+            "shippingBean.danger",
+            form["fields"].get("shippingBean.danger") or "1",
+        )
+    payload.append(("command", "regist"))
+    payload.append(("method:regist", ""))
     return urljoin(page_url, form.get("action") or page_url), payload
 
 
@@ -1521,7 +1626,8 @@ def run_automation(
                     "🔎 M060800 response diagnostics："
                     f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                     f"markers={marker_summary}; "
-                    f"forms={_summarize_forms(resp.text)}"
+                    f"forms={_summarize_forms(resp.text)}; "
+                    f"state={_summarize_m060800_item_state(resp.text)}"
                 )
                 if resp.status_code >= 400:
                     raise RuntimeError(f"M060800 item submit failed: HTTP {resp.status_code}")
@@ -1584,6 +1690,7 @@ def run_automation(
                     f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                     f"markers={marker_summary}; "
                     f"forms={_summarize_forms(resp.text)}; "
+                    f"state={_summarize_m060800_item_state(resp.text)}; "
                     f"errors={_summarize_error_text(resp.text)}"
                 )
                 if resp.status_code >= 400:
