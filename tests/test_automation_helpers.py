@@ -926,7 +926,7 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendDate.YMD"], "2026/06/18")
         self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
         self.assertEqual(payload["shippingBean.cost.value"], "23.41")
-        self.assertEqual(payload["command"], "regist")
+        self.assertNotIn("command", payload)
         self.assertEqual(payload["method:regist"], "")
 
     def test_build_m060900_weight_payload_sets_invoice_print_num_when_select_exists(self):
@@ -951,7 +951,7 @@ class AutomationHtmlTests(unittest.TestCase):
 
         self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
         self.assertEqual(payload["shippingBean.invPrintNum.value"], "1")
-        self.assertEqual(payload["command"], "regist")
+        self.assertNotIn("command", payload)
         self.assertEqual(payload["method:regist"], "")
 
     def test_build_m060900_weight_payload_preserves_blank_postal_parcel_counts_and_weight(self):
@@ -975,7 +975,7 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.num.value"], "")
         self.assertEqual(payload["shippingBean.totalNum.value"], "")
         self.assertEqual(payload["shippingBean.totalWeight.value"], "")
-        self.assertEqual(payload["command"], "regist")
+        self.assertNotIn("command", payload)
         self.assertEqual(payload["method:regist"], "")
 
     def test_build_m060900_weight_payload_selects_economical_failed_delivery_route(self):
@@ -1004,6 +1004,34 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.fwTransType"], "4")
         self.assertEqual(payload["shippingBean.invPrintType"], "0")
         self.assertEqual(payload["shippingBean.noCm"], "true")
+        self.assertNotIn("command", payload)
+        self.assertEqual(payload["method:regist"], "")
+
+    def test_build_m060900_weight_payload_omits_disabled_insurance_checkbox_value(self):
+        html = """
+        <form action="/mypage/M060900.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input name="shippingBean.num.value" value="">
+          <input name="shippingBean.totalNum.value" value="">
+          <input name="shippingBean.totalWeight.value" value="">
+          <input type="checkbox" name="shippingBean.withInsurance" value="true" disabled>
+          <input type="hidden" name="__checkbox_shippingBean.withInsurance" value="true">
+          <input name="shippingBean.damges" value="">
+          <input name="shippingBean.insure.value" value="">
+        </form>
+        """
+
+        _, payload = _build_m060900_weight_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do",
+            weight_grams="100",
+        )
+
+        self.assertNotIn("shippingBean.withInsurance", payload)
+        self.assertEqual(payload["__checkbox_shippingBean.withInsurance"], "true")
+        self.assertEqual(payload["shippingBean.damges"], "")
+        self.assertEqual(payload["shippingBean.insure.value"], "")
         self.assertEqual(payload["method:regist"], "")
 
     def test_build_m061000_register_payload_uses_regist(self):

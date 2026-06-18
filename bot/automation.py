@@ -843,6 +843,7 @@ def _build_m060900_weight_payload(
     )
     payload = dict(form["fields"])
     payload.pop("command", None)
+    payload.pop("shippingBean.withInsurance", None)
     is_postal_parcel_info = (
         "shippingBean.num.value" in payload
         and "shippingBean.totalNum.value" in payload
@@ -855,7 +856,6 @@ def _build_m060900_weight_payload(
         payload["shippingBean.invPrintNum.value"] = (
             _first_non_empty_option_value(form, "shippingBean.invPrintNum.value", "1") or "1"
         )
-    payload["command"] = "regist"
     payload["method:regist"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 
@@ -1727,7 +1727,7 @@ def run_automation(
                 action,
                 data=payload,
                 headers={
-                    "Referer": page_url,
+                    "Referer": action,
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
                 timeout=30,
