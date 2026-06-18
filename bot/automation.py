@@ -534,8 +534,14 @@ def _build_m060800_item_payload(
     })
     profile = _shipping_profile(row)
     if profile == "postal_parcel_air":
-        payload.update(_set_value_assignments_for_labels(html, ["Postal Parcel", "POSTAL PARCEL"]))
-        payload.update(_set_value_assignments_for_labels(html, ["Air"]))
+        send_type_assignments = _set_value_assignments_for_labels(html, ["Postal Parcel", "POSTAL PARCEL"])
+        if "shippingBean.sendType" in send_type_assignments:
+            payload["shippingBean.sendType"] = send_type_assignments["shippingBean.sendType"]
+        if "shippingBean.pkgType" in send_type_assignments:
+            payload["shippingBean.pkgType"] = send_type_assignments["shippingBean.pkgType"]
+        air_assignments = _set_value_assignments_for_labels(html, ["Air"])
+        if "shippingBean.transType" in air_assignments:
+            payload["shippingBean.transType"] = air_assignments["shippingBean.transType"]
         if payload.get("shippingBean.sendType", "") == "0" or not payload.get("shippingBean.transType", ""):
             raise RuntimeError(
                 "Unable to resolve Postal Parcel/Air payload from M060800 HTML; "
