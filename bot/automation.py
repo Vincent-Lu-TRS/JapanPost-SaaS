@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-expacket-guard"
+AUTOMATION_BUILD_ID = "2026-06-18-m060800-confirm-next"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -504,6 +504,7 @@ def _build_m060800_item_payload(
     row,
     is_eu: bool = False,
     hs_code: str = "",
+    submit_command: str = "itemAdd2",
 ) -> tuple[str, dict[str, str]]:
     form = _pick_form(
         html,
@@ -577,6 +578,29 @@ def _build_m060800_item_payload(
             if field_name in form["fields"]:
                 payload[field_name] = hs_code
                 break
+    payload[f"method:{submit_command}"] = ""
+    return urljoin(page_url, form.get("action") or page_url), payload
+
+
+def _build_m060800_next_payload(
+    html: str,
+    page_url: str,
+    row,
+) -> tuple[str, dict[str, str]]:
+    form = _pick_form(
+        html,
+        preferred_action="M060800",
+        required_fields=["shippingBean.sendType"],
+    )
+    payload = dict(form["fields"])
+    payload.pop("command", None)
+    total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
+    if total_jpy:
+        payload["shippingBean.pkgTotalPrice.value"] = total_jpy
+    if "ShippingBean.danger" in form["fields"]:
+        payload["ShippingBean.danger"] = form["fields"].get("ShippingBean.danger") or "1"
+    if "shippingBean.danger" in form["fields"]:
+        payload["shippingBean.danger"] = form["fields"].get("shippingBean.danger") or "1"
     payload["method:regist"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 
@@ -1284,9 +1308,10 @@ def run_automation(
                 row,
                 is_eu=is_eu,
                 hs_code=hs_code,
+                submit_command="itemAdd2",
             )
             _log(
-                "🌐 requests 提交 M060800 內容物/運送 payload："
+                "🌐 requests 提交 M060800 Confirm 內容物 payload："
                 f"action={action}, pkg={payload.get('itemBean.pkg', '')}, "
                 f"cost={payload.get('itemBean.cost.value', '')}, "
                 f"num={payload.get('itemBean.num.value', '')}, "
@@ -1330,6 +1355,51 @@ def run_automation(
             )
             if resp.status_code >= 400:
                 raise RuntimeError(f"M060800 item submit failed: HTTP {resp.status_code}")
+            if "M060800" in resp.text and "M060900" not in resp.text:
+                next_action, next_payload = _build_m060800_next_payload(resp.text, resp.url, row)
+                _log(
+                    "🌐 requests 提交 M060800 Next payload："
+                    f"action={next_action}, "
+                    f"sendType={next_payload.get('shippingBean.sendType', '')}, "
+                    f"transType={next_payload.get('shippingBean.transType', '')}, "
+                    f"pkgType={next_payload.get('shippingBean.pkgType', '')}, "
+                    f"totalJpy={next_payload.get('shippingBean.pkgTotalPrice.value', '')}"
+                )
+                resp = req_session.post(
+                    next_action,
+                    data=next_payload,
+                    headers={
+                        "Referer": resp.url,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    timeout=30,
+                    allow_redirects=True,
+                )
+                body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
+                _log(f"  → M060800 Next HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+                marker_summary = ", ".join(
+                    marker
+                    for marker in [
+                        "addrToBean",
+                        "itemBean",
+                        "shippingBean",
+                        "M060800",
+                        "M060900",
+                        "M061000",
+                        "Register Shipment",
+                        "totalWeight",
+                        "DOWNLOAD?pdf=",
+                    ]
+                    if marker in resp.text
+                ) or "-"
+                _log(
+                    "🔎 M060800 Next response diagnostics："
+                    f"commands={_summarize_submit_commands(resp.text) or '-'}; "
+                    f"markers={marker_summary}; "
+                    f"forms={_summarize_forms(resp.text)}"
+                )
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"M060800 next submit failed: HTTP {resp.status_code}")
             return resp
 
         def submit_m060900_weight_via_requests(html: str, page_url: str):

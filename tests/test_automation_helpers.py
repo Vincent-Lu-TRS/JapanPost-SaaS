@@ -11,6 +11,7 @@ sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_cod
 
 from bot.automation import (
     _build_m060800_item_payload,
+    _build_m060800_next_payload,
     _build_m060900_weight_payload,
     _build_m061000_register_payload,
     _build_m061100_print_payload,
@@ -265,7 +266,7 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertIn("shippingBean.pkgTotalPrice.value", summary)
         self.assertIn("selects=itemBean.curUnit", summary)
 
-    def test_build_m060800_item_payload_fills_first_item_and_uses_regist(self):
+    def test_build_m060800_item_payload_fills_first_item_and_uses_item_add(self):
         html = """
         <form action="/mypage/M060800.do" method="post">
           <input type="hidden" name="command" value="">
@@ -302,6 +303,34 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["itemBean.num.value"], "2")
         self.assertEqual(payload["itemBean.curUnit"], "USD")
         self.assertEqual(payload["shippingBean.pkgTotalPrice.value"], "1800")
+        self.assertEqual(payload["ShippingBean.danger"], "1")
+        self.assertEqual(payload["method:itemAdd2"], "")
+        self.assertNotIn("command", payload)
+
+    def test_build_m060800_next_payload_uses_regist_after_item_confirm(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token2">
+          <input type="hidden" name="shippingBean.sendType" value="8">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <input name="shippingBean.pkgTotalPrice.value" value="">
+          <input type="checkbox" name="ShippingBean.danger" value="1">
+        </form>
+        """
+        row = {"訂單合計申告金額(JPY)": "1846"}
+
+        action, payload = _build_m060800_next_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            row,
+        )
+
+        self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do")
+        self.assertEqual(payload["csrfToken"], "token2")
+        self.assertEqual(payload["shippingBean.sendType"], "8")
+        self.assertEqual(payload["shippingBean.pkgTotalPrice.value"], "1846")
         self.assertEqual(payload["ShippingBean.danger"], "1")
         self.assertEqual(payload["method:regist"], "")
         self.assertNotIn("command", payload)
