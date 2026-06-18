@@ -907,8 +907,6 @@ class AutomationHtmlTests(unittest.TestCase):
           <input type="hidden" name="csrfToken" value="token">
           <input name="emsNo.value" value="">
           <input name="shippingBean.sendDate.YMD" value="2026/06/18">
-          <input name="shippingBean.num.value" value="1">
-          <input name="shippingBean.totalNum.value" value="1">
           <input name="shippingBean.totalWeight.value" value="">
           <input name="shippingBean.cost.value" value="23.41">
           <select name="shippingBean.sendDate.YMD">
@@ -926,7 +924,6 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do")
         self.assertEqual(payload["csrfToken"], "token")
         self.assertEqual(payload["shippingBean.sendDate.YMD"], "2026/06/18")
-        self.assertEqual(payload["shippingBean.num.value"], "1")
         self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
         self.assertEqual(payload["shippingBean.cost.value"], "23.41")
         self.assertEqual(payload["command"], "regist")
@@ -957,7 +954,7 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
 
-    def test_build_m060900_weight_payload_defaults_blank_postal_parcel_counts(self):
+    def test_build_m060900_weight_payload_preserves_blank_postal_parcel_counts_and_weight(self):
         html = """
         <form action="/mypage/M060900.do" method="post">
           <input type="hidden" name="command" value="">
@@ -975,9 +972,9 @@ class AutomationHtmlTests(unittest.TestCase):
             weight_grams="100",
         )
 
-        self.assertEqual(payload["shippingBean.num.value"], "1")
-        self.assertEqual(payload["shippingBean.totalNum.value"], "1")
-        self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
+        self.assertEqual(payload["shippingBean.num.value"], "")
+        self.assertEqual(payload["shippingBean.totalNum.value"], "")
+        self.assertEqual(payload["shippingBean.totalWeight.value"], "")
         self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
 

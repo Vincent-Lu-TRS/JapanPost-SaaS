@@ -843,10 +843,12 @@ def _build_m060900_weight_payload(
     )
     payload = dict(form["fields"])
     payload.pop("command", None)
-    payload["shippingBean.totalWeight.value"] = _clean(weight_grams) or "100"
-    for count_field in ("shippingBean.num.value", "shippingBean.totalNum.value"):
-        if count_field in payload and not _clean(payload.get(count_field, "")):
-            payload[count_field] = "1"
+    is_postal_parcel_info = (
+        "shippingBean.num.value" in payload
+        and "shippingBean.totalNum.value" in payload
+    )
+    if not is_postal_parcel_info:
+        payload["shippingBean.totalWeight.value"] = _clean(weight_grams) or "100"
     if "shippingBean.invPrintNum.value" in form.get("selects", {}):
         payload["shippingBean.invPrintNum.value"] = (
             _first_non_empty_option_value(form, "shippingBean.invPrintNum.value", "1") or "1"
@@ -1712,6 +1714,10 @@ def run_automation(
                 f"num={payload.get('shippingBean.num.value', '')}, "
                 f"totalNum={payload.get('shippingBean.totalNum.value', '')}, "
                 f"cost={payload.get('shippingBean.cost.value', '')}, "
+                f"senderInstruction={payload.get('shippingBean.senderInstruction', '')}, "
+                f"fwTransType={payload.get('shippingBean.fwTransType', '')}, "
+                f"invPrintType={payload.get('shippingBean.invPrintType', '')}, "
+                f"noCm={payload.get('shippingBean.noCm', '')}, "
                 f"command={payload.get('command', '')}, "
                 f"invPrintNum={payload.get('shippingBean.invPrintNum.value', '')}"
             )
