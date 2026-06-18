@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-command-regist-next-weight"
+AUTOMATION_BUILD_ID = "2026-06-18-stable-ui-clear-next-item"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -678,6 +678,15 @@ def _build_m060800_next_payload(
     )
     payload = dict(form["fields"])
     payload.pop("command", None)
+    for field_name in (
+        "itemBean.pkg",
+        "itemBean.cost.value",
+        "itemBean.num.value",
+        "itemBean.hsCode",
+        "itemBean.hsCode.value",
+    ):
+        if field_name in payload:
+            payload[field_name] = ""
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         payload["shippingBean.pkgTotalPrice.value"] = total_jpy

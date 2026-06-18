@@ -333,6 +333,10 @@ class AutomationHtmlTests(unittest.TestCase):
           <input type="hidden" name="shippingBean.transType" value="">
           <input type="hidden" name="shippingBean.pkgType" value="0">
           <input name="shippingBean.pkgTotalPrice.value" value="">
+          <input name="itemBean.pkg" value="Pillow TRSN9842">
+          <input name="itemBean.cost.value" value="1.55">
+          <input name="itemBean.num.value" value="1">
+          <input name="itemBean.hsCode.value" value="940490">
           <input type="checkbox" name="ShippingBean.danger" value="1">
         </form>
         """
@@ -349,6 +353,10 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendType"], "8")
         self.assertEqual(payload["shippingBean.pkgTotalPrice.value"], "1846")
         self.assertEqual(payload["ShippingBean.danger"], "1")
+        self.assertEqual(payload["itemBean.pkg"], "")
+        self.assertEqual(payload["itemBean.cost.value"], "")
+        self.assertEqual(payload["itemBean.num.value"], "")
+        self.assertEqual(payload["itemBean.hsCode.value"], "")
         self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
 

@@ -68,6 +68,15 @@ def _get_job(email: str) -> dict | None:
     return _JOBS.get(email)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_pending_orders_cached(refresh_token: int) -> tuple[pd.DataFrame, list[str]]:
+    from bot.sheets import get_pending_orders
+
+    pending_logs: list[str] = []
+    df_pending = get_pending_orders(log_cb=pending_logs.append)
+    return df_pending, pending_logs
+
+
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
     if email in _JOBS and _JOBS[email].get("status") == "running":
         return False
@@ -105,6 +114,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
                 _log(f"📋 正在回填 {len(results)} 筆至 Google Sheets...")
                 backfill_results(results, log_cb=_log)
                 _log(f"✅ 完成！共處理 {len(results)} 筆訂單。")
+                job["pending_refresh_needed"] = True
             else:
                 _log("ℹ️ 自動化完成，無新增結果。")
             job["status"] = "completed"
@@ -210,13 +220,25 @@ def _render_main_app():
     df_pending = pd.DataFrame()
     pending_count = 0
     pending_logs: list[str] = []
-    with st.spinner("讀取 Google Sheets 待打單資料..."):
-        try:
-            from bot.sheets import get_pending_orders
-            df_pending = get_pending_orders(log_cb=pending_logs.append)
-            pending_count = len(df_pending)
-        except Exception as e:
-            st.warning(f"無法讀取 Google Sheets：{e}")
+    st.session_state.setdefault("pending_refresh_token", 0)
+    if is_running:
+        df_pending = st.session_state.get("last_pending_df", pd.DataFrame())
+        pending_logs = st.session_state.get("last_pending_logs", [])
+        pending_count = len(df_pending)
+    else:
+        if job and job.pop("pending_refresh_needed", False):
+            st.session_state.pending_refresh_token += 1
+            _load_pending_orders_cached.clear()
+        with st.spinner("讀取 Google Sheets 待打單資料..."):
+            try:
+                df_pending, pending_logs = _load_pending_orders_cached(
+                    st.session_state.pending_refresh_token
+                )
+                pending_count = len(df_pending)
+                st.session_state.last_pending_df = df_pending
+                st.session_state.last_pending_logs = pending_logs
+            except Exception as e:
+                st.warning(f"無法讀取 Google Sheets：{e}")
 
     col_left, col_right = st.columns([1, 2])
 
@@ -232,6 +254,10 @@ def _render_main_app():
 
         st.divider()
         st.markdown("**執行設定**")
+        if not is_running and st.button("🔁 重新讀取待製單", use_container_width=True):
+            st.session_state.pending_refresh_token += 1
+            _load_pending_orders_cached.clear()
+            st.rerun()
         max_rows_input = st.number_input(
             "最多處理筆數（0 = 全部）",
             min_value=0, max_value=500, value=10, step=1,
