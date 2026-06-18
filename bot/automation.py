@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-postal-parcel-button-block"
+AUTOMATION_BUILD_ID = "2026-06-18-expacket-guard"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -551,7 +551,20 @@ def _build_m060800_item_payload(
                 f"context={_html_context_for_labels(html, ['POSTAL PARCEL', 'Postal Parcel', 'AIR', 'Air'])}"
             )
     elif profile == "epacket_light":
-        payload.update(_set_value_assignments_for_labels(html, ["International ePacket light", "ePacket light"]))
+        epacket_assignments = _set_value_assignments_for_labels(
+            html,
+            ["International ePacket light", "ePacket light", "EPACK_LITE", "Eパケットライト"],
+        )
+        if "shippingBean.sendType" in epacket_assignments:
+            payload["shippingBean.sendType"] = epacket_assignments["shippingBean.sendType"]
+        if payload.get("shippingBean.sendType", "") == "0":
+            raise RuntimeError(
+                "Unable to resolve ePacket payload from M060800 HTML; "
+                f"sendType={payload.get('shippingBean.sendType', '')}, "
+                f"transType={payload.get('shippingBean.transType', '')}, "
+                f"pkgType={payload.get('shippingBean.pkgType', '')}; "
+                f"context={_html_context_for_labels(html, ['International ePacket light', 'ePacket light', 'EPACK_LITE', 'Eパケットライト'])}"
+            )
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         payload["shippingBean.pkgTotalPrice.value"] = total_jpy

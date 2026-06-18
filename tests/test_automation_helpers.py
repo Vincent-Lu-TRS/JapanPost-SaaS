@@ -518,6 +518,75 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendType"], "5")
         self.assertEqual(payload["shippingBean.transType"], "1")
 
+    def test_build_m060800_item_payload_selects_epacket_light_for_epacket(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="0">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <button type="button" id="ID_SENDTYPE_BTN_PKG" onclick="chgSendTypeBtn(1);">
+            <img src="images/mypage_en/sendType/PKG.PNG" id="ID_SENDTYPE_IMG_PKG" alt="EMS(Goods)">
+          </button>
+          <button type="button" id="ID_SENDTYPE_BTN_EPACK_LITE" onclick="chgSendTypeBtn(8);">
+            <img src="images/mypage_en/sendType/EPACK_LITE_W.PNG" id="ID_SENDTYPE_IMG_EPACK_LITE" alt="International ePacket light">
+          </button>
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+            "內容物1": "Portable Cooking Stove",
+            "申告金額1": "11.49",
+            "數量1": "1",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+            row,
+            is_eu=False,
+        )
+
+        self.assertEqual(payload["shippingBean.sendType"], "8")
+        self.assertEqual(payload["itemBean.pkg"], "Portable Cooking Stove")
+
+    def test_build_m060800_item_payload_stops_if_epacket_keeps_ems_default(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="0">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <button type="button" id="ID_SENDTYPE_BTN_PKG" onclick="chgSendTypeBtn(1);">
+            <img src="images/mypage_en/sendType/PKG.PNG" id="ID_SENDTYPE_IMG_PKG" alt="EMS(Goods)">
+          </button>
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+            "內容物1": "Portable Cooking Stove",
+            "申告金額1": "11.49",
+            "數量1": "1",
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "Unable to resolve ePacket payload"):
+            _build_m060800_item_payload(
+                html,
+                "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+                row,
+                is_eu=False,
+            )
+
     def test_build_m060800_item_payload_stops_if_postal_parcel_keeps_ems_defaults(self):
         html = """
         <form action="/mypage/M060800.do" method="post">
