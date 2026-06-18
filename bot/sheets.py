@@ -94,6 +94,99 @@ def _prefer_shipping_method_rows(
     return ranked.drop(columns=["_source_order", "_shipping_priority"])
 
 
+def _format_sample(values, limit: int = 8) -> str:
+    sample = [str(v).strip() for v in values if str(v).strip()]
+    if not sample:
+        return "-"
+    shown = sample[:limit]
+    suffix = "" if len(sample) <= limit else f"...(+{len(sample) - limit})"
+    return ", ".join(shown) + suffix
+
+
+def _filter_pending_orders_dataframe(
+    df: pd.DataFrame,
+    completed_ids: set[str] | None = None,
+    log_cb=None,
+) -> pd.DataFrame:
+    def _log(msg):
+        if log_cb:
+            log_cb(msg)
+        else:
+            logging.info(msg)
+
+    if df.empty:
+        return df
+
+    status_col = "製單上傳狀態(請用[未打單]檢視模式)"
+    amount_col = "郵局申告金額(USD)"
+    order_id_col = "注文番号(貼上原始資料)"
+    backup_order_id_col = "注文番号(貼上原始資料)_1"
+    check_col = "製單檢核"
+    shipping_col = "郵局運送方式(複數商品請自行確認是否走小包)"
+    shipname_col = "Shipping Name" if "Shipping Name" in df.columns else "Shipping Name_1"
+
+    for col in [status_col, amount_col, order_id_col, check_col, shipname_col]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+
+    if backup_order_id_col in df.columns:
+        df[order_id_col] = (
+            df[order_id_col].replace("", pd.NA)
+            .fillna(df[backup_order_id_col])
+            .fillna("")
+        )
+    if "Shipping Name_1" in df.columns:
+        df["Shipping Name"] = (
+            df.get("Shipping Name", pd.Series(dtype=str))
+            .replace("", pd.NA)
+            .fillna(df["Shipping Name_1"])
+            .fillna("")
+        )
+        shipname_col = "Shipping Name"
+
+    base_mask = (
+        (df[status_col] == "未打單")
+        & (df[amount_col] != "")
+        & (df[check_col].str.upper() != "TRUE")
+        & (df[shipname_col] != "")
+    )
+    excluded = df[~base_mask]
+    if not excluded.empty:
+        _log(
+            "🔎 基礎篩選排除 "
+            f"{len(excluded)} 筆：{_format_sample(excluded[order_id_col].tolist())}"
+        )
+    df_filtered = df[base_mask].copy()
+    _log(f"📋 篩選後（未打單+必填）：{len(df_filtered)} 筆")
+
+    completed_ids = completed_ids or set()
+    if completed_ids:
+        completed_mask = df_filtered[order_id_col].isin(completed_ids)
+        completed_rows = df_filtered[completed_mask]
+        if not completed_rows.empty:
+            _log(
+                "🔥 已在目標表完成而排除 "
+                f"{len(completed_rows)} 筆：{_format_sample(completed_rows[order_id_col].tolist())}"
+            )
+        before_completed = len(df_filtered)
+        df_filtered = df_filtered[~completed_mask]
+        _log(
+            f"🔥 雙重過濾（已完成 {len(completed_ids)} 筆）："
+            f"{before_completed} → {len(df_filtered)} 筆"
+        )
+
+    before_dedup = len(df_filtered)
+    df_filtered = _prefer_shipping_method_rows(
+        df_filtered,
+        order_id_col=order_id_col,
+        shipping_col=shipping_col,
+    )
+    _log(
+        f"✅ 來源內同注文番号去重：{before_dedup} → {len(df_filtered)} 筆"
+    )
+    return df_filtered.reset_index(drop=True)
+
+
 def _get_gspread_client() -> gspread.Client:
     """建立 gspread 客戶端（從 Streamlit secrets 讀取服務帳號）"""
     try:
@@ -156,45 +249,8 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         df = pd.DataFrame(all_values[1:], columns=header)
         _log(f"📊 來源原始筆數：{len(df)}")
 
-        # 定義關鍵欄位
-        status_col = "製單上傳狀態(請用[未打單]檢視模式)"
-        amount_col = "郵局申告金額(USD)"
-        order_id_col = "注文番号(貼上原始資料)"
-        check_col = "製單檢核"
-        shipping_col = "郵局運送方式(複數商品請自行確認是否走小包)"
-        shipname_col = "Shipping Name" if "Shipping Name" in df.columns else "Shipping Name_1"
-
-        # 清洗欄位
-        for col in [status_col, amount_col, order_id_col, check_col, shipname_col]:
-            if col in df.columns:
-                df[col] = df[col].fillna("").astype(str).str.strip()
-
-        # A 欄缺注文番号時補 AA 欄
-        if "注文番号(貼上原始資料)_1" in df.columns:
-            df[order_id_col] = (
-                df[order_id_col].replace("", pd.NA)
-                .fillna(df["注文番号(貼上原始資料)_1"])
-                .fillna("")
-            )
-        # Shipping Name 缺時補備用欄
-        if "Shipping Name_1" in df.columns:
-            df["Shipping Name"] = (
-                df.get("Shipping Name", pd.Series(dtype=str))
-                .replace("", pd.NA)
-                .fillna(df["Shipping Name_1"])
-                .fillna("")
-            )
-
-        # 基礎篩選
-        df_filtered = df[
-            (df[status_col] == "未打單")
-            & (df[amount_col] != "")
-            & (df[check_col].str.upper() != "TRUE")
-            & (df[shipname_col] != "")
-        ].copy()
-        _log(f"📋 篩選後（未打單+必填）：{len(df_filtered)} 筆")
-
         # ── 🔥 雙重過濾：即時讀取目標表單已完成單號 ──────
+        completed_ids: set[str] = set()
         try:
             sh_target = client.open_by_key(TARGET_SHEET_ID)
             ws_target = next(
@@ -208,28 +264,19 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
                     for v in completed_col_c[1:]  # 跳過標題
                     if str(v).strip()
                 }
-                before = len(df_filtered)
-                df_filtered = df_filtered[
-                    ~df_filtered[order_id_col].isin(completed_ids)
-                ]
-                _log(
-                    f"🔥 雙重過濾（已完成 {len(completed_ids)} 筆）：{before} → {len(df_filtered)} 筆"
-                )
         except Exception as e:
             _log(f"⚠️ 無法讀取目標表單（跳過雙重過濾）: {e}")
 
-        # ── 來源內部去重複（同注文番号以 EMS > 國際小包 > ePacket 優先）────
-        before_dedup = len(df_filtered)
-        df_filtered = _prefer_shipping_method_rows(
-            df_filtered,
-            order_id_col=order_id_col,
-            shipping_col=shipping_col,
+        df_filtered = _filter_pending_orders_dataframe(
+            df,
+            completed_ids=completed_ids,
+            log_cb=log_cb,
         )
         _log(
-            f"✅ 最終可打單：{before_dedup} → {len(df_filtered)} 筆（去重後）"
+            f"✅ 最終可打單：{len(df_filtered)} 筆"
         )
 
-        return df_filtered.reset_index(drop=True)
+        return df_filtered
 
     except Exception as e:
         logging.error(f"❌ 取得待打單清單失敗: {e}")

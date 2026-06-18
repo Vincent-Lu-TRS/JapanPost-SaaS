@@ -12,6 +12,7 @@ sys.modules.setdefault("streamlit", types.SimpleNamespace(secrets={}))
 
 from bot.sheets import (
     COUNTRY_CODE_MAP,
+    _filter_pending_orders_dataframe,
     _prefer_shipping_method_rows,
     _shipping_priority,
 )
@@ -64,6 +65,91 @@ class SheetsHelperTests(unittest.TestCase):
             result.iloc[0]["郵局運送方式(複數商品請自行確認是否走小包)"],
             "國際小包",
         )
+
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_keeps_four_unique_orders_from_six_recreated_rows(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test5",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "Jimmy Wang",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "國際小包",
+                },
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test6",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "Ioannis Zervos",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test7",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "Ines Budde",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test7",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "Ines Budde",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "國際小包",
+                },
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test8",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "Ceci Chan",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test8",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "Ceci Chan",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "國際小包",
+                },
+            ]
+        )
+        logs = []
+
+        result = _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
+
+        self.assertEqual(
+            list(result["注文番号(貼上原始資料)"]),
+            ["WhoWhy-Test5", "WhoWhy-Test6", "WhoWhy-Test7", "WhoWhy-Test8"],
+        )
+        self.assertTrue(any("來源內同注文番号去重" in line for line in logs))
+
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_logs_completed_id_exclusions(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "WhoWhy-Test6",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": "Ioannis Zervos",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                }
+            ]
+        )
+        logs = []
+
+        result = _filter_pending_orders_dataframe(df, completed_ids={"WhoWhy-Test6"}, log_cb=logs.append)
+
+        self.assertTrue(result.empty)
+        self.assertTrue(any("已在目標表完成而排除" in line and "WhoWhy-Test6" in line for line in logs))
 
 
 if __name__ == "__main__":

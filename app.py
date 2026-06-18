@@ -253,9 +253,12 @@ def _render_main_app():
             ] if c in df_pending.columns
         ]
         if preview_cols:
-            st.dataframe(df_pending[preview_cols].head(20), hide_index=True, use_container_width=True)
+            st.dataframe(df_pending[preview_cols].head(20), hide_index=True, width="stretch")
         else:
-            st.dataframe(df_pending.head(20), hide_index=True, use_container_width=True)
+            st.dataframe(df_pending.head(20), hide_index=True, width="stretch")
+        if pending_logs:
+            with st.expander("🔎 待製單讀取診斷"):
+                st.code("\n".join(pending_logs), language="text")
     elif pending_logs:
         st.info("目前沒有待製單資料。")
         with st.expander("🔎 待製單讀取診斷"):
@@ -279,7 +282,7 @@ def _render_main_app():
 
         st.divider()
         st.markdown("**執行設定**")
-        if not is_running and st.button("🔁 重新讀取待製單", use_container_width=True):
+        if not is_running and st.button("🔁 重新讀取待製單", width="stretch"):
             st.session_state.pending_refresh_token += 1
             _load_pending_orders_cached.clear()
             st.rerun()
@@ -292,12 +295,12 @@ def _render_main_app():
 
         if is_running:
             st.info("🔄 自動化進行中...")
-            if st.button("🔄 重新整理", use_container_width=True):
+            if st.button("🔄 重新整理", width="stretch"):
                 st.rerun()
         else:
             btn_label = "🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單"
             if st.button(btn_label, type="primary",
-                         disabled=(pending_count == 0), use_container_width=True):
+                         disabled=(pending_count == 0), width="stretch"):
                 if df_pending.empty:
                     st.warning("沒有符合條件的待打單資料")
                 else:
@@ -343,7 +346,7 @@ def _render_main_app():
                 "message": "訊息",
             })
             show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "訊息"]
-            st.dataframe(df_status[show_cols], hide_index=True, use_container_width=True)
+            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
         else:
             st.info("任務開始後，這裡會逐筆顯示製單狀態。")
 
