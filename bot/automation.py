@@ -849,6 +849,8 @@ def _build_m060900_weight_payload(
     )
     if not is_postal_parcel_info:
         payload["shippingBean.totalWeight.value"] = _clean(weight_grams) or "100"
+    elif "shippingBean.fwTransType" in payload:
+        payload["shippingBean.fwTransType"] = "4"
     if "shippingBean.invPrintNum.value" in form.get("selects", {}):
         payload["shippingBean.invPrintNum.value"] = (
             _first_non_empty_option_value(form, "shippingBean.invPrintNum.value", "1") or "1"

@@ -978,6 +978,34 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
 
+    def test_build_m060900_weight_payload_selects_economical_failed_delivery_route(self):
+        html = """
+        <form action="/mypage/M060900.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input name="shippingBean.num.value" value="">
+          <input name="shippingBean.totalNum.value" value="">
+          <input name="shippingBean.totalWeight.value" value="">
+          <input type="radio" name="shippingBean.senderInstruction" value="1" checked>
+          <input type="radio" name="shippingBean.fwTransType" value="1" checked>
+          <input type="radio" name="shippingBean.fwTransType" value="4">
+          <input type="radio" name="shippingBean.invPrintType" value="0" checked>
+          <input type="hidden" name="shippingBean.noCm" value="true">
+        </form>
+        """
+
+        _, payload = _build_m060900_weight_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do",
+            weight_grams="100",
+        )
+
+        self.assertEqual(payload["shippingBean.senderInstruction"], "1")
+        self.assertEqual(payload["shippingBean.fwTransType"], "4")
+        self.assertEqual(payload["shippingBean.invPrintType"], "0")
+        self.assertEqual(payload["shippingBean.noCm"], "true")
+        self.assertEqual(payload["method:regist"], "")
+
     def test_build_m061000_register_payload_uses_regist(self):
         html = """
         <form action="/mypage/M061000.do" method="post">
