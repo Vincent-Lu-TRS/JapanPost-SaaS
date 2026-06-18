@@ -39,6 +39,7 @@ COUNTRY_CODE_MAP = {
     "IRELAND（アイルランド）": "EU",
     "SPAIN（西班牙）": "EU",
     "GERMANY（德國）": "EU",
+    "GERMANY（ドイツ）": "EU",
     "DENMARK（丹麥）": "EU",
     "ITALY（義大利）": "EU",
     "ITALY（イタリア）": "EU",
@@ -48,9 +49,49 @@ COUNTRY_CODE_MAP = {
     "PORTUGAL（葡萄牙）": "EU",
     "SWITZERLAND（瑞士）": "EU",
     "BELGIUM（比利時）": "EU",
+    "BELGIUM（ベルギー）": "EU",
     "GREECE（希臘）": "EU",
+    "GREECE（ギリシャ）": "EU",
     "CZECH（捷克）": "EU",
+    "CZECH（チェコ）": "EU",
+    "ROMANIA（ルーマニア）": "EU",
+    "CYPRUS（キプロス）": "EU",
+    "INDONESIA（インドネシア）": "ID",
 }
+
+
+def _shipping_priority(value: str) -> int:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if "ems" in lowered:
+        return 30
+    if "國際小包" in text or "国際小包" in text or "postal parcel" in lowered:
+        return 20
+    if "epacket" in lowered or "eパケット" in lowered:
+        return 10
+    return 0
+
+
+def _prefer_shipping_method_rows(
+    df: pd.DataFrame,
+    order_id_col: str,
+    shipping_col: str,
+) -> pd.DataFrame:
+    if df.empty or order_id_col not in df.columns:
+        return df
+    if shipping_col not in df.columns:
+        return df.drop_duplicates(subset=[order_id_col], keep="first")
+
+    ranked = df.copy()
+    ranked["_source_order"] = range(len(ranked))
+    ranked["_shipping_priority"] = ranked[shipping_col].map(_shipping_priority)
+    max_priority = ranked.groupby(order_id_col)["_shipping_priority"].transform("max")
+    ranked = ranked[ranked["_shipping_priority"] == max_priority]
+    ranked = ranked.sort_values("_source_order").drop_duplicates(
+        subset=[order_id_col],
+        keep="first",
+    )
+    return ranked.drop(columns=["_source_order", "_shipping_priority"])
 
 
 def _get_gspread_client() -> gspread.Client:
@@ -120,6 +161,7 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         amount_col = "郵局申告金額(USD)"
         order_id_col = "注文番号(貼上原始資料)"
         check_col = "製單檢核"
+        shipping_col = "郵局運送方式(複數商品請自行確認是否走小包)"
         shipname_col = "Shipping Name" if "Shipping Name" in df.columns else "Shipping Name_1"
 
         # 清洗欄位
@@ -176,9 +218,13 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         except Exception as e:
             _log(f"⚠️ 無法讀取目標表單（跳過雙重過濾）: {e}")
 
-        # ── 來源內部去重複（保留第一筆）────────────────
+        # ── 來源內部去重複（同注文番号以 EMS > 國際小包 > ePacket 優先）────
         before_dedup = len(df_filtered)
-        df_filtered = df_filtered.drop_duplicates(subset=[order_id_col], keep="first")
+        df_filtered = _prefer_shipping_method_rows(
+            df_filtered,
+            order_id_col=order_id_col,
+            shipping_col=shipping_col,
+        )
         _log(
             f"✅ 最終可打單：{before_dedup} → {len(df_filtered)} 筆（去重後）"
         )

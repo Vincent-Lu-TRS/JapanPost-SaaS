@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-returntop-recovery"
+AUTOMATION_BUILD_ID = "2026-06-18-multi-item-priority-country"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -400,7 +400,9 @@ class _HtmlFormParser(HTMLParser):
             input_type = attrs_d.get("type", "text").lower()
             if input_type in {"button", "submit", "image", "reset"}:
                 return
-            if input_type == "radio" and "checked" not in attrs_d:
+            if input_type == "radio":
+                if "checked" in attrs_d or name not in self._form["fields"]:
+                    self._form["fields"][name] = attrs_d.get("value", "")
                 return
             self._form["fields"][name] = attrs_d.get("value", "")
         elif tag == "select":
@@ -506,6 +508,77 @@ def _summarize_forms(html: str, max_forms: int = 4, max_fields: int = 8) -> str:
     return " | ".join(parts) if parts else "(no forms)"
 
 
+def _summarize_error_text(html: str, limit: int = 6) -> str:
+    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", html or "")
+    text = re.sub(r"(?is)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)</(p|div|li|td|th|tr|span)>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    lines = [
+        " ".join(unescape(line).split())
+        for line in text.splitlines()
+    ]
+    needles = (
+        "error",
+        "required",
+        "please",
+        "invalid",
+        "入力",
+        "選択",
+        "確認",
+        "必須",
+        "未入力",
+        "してください",
+        "できません",
+        "重量",
+        "危険",
+        "内容",
+    )
+    found: list[str] = []
+    for line in lines:
+        if not line or len(line) < 4:
+            continue
+        lowered = line.lower()
+        if any(needle in lowered or needle in line for needle in needles):
+            if line not in found:
+                found.append(line[:180])
+        if len(found) >= limit:
+            break
+    return " | ".join(found) if found else "-"
+
+
+def _row_item_value(row, base_name: str, item_index: int) -> str:
+    candidates = [f"{base_name}{item_index}"]
+    if item_index == 1:
+        fallbacks = {
+            "內容物": ["郵局內容物"],
+            "申告金額": ["郵局申告金額(USD)"],
+            "數量": ["數量集合"],
+        }
+        candidates.extend(fallbacks.get(base_name, []))
+    return _row_val(row, candidates)
+
+
+def _iter_content_items(row, max_items: int = 10) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for item_index in range(1, max_items + 1):
+        pkg = _row_item_value(row, "內容物", item_index)
+        if not pkg:
+            continue
+        cost = _row_item_value(row, "申告金額", item_index) or "0"
+        raw_num = _row_item_value(row, "數量", item_index) or "1"
+        try:
+            num = str(int(float(raw_num)))
+        except Exception:
+            num = "1"
+        items.append({
+            "index": str(item_index),
+            "pkg": pkg,
+            "cost": cost,
+            "num": num,
+        })
+    return items
+
+
 def _build_m060800_item_payload(
     html: str,
     page_url: str,
@@ -513,6 +586,7 @@ def _build_m060800_item_payload(
     is_eu: bool = False,
     hs_code: str = "",
     submit_command: str = "itemAdd2",
+    item_index: int = 1,
 ) -> tuple[str, dict[str, str]]:
     form = _pick_form(
         html,
@@ -522,9 +596,9 @@ def _build_m060800_item_payload(
     payload = dict(form["fields"])
     payload.pop("command", None)
 
-    pkg = _row_val(row, ["內容物1", "郵局內容物"])
-    cost = _row_val(row, ["申告金額1"]) or "0"
-    raw_num = _row_val(row, ["數量1"]) or "1"
+    pkg = _row_item_value(row, "內容物", item_index)
+    cost = _row_item_value(row, "申告金額", item_index) or "0"
+    raw_num = _row_item_value(row, "數量", item_index) or "1"
     try:
         num = str(int(float(raw_num)))
     except Exception:
@@ -1348,64 +1422,76 @@ def run_automation(
             return resp, country_raw, country_code
 
         def submit_m060800_item_via_requests(html: str, page_url: str, row: pd.Series, is_eu: bool):
-            hs_code = ""
-            if is_eu:
-                pkg_for_hs = _row_val(row, ["內容物1", "郵局內容物"])
-                if pkg_for_hs:
-                    hs_code = predict_hs_code(pkg_for_hs, log_cb=log_cb) or ""
-            action, payload = _build_m060800_item_payload(
-                html,
-                page_url,
-                row,
-                is_eu=is_eu,
-                hs_code=hs_code,
-                submit_command="itemAdd2",
-            )
-            _log(
-                "🌐 requests 提交 M060800 Confirm 內容物 payload："
-                f"action={action}, pkg={payload.get('itemBean.pkg', '')}, "
-                f"cost={payload.get('itemBean.cost.value', '')}, "
-                f"num={payload.get('itemBean.num.value', '')}, "
-                f"profile={_shipping_profile(row) or '-'}, "
-                f"sendType={payload.get('shippingBean.sendType', '')}, "
-                f"transType={payload.get('shippingBean.transType', '')}, "
-                f"pkgType={payload.get('shippingBean.pkgType', '')}"
-            )
-            resp = req_session.post(
-                action,
-                data=payload,
-                headers={
-                    "Referer": page_url,
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                timeout=30,
-                allow_redirects=True,
-            )
-            body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
-            _log(f"  → M060800 HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
-            marker_summary = ", ".join(
-                marker
-                for marker in [
-                    "addrToBean",
-                    "itemBean",
-                    "shippingBean",
-                    "M060800",
-                    "M060900",
-                    "M061000",
-                    "Register Shipment",
-                    "totalWeight",
-                    "DOWNLOAD?pdf=",
-                ]
-                if marker in resp.text
-            ) or "-"
-            _log(
-                "🔎 M060800 response diagnostics："
-                f"commands={_summarize_submit_commands(resp.text) or '-'}; "
-                f"markers={marker_summary}; "
-                f"forms={_summarize_forms(resp.text)}"
-            )
-            if resp.status_code >= 400:
-                raise RuntimeError(f"M060800 item submit failed: HTTP {resp.status_code}")
+            items = _iter_content_items(row)
+            if not items:
+                raise RuntimeError("M060800 payload has no content items")
+            current_html = html
+            current_url = page_url
+            resp = None
+            for pos, item in enumerate(items, start=1):
+                hs_code = ""
+                if is_eu and item["pkg"]:
+                    hs_code = predict_hs_code(item["pkg"], log_cb=log_cb) or ""
+                action, payload = _build_m060800_item_payload(
+                    current_html,
+                    current_url,
+                    row,
+                    is_eu=is_eu,
+                    hs_code=hs_code,
+                    submit_command="itemAdd2",
+                    item_index=int(item["index"]),
+                )
+                _log(
+                    "🌐 requests 提交 M060800 Confirm 內容物 payload："
+                    f"item={pos}/{len(items)}, action={action}, "
+                    f"pkg={payload.get('itemBean.pkg', '')}, "
+                    f"cost={payload.get('itemBean.cost.value', '')}, "
+                    f"num={payload.get('itemBean.num.value', '')}, "
+                    f"profile={_shipping_profile(row) or '-'}, "
+                    f"sendType={payload.get('shippingBean.sendType', '')}, "
+                    f"transType={payload.get('shippingBean.transType', '')}, "
+                    f"pkgType={payload.get('shippingBean.pkgType', '')}"
+                )
+                resp = req_session.post(
+                    action,
+                    data=payload,
+                    headers={
+                        "Referer": current_url,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    timeout=30,
+                    allow_redirects=True,
+                )
+                body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
+                _log(f"  → M060800 HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+                marker_summary = ", ".join(
+                    marker
+                    for marker in [
+                        "addrToBean",
+                        "itemBean",
+                        "shippingBean",
+                        "M060800",
+                        "M060900",
+                        "M061000",
+                        "Register Shipment",
+                        "totalWeight",
+                        "DOWNLOAD?pdf=",
+                    ]
+                    if marker in resp.text
+                ) or "-"
+                _log(
+                    "🔎 M060800 response diagnostics："
+                    f"commands={_summarize_submit_commands(resp.text) or '-'}; "
+                    f"markers={marker_summary}; "
+                    f"forms={_summarize_forms(resp.text)}"
+                )
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"M060800 item submit failed: HTTP {resp.status_code}")
+                current_html = resp.text
+                current_url = resp.url
+
+            if resp is None:
+                raise RuntimeError("M060800 item submit did not produce a response")
             if "M060800" in resp.text and "M060900" not in resp.text:
                 next_action, next_payload = _build_m060800_next_payload(resp.text, resp.url, row)
                 _log(
@@ -1494,7 +1580,8 @@ def run_automation(
                 "🔎 M060900 response diagnostics："
                 f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                 f"markers={marker_summary}; "
-                f"forms={_summarize_forms(resp.text)}"
+                f"forms={_summarize_forms(resp.text)}; "
+                f"errors={_summarize_error_text(resp.text)}"
             )
             if resp.status_code >= 400:
                 raise RuntimeError(f"M060900 weight submit failed: HTTP {resp.status_code}")

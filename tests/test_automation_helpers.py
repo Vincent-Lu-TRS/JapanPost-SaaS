@@ -23,9 +23,11 @@ from bot.automation import (
     _extract_pdf_download_url,
     _extract_submit_command_for_label,
     _html_for_playwright_form,
+    _iter_content_items,
     _parse_forms,
     _pick_form,
     _select_option_value,
+    _summarize_error_text,
     _summarize_forms,
     _summarize_submit_commands,
     _with_base_href,
@@ -248,6 +250,21 @@ class AutomationHtmlTests(unittest.TestCase):
             _select_option_value(form, "addrToBean.couCode", "United States"),
             "US",
         )
+
+    def test_parse_forms_uses_first_radio_when_none_checked_and_keeps_checked_value(self):
+        html = """
+        <form action="M060800.do" method="post">
+          <input type="radio" name="shippingBean.senderInstruction" value="1">
+          <input type="radio" name="shippingBean.senderInstruction" value="2">
+          <input type="radio" name="shippingBean.fwTransType" value="surface">
+          <input type="radio" name="shippingBean.fwTransType" value="air" checked>
+        </form>
+        """
+
+        form = _parse_forms(html)[0]
+
+        self.assertEqual(form["fields"]["shippingBean.senderInstruction"], "1")
+        self.assertEqual(form["fields"]["shippingBean.fwTransType"], "air")
 
     def test_summarize_forms_lists_actions_and_key_fields(self):
         html = """
@@ -626,6 +643,62 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendType"], "8")
         self.assertEqual(payload["itemBean.pkg"], "Portable Cooking Stove")
 
+    def test_iter_content_items_reads_up_to_multiple_numbered_items(self):
+        row = {
+            "內容物1": "Facial Mask TRSN6764",
+            "申告金額1": "1.55",
+            "數量1": "1",
+            "內容物2": "Pillow TRSN9842",
+            "申告金額2": "1.55",
+            "數量2": "2",
+        }
+
+        items = _iter_content_items(row)
+
+        self.assertEqual(
+            items,
+            [
+                {"index": "1", "pkg": "Facial Mask TRSN6764", "cost": "1.55", "num": "1"},
+                {"index": "2", "pkg": "Pillow TRSN9842", "cost": "1.55", "num": "2"},
+            ],
+        )
+
+    def test_build_m060800_item_payload_can_submit_second_item(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="8">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+            "內容物1": "Facial Mask TRSN6764",
+            "申告金額1": "1.55",
+            "數量1": "1",
+            "內容物2": "Pillow TRSN9842",
+            "申告金額2": "1.55",
+            "數量2": "2",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+            row,
+            is_eu=False,
+            item_index=2,
+        )
+
+        self.assertEqual(payload["itemBean.pkg"], "Pillow TRSN9842")
+        self.assertEqual(payload["itemBean.cost.value"], "1.55")
+        self.assertEqual(payload["itemBean.num.value"], "2")
+
     def test_build_m060800_item_payload_stops_if_epacket_keeps_ems_default(self):
         html = """
         <form action="/mypage/M060800.do" method="post">
@@ -688,6 +761,16 @@ class AutomationHtmlTests(unittest.TestCase):
                 row,
                 is_eu=False,
             )
+
+    def test_summarize_error_text_extracts_visible_validation_messages(self):
+        html = """
+        <html><body>
+          <div class="error">Please enter the total weight.</div>
+          <script>var x = "Please ignore script";</script>
+        </body></html>
+        """
+
+        self.assertIn("Please enter the total weight", _summarize_error_text(html))
 
     def test_build_m060900_weight_payload_sets_total_weight_and_uses_regist(self):
         html = """
