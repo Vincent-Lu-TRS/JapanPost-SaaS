@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-m060800-confirm-next"
+AUTOMATION_BUILD_ID = "2026-06-18-requests-loop"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -1600,6 +1600,7 @@ def run_automation(
             _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
 
             tracking = "ERROR"
+            results_before_order = len(results)
             try:
                 # ── 防前次未完成對話框 ────────────────
                 handle_previous_label_dialog()
@@ -1656,14 +1657,14 @@ def run_automation(
                                     tracking = print_result["tracking"]
                                     results.append(_build_result_record(row, order_id, tracking))
                                     _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
-                if results:
-                    _log("✅ requests 打單流程已完成並回傳結果")
+                if len(results) > results_before_order:
+                    _log(f"✅ 訂單 {order_id} requests 打單流程已完成並回傳結果")
                 else:
                     _log(
-                        "⏸️ requests 流程已停止但未取得完整結果；"
+                        f"⏸️ 訂單 {order_id} requests 流程已停止但未取得完整結果；"
                         "請依最後一段 diagnostics 繼續排查"
                     )
-                return results
+                continue
 
                 # ── Step 3: 運送方式分流 ──────────────
                 shipping = _get_excel_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)"])
