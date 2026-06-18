@@ -147,9 +147,23 @@ def _filter_pending_orders_dataframe(
     base_mask = (
         (df[status_col] == "未打單")
         & (df[amount_col] != "")
-        & (df[check_col].str.upper() != "TRUE")
         & (df[shipname_col] != "")
     )
+    watched_mask = df[order_id_col].str.contains("WhoWhy", case=False, na=False)
+    watched_rows = df[watched_mask]
+    if not watched_rows.empty:
+        _log(f"🧪 關注訂單診斷（WhoWhy*）：{len(watched_rows)} 筆")
+        for idx, row in watched_rows.iterrows():
+            result = "PASS" if bool(base_mask.loc[idx]) else "FAIL"
+            _log(
+                "   - 關注訂單 "
+                f"{row.get(order_id_col, '')}: 基礎={result}; "
+                f"狀態={row.get(status_col, '')!r}; "
+                f"申告金額={row.get(amount_col, '')!r}; "
+                f"製單檢核={row.get(check_col, '')!r}; "
+                f"Shipping Name={row.get(shipname_col, '')!r}; "
+                f"運送方式={row.get(shipping_col, '')!r}"
+            )
     excluded = df[~base_mask]
     if not excluded.empty:
         _log(
@@ -159,7 +173,6 @@ def _filter_pending_orders_dataframe(
         reason_masks = [
             ("狀態不是未打單排除", df[status_col] != "未打單"),
             ("申告金額空白排除", df[amount_col] == ""),
-            ("製單檢核 TRUE 排除", df[check_col].str.upper() == "TRUE"),
             ("Shipping Name 空白排除", df[shipname_col] == ""),
         ]
         for label, reason_mask in reason_masks:
