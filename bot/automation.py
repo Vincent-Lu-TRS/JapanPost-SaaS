@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-postal-air-default"
+AUTOMATION_BUILD_ID = "2026-06-18-m060900-invoice-count"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -482,6 +482,14 @@ def _select_option_value(form: dict, field_name: str, label: str, fallback: str 
     return fallback
 
 
+def _first_non_empty_option_value(form: dict, field_name: str, fallback: str = "") -> str:
+    for option in form.get("selects", {}).get(field_name, []):
+        value = _clean(option.get("value", ""))
+        if value:
+            return value
+    return fallback
+
+
 def _summarize_forms(html: str, max_forms: int = 4, max_fields: int = 8) -> str:
     parts: list[str] = []
     for idx, form in enumerate(_parse_forms(html)[:max_forms], start=1):
@@ -620,6 +628,10 @@ def _build_m060900_weight_payload(
     payload = dict(form["fields"])
     payload.pop("command", None)
     payload["shippingBean.totalWeight.value"] = _clean(weight_grams) or "100"
+    if "shippingBean.invPrintNum.value" in form.get("selects", {}):
+        payload["shippingBean.invPrintNum.value"] = (
+            _first_non_empty_option_value(form, "shippingBean.invPrintNum.value", "1") or "1"
+        )
     payload["method:regist"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 

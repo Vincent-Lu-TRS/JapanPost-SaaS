@@ -721,6 +721,30 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["method:regist"], "")
         self.assertNotIn("command", payload)
 
+    def test_build_m060900_weight_payload_sets_invoice_print_num_when_select_exists(self):
+        html = """
+        <form action="/mypage/M060900.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input name="shippingBean.totalWeight.value" value="">
+          <select name="shippingBean.invPrintNum.value">
+            <option value=""></option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </form>
+        """
+
+        _, payload = _build_m060900_weight_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do",
+            weight_grams="100",
+        )
+
+        self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
+        self.assertEqual(payload["shippingBean.invPrintNum.value"], "1")
+        self.assertEqual(payload["method:regist"], "")
+
     def test_build_m061000_register_payload_uses_regist(self):
         html = """
         <form action="/mypage/M061000.do" method="post">
