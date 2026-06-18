@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-requests-loop"
+AUTOMATION_BUILD_ID = "2026-06-18-loop-main-menu-refresh"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -1567,6 +1567,7 @@ def run_automation(
                 pdf_uploaded = True
                 _log(f"✅ PDF 已透過 requests 取得並上傳：{fname}")
             completed = False
+            completed_response = None
             if text and "M061101" in text:
                 action, completed_payload = _build_m061101_completed_payload(text, resp.url)
                 _log(f"🌐 requests 提交 M061101 Completed payload：action={action}")
@@ -1588,8 +1589,10 @@ def run_automation(
                 if done_resp.status_code >= 400:
                     raise RuntimeError(f"M061101 completed submit failed: HTTP {done_resp.status_code}")
                 completed = True
+                completed_response = done_resp
             return {
                 "response": resp,
+                "completed_response": completed_response,
                 "tracking": tracking_for_name if tracking_for_name != "NO_TRACKING" else "",
                 "pdf_uploaded": pdf_uploaded,
                 "completed": completed,
@@ -1649,7 +1652,12 @@ def run_automation(
                                     order_id,
                                 )
                                 print_resp = print_result["response"]
-                                if "text/html" in print_resp.headers.get("Content-Type", ""):
+                                completed_resp = print_result.get("completed_response")
+                                if completed_resp is not None and "text/html" in completed_resp.headers.get("Content-Type", ""):
+                                    main_menu_html = completed_resp.text
+                                    main_menu_url = completed_resp.url
+                                    _log(f"🔁 已更新下一筆起點為 Completed 後主選單：url={main_menu_url}")
+                                elif "text/html" in print_resp.headers.get("Content-Type", ""):
                                     main_menu_html = print_resp.text
                                     main_menu_url = print_resp.url
                                 _log("✅ M061100 Print 已用 requests payload submit；不回灌 Playwright HTML")
