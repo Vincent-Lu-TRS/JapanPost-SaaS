@@ -152,7 +152,7 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(any("已在目標表完成而排除" in line and "WhoWhy-Test6" in line for line in logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
-    def test_filter_pending_orders_logs_base_exclusion_reasons_without_blocking_check_column(self):
+    def test_filter_pending_orders_logs_base_exclusion_reasons(self):
         df = pd.DataFrame(
             [
                 {
@@ -177,9 +177,9 @@ class SheetsHelperTests(unittest.TestCase):
 
         result = _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
 
-        self.assertEqual(list(result["注文番号(貼上原始資料)"]), ["WhoWhy-Test6"])
+        self.assertTrue(result.empty)
+        self.assertTrue(any("製單檢核 TRUE 排除" in line and "WhoWhy-Test6" in line for line in logs))
         self.assertTrue(any("Shipping Name 空白排除" in line and "WhoWhy-Test8" in line for line in logs))
-        self.assertFalse(any("製單檢核 TRUE 排除" in line for line in logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
     def test_filter_pending_orders_logs_each_whowhy_row_status(self):
@@ -209,7 +209,7 @@ class SheetsHelperTests(unittest.TestCase):
 
         whowhy_lines = [line for line in logs if "- 關注訂單" in line]
         self.assertEqual(len(whowhy_lines), 2)
-        self.assertTrue(any("WhoWhy-Test6" in line and "基礎=PASS" in line for line in whowhy_lines))
+        self.assertTrue(any("WhoWhy-Test6" in line and "基礎=FAIL" in line for line in whowhy_lines))
         self.assertTrue(any("WhoWhy-Test7" in line and "基礎=PASS" in line for line in whowhy_lines))
 
 

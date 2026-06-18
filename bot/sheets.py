@@ -147,6 +147,7 @@ def _filter_pending_orders_dataframe(
     base_mask = (
         (df[status_col] == "未打單")
         & (df[amount_col] != "")
+        & (df[check_col].str.upper() != "TRUE")
         & (df[shipname_col] != "")
     )
     watched_mask = df[order_id_col].str.contains("WhoWhy", case=False, na=False)
@@ -173,6 +174,7 @@ def _filter_pending_orders_dataframe(
         reason_masks = [
             ("狀態不是未打單排除", df[status_col] != "未打單"),
             ("申告金額空白排除", df[amount_col] == ""),
+            ("製單檢核 TRUE 排除", df[check_col].str.upper() == "TRUE"),
             ("Shipping Name 空白排除", df[shipname_col] == ""),
         ]
         for label, reason_mask in reason_masks:
