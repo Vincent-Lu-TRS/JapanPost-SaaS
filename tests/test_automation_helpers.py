@@ -349,8 +349,8 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendType"], "8")
         self.assertEqual(payload["shippingBean.pkgTotalPrice.value"], "1846")
         self.assertEqual(payload["ShippingBean.danger"], "1")
+        self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
-        self.assertNotIn("command", payload)
 
     def test_build_m060800_item_payload_selects_postal_parcel_air_for_international_parcel(self):
         html = """
@@ -801,8 +801,8 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.num.value"], "1")
         self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
         self.assertEqual(payload["shippingBean.cost.value"], "23.41")
+        self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
-        self.assertNotIn("command", payload)
 
     def test_build_m060900_weight_payload_sets_invoice_print_num_when_select_exists(self):
         html = """
@@ -826,6 +826,7 @@ class AutomationHtmlTests(unittest.TestCase):
 
         self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
         self.assertEqual(payload["shippingBean.invPrintNum.value"], "1")
+        self.assertEqual(payload["command"], "regist")
         self.assertEqual(payload["method:regist"], "")
 
     def test_build_m061000_register_payload_uses_regist(self):

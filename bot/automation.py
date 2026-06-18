@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-multi-item-priority-country"
+AUTOMATION_BUILD_ID = "2026-06-18-command-regist-next-weight"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -685,6 +685,7 @@ def _build_m060800_next_payload(
         payload["ShippingBean.danger"] = form["fields"].get("ShippingBean.danger") or "1"
     if "shippingBean.danger" in form["fields"]:
         payload["shippingBean.danger"] = form["fields"].get("shippingBean.danger") or "1"
+    payload["command"] = "regist"
     payload["method:regist"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 
@@ -706,6 +707,7 @@ def _build_m060900_weight_payload(
         payload["shippingBean.invPrintNum.value"] = (
             _first_non_empty_option_value(form, "shippingBean.invPrintNum.value", "1") or "1"
         )
+    payload["command"] = "regist"
     payload["method:regist"] = ""
     return urljoin(page_url, form.get("action") or page_url), payload
 
@@ -1497,6 +1499,7 @@ def run_automation(
                 _log(
                     "🌐 requests 提交 M060800 Next payload："
                     f"action={next_action}, "
+                    f"command={next_payload.get('command', '')}, "
                     f"sendType={next_payload.get('shippingBean.sendType', '')}, "
                     f"transType={next_payload.get('shippingBean.transType', '')}, "
                     f"pkgType={next_payload.get('shippingBean.pkgType', '')}, "
@@ -1533,7 +1536,8 @@ def run_automation(
                     "🔎 M060800 Next response diagnostics："
                     f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                     f"markers={marker_summary}; "
-                    f"forms={_summarize_forms(resp.text)}"
+                    f"forms={_summarize_forms(resp.text)}; "
+                    f"errors={_summarize_error_text(resp.text)}"
                 )
                 if resp.status_code >= 400:
                     raise RuntimeError(f"M060800 next submit failed: HTTP {resp.status_code}")
@@ -1548,6 +1552,7 @@ def run_automation(
             _log(
                 "🌐 requests 提交 M060900 重量 payload："
                 f"action={action}, weight={payload.get('shippingBean.totalWeight.value', '')}, "
+                f"command={payload.get('command', '')}, "
                 f"invPrintNum={payload.get('shippingBean.invPrintNum.value', '')}"
             )
             resp = req_session.post(
