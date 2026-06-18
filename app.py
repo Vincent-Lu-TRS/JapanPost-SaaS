@@ -12,6 +12,13 @@ import time
 import threading
 import streamlit as st
 import pandas as pd
+from job_control import (
+    BatchJobRegistry,
+    filter_key_log_lines,
+    mark_results_completed,
+    mark_unfinished_orders,
+    update_order_status_from_log,
+)
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -60,12 +67,12 @@ def _install_playwright():
 
 
 # ── 全域任務追蹤器 ──────────────────────────────────────
-if "_JOBS" not in globals():
-    _JOBS: dict = {}
+if "_JOB_REGISTRY" not in globals():
+    _JOB_REGISTRY = BatchJobRegistry()
 
 
 def _get_job(email: str) -> dict | None:
-    return _JOBS.get(email)
+    return _JOB_REGISTRY.get(email)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -77,17 +84,10 @@ def _load_pending_orders_cached(refresh_token: int) -> tuple[pd.DataFrame, list[
     return df_pending, pending_logs
 
 
-def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
-    if email in _JOBS and _JOBS[email].get("status") == "running":
-        return False
-
-    job: dict = {
-        "status": "running",
-        "logs": [],
-        "results": [],
-        "started_at": time.strftime("%H:%M:%S"),
-    }
-    _JOBS[email] = job
+def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
+    ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
+    if not ok or job is None:
+        return False, reason
 
     def _run():
         import traceback as tb
@@ -98,6 +98,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
             print(f"[BOT] {entry}", file=sys.stderr, flush=True)
             try:
                 job["logs"].append(entry)
+                update_order_status_from_log(job, msg)
             except Exception as log_err:
                 print(f"[LOG_ERR] {log_err}", file=sys.stderr, flush=True)
 
@@ -110,6 +111,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
             _log("✅ 模組載入成功，開始 Playwright 自動化...")
             results = run_automation(df, max_rows=max_rows, log_cb=_log, headless=True)
             job["results"] = results
+            mark_results_completed(job, results)
             if results:
                 _log(f"📋 正在回填 {len(results)} 筆至 Google Sheets...")
                 backfill_results(results, log_cb=_log)
@@ -117,7 +119,8 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
                 job["pending_refresh_needed"] = True
             else:
                 _log("ℹ️ 自動化完成，無新增結果。")
-            job["status"] = "completed"
+                mark_unfinished_orders(job, "skipped", "無新增結果", "自動化完成但沒有產生新結果")
+            _JOB_REGISTRY.finish(job, "completed")
         except BaseException as e:
             err_text = tb.format_exc()
             print(f"[BOT_ERROR] {err_text}", file=sys.stderr, flush=True)
@@ -127,13 +130,14 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> bool:
             except Exception:
                 pass
             try:
-                job["status"] = "error"
+                mark_unfinished_orders(job, "failed", "發生例外", f"{type(e).__name__}: {e}")
+                _JOB_REGISTRY.finish(job, "error")
             except Exception:
                 pass
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    return True
+    return True, ""
 
 
 # ══════════════════════════════════════════════════════
@@ -240,6 +244,27 @@ def _render_main_app():
             except Exception as e:
                 st.warning(f"無法讀取 Google Sheets：{e}")
 
+    st.subheader("📊 待打單預覽")
+    if not df_pending.empty:
+        preview_cols = [
+            c for c in [
+                "注文番号(貼上原始資料)", "Shipping Name", "收件人國家",
+                "郵局運送方式(複數商品請自行確認是否走小包)", "郵局申告金額(USD)",
+            ] if c in df_pending.columns
+        ]
+        if preview_cols:
+            st.dataframe(df_pending[preview_cols].head(20), hide_index=True, use_container_width=True)
+        else:
+            st.dataframe(df_pending.head(20), hide_index=True, use_container_width=True)
+    elif pending_logs:
+        st.info("目前沒有待製單資料。")
+        with st.expander("🔎 待製單讀取診斷"):
+            st.code("\n".join(pending_logs), language="text")
+    else:
+        st.info("目前沒有待製單資料。")
+
+    st.divider()
+
     col_left, col_right = st.columns([1, 2])
 
     with col_left:
@@ -276,13 +301,16 @@ def _render_main_app():
                 if df_pending.empty:
                     st.warning("沒有符合條件的待打單資料")
                 else:
-                    ok = _start_job(email, df_pending, max_rows_val)
+                    ok, reason = _start_job(email, df_pending, max_rows_val)
                     if ok:
                         st.success("✅ 已啟動！")
                         time.sleep(0.8)
                         st.rerun()
                     else:
-                        st.error("任務執行中，請稍候")
+                        if reason == "batch_running":
+                            st.error("同一批製單已在執行中，已阻止重複啟動。")
+                        else:
+                            st.error("任務執行中，請稍候")
 
         if job and job.get("status") in ("completed", "error"):
             st.divider()
@@ -293,34 +321,65 @@ def _render_main_app():
                 st.caption(f"完成 {len(job['results'])} 筆")
 
     with col_right:
-        st.subheader("📄 執行日誌")
-        log_lines = job["logs"] if job else []
-        log_text = "\n".join(log_lines) if log_lines else "（尚無日誌）"
-        st.text_area("執行日誌內容", value=log_text, height=380,
-                     disabled=True, key="log_area", label_visibility="hidden")
-
-        if is_running:
-            time.sleep(2)
-            st.rerun()
+        st.subheader("🧾 製單狀態")
+        if job and job.get("orders"):
+            status_label = {
+                "queued": "待機中",
+                "running": "製單中",
+                "success": "完成",
+                "failed": "需排查",
+                "skipped": "略過",
+            }
+            df_status = pd.DataFrame(job["orders"])
+            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
+            df_status = df_status.rename(columns={
+                "position": "#",
+                "order_id": "注文番号",
+                "recipient": "收件人",
+                "country": "國家",
+                "status": "狀態",
+                "stage": "階段",
+                "tracking_no": "貨運單號",
+                "message": "訊息",
+            })
+            show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "訊息"]
+            st.dataframe(df_status[show_cols], hide_index=True, use_container_width=True)
+        else:
+            st.info("任務開始後，這裡會逐筆顯示製單狀態。")
 
         if job and job.get("results"):
             st.divider()
             st.subheader("✅ 本次製單結果")
             df_res = pd.DataFrame(job["results"])
-            df_res.columns = ["收件人", "注文番号", "貨運單號", "國家（原始）", "日期"]
+            df_res = df_res.rename(columns={
+                "name": "收件人",
+                "order_id": "注文番号",
+                "tracking": "貨運單號",
+                "country_raw": "國家（原始）",
+                "date": "日期",
+            })
             st.dataframe(df_res, hide_index=True)
 
-        if not df_pending.empty:
-            with st.expander(f"📊 待打單預覽（共 {pending_count} 筆，顯示前 10）"):
-                preview_cols = [c for c in [
-                    "注文番号(貼上原始資料)", "Shipping Name", "收件人國家",
-                    "郵局運送方式(複數商品請自行確認是否走小包)", "郵局申告金額(USD)",
-                ] if c in df_pending.columns]
-                if preview_cols:
-                    st.dataframe(df_pending[preview_cols].head(10), hide_index=True)
-        elif pending_logs:
-            with st.expander("🔎 待製單讀取診斷"):
-                st.code("\n".join(pending_logs), language="text")
+    st.divider()
+    st.subheader("📄 執行日誌")
+    log_lines = job["logs"] if job else []
+    key_lines = filter_key_log_lines(log_lines)
+    log_text = "\n".join(key_lines) if key_lines else "（任務開始後會顯示重點進度）"
+    st.text_area(
+        "執行日誌內容",
+        value=log_text,
+        height=220,
+        disabled=True,
+        key="log_area",
+        label_visibility="hidden",
+    )
+    if log_lines and len(key_lines) != len(log_lines):
+        with st.expander("🔧 詳細除錯日誌"):
+            st.code("\n".join(log_lines[-200:]), language="text")
+
+    if is_running:
+        time.sleep(2)
+        st.rerun()
 
 
 # ══════════════════════════════════════════════════════

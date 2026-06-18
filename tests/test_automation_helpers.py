@@ -2,12 +2,18 @@ import sys
 import types
 import unittest
 
-sys.modules.setdefault(
-    "pandas",
-    types.SimpleNamespace(Series=object, DataFrame=object, isna=lambda value: False),
-)
+try:
+    import pandas  # noqa: F401
+except Exception:
+    sys.modules.setdefault(
+        "pandas",
+        types.SimpleNamespace(Series=object, DataFrame=object, isna=lambda value: False),
+    )
 sys.modules.setdefault("bot.drive", types.SimpleNamespace(upload_pdf=lambda *a, **k: None))
-sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_code=lambda *a, **k: ""))
+try:
+    import bot.gemini_helper  # noqa: F401
+except Exception:
+    sys.modules.setdefault("bot.gemini_helper", types.SimpleNamespace(predict_hs_code=lambda *a, **k: ""))
 
 from bot.automation import (
     _build_m060800_item_payload,
@@ -25,6 +31,7 @@ from bot.automation import (
     _html_for_playwright_form,
     _has_m060800_item_book_warning,
     _iter_content_items,
+    _prepare_batch_hs_codes,
     _parse_forms,
     _pick_form,
     _select_option_value,
@@ -775,6 +782,78 @@ class AutomationHtmlTests(unittest.TestCase):
                 {"index": "2", "pkg": "Pillow TRSN9842", "cost": "1.55", "num": "2"},
             ],
         )
+
+    def test_prepare_batch_hs_codes_resolves_each_required_item_before_flow(self):
+        calls = []
+
+        def predictor(item_name, *, required_length=6, country="", country_code="", log_cb=None):
+            calls.append((item_name, required_length, country, country_code))
+            return {
+                ("Mask", 6): "330499",
+                ("Pillow", 6): "940490",
+                ("Gift", 10): "9503009999",
+            }[(item_name, required_length)]
+
+        rows = [
+            {
+                "注文番号(貼上原始資料)": "DE-1",
+                "收件人國家": "GERMANY",
+                "內容物1": "Mask",
+                "內容物2": "Pillow",
+            },
+            {
+                "注文番号(貼上原始資料)": "IE-1",
+                "收件人國家": "IRELAND",
+                "內容物1": "Gift",
+            },
+        ]
+
+        codes = _prepare_batch_hs_codes(
+            rows,
+            {"GERMANY": "EU", "IRELAND": "EU"},
+            predictor=predictor,
+        )
+
+        self.assertEqual(codes["DE-1"], {"1": "330499", "2": "940490"})
+        self.assertEqual(codes["IE-1"], {"1": "9503009999"})
+        self.assertEqual(
+            calls,
+            [
+                ("Mask", 6, "GERMANY", "EU"),
+                ("Pillow", 6, "GERMANY", "EU"),
+                ("Gift", 10, "IRELAND", "EU"),
+            ],
+        )
+
+    def test_prepare_batch_hs_codes_dedupes_same_item_for_same_destination_rule(self):
+        calls = []
+
+        def predictor(item_name, *, required_length=6, country="", country_code="", log_cb=None):
+            calls.append((item_name, required_length, country, country_code))
+            return "330499"
+
+        rows = [
+            {
+                "注文番号(貼上原始資料)": "DE-1",
+                "收件人國家": "GERMANY",
+                "內容物1": "Mask",
+            },
+            {
+                "注文番号(貼上原始資料)": "DE-2",
+                "收件人國家": "GERMANY",
+                "內容物1": "Mask",
+            },
+        ]
+
+        codes = _prepare_batch_hs_codes(
+            rows,
+            {"GERMANY": "EU"},
+            predictor=predictor,
+        )
+
+        self.assertEqual(codes["DE-1"], {"1": "330499"})
+        self.assertEqual(codes["DE-2"], {"1": "330499"})
+        self.assertEqual(calls, [("Mask", 6, "GERMANY", "EU")])
 
     def test_build_m060800_item_payload_can_submit_second_item(self):
         html = """

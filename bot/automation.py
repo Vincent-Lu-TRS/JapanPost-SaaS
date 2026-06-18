@@ -23,6 +23,7 @@ AUTOMATION_BUILD_ID = "2026-06-18-m060800-ordered-payload"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
+from .hs_codes import prepare_hs_codes_for_items, required_hs_code_length
 
 # ── 日本郵政登入憑證 ────────────────────────────────────
 def _get_jp_post_creds() -> tuple[str, str]:
@@ -688,6 +689,64 @@ def _iter_content_items(row, max_items: int = 10) -> list[dict[str, str]]:
     return items
 
 
+def _prepare_batch_hs_codes(rows, country_code_map: dict[str, str], predictor=predict_hs_code, log_cb=None) -> dict[str, dict[str, str]]:
+    prepared: dict[str, dict[str, str]] = {}
+    prediction_cache: dict[tuple[str, int, str, str], str] = {}
+
+    def _iter_rows(source):
+        if hasattr(source, "iterrows"):
+            yield from source.iterrows()
+        else:
+            for idx, row in enumerate(source):
+                yield idx, row
+
+    def _country_code(country_raw: str) -> str:
+        if country_raw in country_code_map:
+            return country_code_map[country_raw]
+        upper_map = {str(key).upper(): value for key, value in country_code_map.items()}
+        return upper_map.get(str(country_raw or "").upper(), "")
+
+    def cached_predictor(item_name, *, required_length=6, country="", country_code="", log_cb=None):
+        cache_key = (
+            str(item_name or "").strip().casefold(),
+            int(required_length or 6),
+            str(country or "").strip().casefold(),
+            str(country_code or "").strip().upper(),
+        )
+        if cache_key not in prediction_cache:
+            prediction_cache[cache_key] = predictor(
+                item_name,
+                required_length=required_length,
+                country=country,
+                country_code=country_code,
+                log_cb=log_cb,
+            )
+        elif log_cb:
+            log_cb(f"📦 HS Code 批次快取命中: {item_name}（{required_length}碼）")
+        return prediction_cache[cache_key]
+
+    for _, row in _iter_rows(rows):
+        order_id = _row_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
+        country_raw = _row_val(row, ["收件人國家", "Country"])
+        country_code = _country_code(country_raw)
+        items = _iter_content_items(row)
+        required_length = required_hs_code_length(country_raw, country_code)
+        if not order_id or not items or required_length <= 0:
+            continue
+        if log_cb:
+            log_cb(f"🔎 HS Code 預查：訂單 {order_id}，{len(items)} 個品項，需要 {required_length} 碼")
+        codes = prepare_hs_codes_for_items(
+            items,
+            country_raw=country_raw,
+            country_code=country_code,
+            predictor=cached_predictor,
+            log_cb=log_cb,
+        )
+        if codes:
+            prepared[order_id] = codes
+    return prepared
+
+
 def _build_m060800_item_payload(
     html: str,
     page_url: str,
@@ -944,6 +1003,13 @@ def run_automation(
     user, pwd = _get_jp_post_creds()
     pw_cookies = []
     _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
+    from .sheets import COUNTRY_CODE_MAP
+    hs_codes_by_order = _prepare_batch_hs_codes(
+        rows,
+        COUNTRY_CODE_MAP,
+        predictor=predict_hs_code,
+        log_cb=_log,
+    )
 
     if not user or not pwd:
         _log("❌ 未設定 JP_POST_USER / JP_POST_PASS，無法登入日本郵政")
@@ -1493,8 +1559,6 @@ def run_automation(
             if not req_session or not label_form_html:
                 raise RuntimeError("尚未取得 M060505/addrToBean 表單 HTML，無法提交收件人 payload")
 
-            from .sheets import COUNTRY_CODE_MAP
-
             country_raw = _get_excel_val(row, ["收件人國家", "Country"])
             country_code = COUNTRY_CODE_MAP.get(country_raw, "")
             name_val = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
@@ -1571,17 +1635,27 @@ def run_automation(
                 _log("⚠️ M060505 回應仍停留在收件人頁，可能有欄位驗證錯誤")
             return resp, country_raw, country_code
 
-        def submit_m060800_item_via_requests(html: str, page_url: str, row: pd.Series, is_eu: bool):
+        def submit_m060800_item_via_requests(
+            html: str,
+            page_url: str,
+            row: pd.Series,
+            is_eu: bool,
+            hs_codes_by_item: dict[str, str] | None = None,
+        ):
             items = _iter_content_items(row)
             if not items:
                 raise RuntimeError("M060800 payload has no content items")
+            hs_codes_by_item = hs_codes_by_item or {}
             current_html = html
             current_url = page_url
             resp = None
             for pos, item in enumerate(items, start=1):
-                hs_code = ""
-                if is_eu and item["pkg"]:
-                    hs_code = predict_hs_code(item["pkg"], log_cb=log_cb) or ""
+                hs_code = hs_codes_by_item.get(item["index"], "")
+                if is_eu and item["pkg"] and not hs_code:
+                    raise RuntimeError(
+                        f"HS Code missing before M060800 submit: "
+                        f"item={pos}/{len(items)}, pkg={item['pkg']}"
+                    )
                 action, payload = _build_m060800_item_payload(
                     current_html,
                     current_url,
@@ -1597,6 +1671,7 @@ def run_automation(
                     f"pkg={payload.get('itemBean.pkg', '')}, "
                     f"cost={payload.get('itemBean.cost.value', '')}, "
                     f"num={payload.get('itemBean.num.value', '')}, "
+                    f"hsCode={hs_code or '-'}, "
                     f"profile={_shipping_profile(row) or '-'}, "
                     f"sendType={payload.get('shippingBean.sendType', '')}, "
                     f"transType={payload.get('shippingBean.transType', '')}, "
@@ -1936,6 +2011,7 @@ def run_automation(
                         addr_resp.url,
                         row,
                         is_eu,
+                        hs_codes_by_order.get(order_id, {}),
                     )
                     main_menu_html = item_resp.text
                     main_menu_url = item_resp.url
