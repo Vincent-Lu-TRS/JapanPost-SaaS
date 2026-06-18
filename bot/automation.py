@@ -747,6 +747,26 @@ def _prepare_batch_hs_codes(rows, country_code_map: dict[str, str], predictor=pr
     return prepared
 
 
+def _validate_required_hs_codes(
+    items: list[dict[str, str]],
+    *,
+    is_eu: bool,
+    hs_codes_by_item: dict[str, str],
+) -> None:
+    if not is_eu:
+        return
+    missing = [
+        f"item={pos}/{len(items)}, pkg={item.get('pkg', '')}"
+        for pos, item in enumerate(items, start=1)
+        if item.get("pkg") and not hs_codes_by_item.get(str(item.get("index", "")))
+    ]
+    if missing:
+        raise RuntimeError(
+            "HS Code missing before M060800 submit: "
+            + "; ".join(missing)
+        )
+
+
 def _build_m060800_item_payload(
     html: str,
     page_url: str,
@@ -978,6 +998,7 @@ def run_automation(
     max_rows: int | None = None,
     log_cb=None,
     headless: bool = True,
+    precomputed_hs_codes: dict[str, dict[str, str]] | None = None,
 ) -> list[dict]:
     """
     執行日本郵政自動化打單。
@@ -987,6 +1008,7 @@ def run_automation(
         max_rows  : 最多處理幾筆（None = 全部）
         log_cb    : 進度回呼函數 (str -> None)
         headless  : 是否以 headless 模式執行（生產環境固定 True）
+        precomputed_hs_codes: 預先查好的 HS Code，避免重複呼叫 AI
 
     Returns:
         成功結果清單，每筆為 dict {name, order_id, tracking, country_raw, date}
@@ -1004,12 +1026,14 @@ def run_automation(
     pw_cookies = []
     _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
     from .sheets import COUNTRY_CODE_MAP
-    hs_codes_by_order = _prepare_batch_hs_codes(
-        rows,
-        COUNTRY_CODE_MAP,
-        predictor=predict_hs_code,
-        log_cb=_log,
-    )
+    hs_codes_by_order = precomputed_hs_codes
+    if hs_codes_by_order is None:
+        hs_codes_by_order = _prepare_batch_hs_codes(
+            rows,
+            COUNTRY_CODE_MAP,
+            predictor=predict_hs_code,
+            log_cb=_log,
+        )
 
     if not user or not pwd:
         _log("❌ 未設定 JP_POST_USER / JP_POST_PASS，無法登入日本郵政")
@@ -1646,16 +1670,16 @@ def run_automation(
             if not items:
                 raise RuntimeError("M060800 payload has no content items")
             hs_codes_by_item = hs_codes_by_item or {}
+            _validate_required_hs_codes(
+                items,
+                is_eu=is_eu,
+                hs_codes_by_item=hs_codes_by_item,
+            )
             current_html = html
             current_url = page_url
             resp = None
             for pos, item in enumerate(items, start=1):
                 hs_code = hs_codes_by_item.get(item["index"], "")
-                if is_eu and item["pkg"] and not hs_code:
-                    raise RuntimeError(
-                        f"HS Code missing before M060800 submit: "
-                        f"item={pos}/{len(items)}, pkg={item['pkg']}"
-                    )
                 action, payload = _build_m060800_item_payload(
                     current_html,
                     current_url,

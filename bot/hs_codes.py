@@ -39,6 +39,19 @@ CN_8_COUNTRIES = {
     "マルチニーク",
 }
 
+LOCAL_HS_CODE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("facial mask", "no alcohol"), "3304990000"),
+    (("face mask", "no alcohol"), "3304990000"),
+    (("pillow",), "9404900000"),
+    (("hair conditioner",), "3305900000"),
+    (("toothbrush",), "9603210000"),
+    (("spice grinder",), "8210000000"),
+    (("spice grinders",), "8210000000"),
+    (("frying pan",), "7323990000"),
+    (("cooking stove",), "7321110000"),
+    (("portable cooking stove",), "7321110000"),
+)
+
 
 def _normalize_country(country_raw: str) -> str:
     text = unicodedata.normalize("NFKC", str(country_raw or "")).strip()
@@ -68,6 +81,20 @@ def normalize_hs_code(raw_code: str, required_length: int) -> str:
     return digits[:required_length]
 
 
+def _normalize_item_name(item_name: str) -> str:
+    text = unicodedata.normalize("NFKC", str(item_name or "")).casefold()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def local_hs_code_lookup(item_name: str, required_length: int) -> str:
+    normalized_name = _normalize_item_name(item_name)
+    for needles, code in LOCAL_HS_CODE_RULES:
+        if all(needle in normalized_name for needle in needles):
+            return normalize_hs_code(code, required_length)
+    return ""
+
+
 Predictor = Callable[..., str]
 
 
@@ -92,13 +119,17 @@ def prepare_hs_codes_for_items(
             continue
         cache_key = (pkg.casefold(), required_length, _normalize_country(country_raw))
         if cache_key not in resolved_by_pkg:
-            code = predictor(
-                pkg,
-                required_length=required_length,
-                country=country_raw,
-                country_code=country_code,
-                log_cb=log_cb,
-            )
+            code = local_hs_code_lookup(pkg, required_length)
+            if code and log_cb:
+                log_cb(f"📚 HS Code 本地參照命中: {pkg} → {code} ({required_length}碼)")
+            if not code:
+                code = predictor(
+                    pkg,
+                    required_length=required_length,
+                    country=country_raw,
+                    country_code=country_code,
+                    log_cb=log_cb,
+                )
             normalized = normalize_hs_code(code, required_length)
             if log_cb:
                 if normalized:

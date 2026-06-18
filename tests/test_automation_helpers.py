@@ -32,6 +32,7 @@ from bot.automation import (
     _has_m060800_item_book_warning,
     _iter_content_items,
     _prepare_batch_hs_codes,
+    _validate_required_hs_codes,
     _parse_forms,
     _pick_form,
     _select_option_value,
@@ -820,7 +821,6 @@ class AutomationHtmlTests(unittest.TestCase):
             calls,
             [
                 ("Mask", 6, "GERMANY", "EU"),
-                ("Pillow", 6, "GERMANY", "EU"),
                 ("Gift", 10, "IRELAND", "EU"),
             ],
         )
@@ -854,6 +854,20 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(codes["DE-1"], {"1": "330499"})
         self.assertEqual(codes["DE-2"], {"1": "330499"})
         self.assertEqual(calls, [("Mask", 6, "GERMANY", "EU")])
+
+    def test_validate_required_hs_codes_rejects_missing_before_any_item_submit(self):
+        items = [
+            {"index": "1", "pkg": "Facial Mask"},
+            {"index": "2", "pkg": "Unknown Item"},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "HS Code missing before M060800 submit"):
+            _validate_required_hs_codes(items, is_eu=True, hs_codes_by_item={"1": "330499"})
+
+    def test_validate_required_hs_codes_allows_non_eu_without_codes(self):
+        items = [{"index": "1", "pkg": "Unknown Item"}]
+
+        _validate_required_hs_codes(items, is_eu=False, hs_codes_by_item={})
 
     def test_build_m060800_item_payload_can_submit_second_item(self):
         html = """

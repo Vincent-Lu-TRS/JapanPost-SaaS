@@ -1,6 +1,7 @@
 import unittest
 
 from bot.hs_codes import (
+    local_hs_code_lookup,
     prepare_hs_codes_for_items,
     required_hs_code_length,
     normalize_hs_code,
@@ -27,6 +28,11 @@ class HsCodeRuleTests(unittest.TestCase):
     def test_normalize_hs_code_rejects_short_code(self):
         self.assertEqual(normalize_hs_code("330499", 8), "")
         self.assertEqual(normalize_hs_code("", 6), "")
+
+    def test_local_hs_code_lookup_covers_common_shipping_items(self):
+        self.assertEqual(local_hs_code_lookup("Pillow TRSN9842", 6), "940490")
+        self.assertEqual(local_hs_code_lookup("Facial Mask(No Alcohol) TRSN6764", 6), "330499")
+        self.assertEqual(local_hs_code_lookup("Hair Conditioner", 6), "330590")
 
     def test_prepare_hs_codes_for_items_dedupes_and_uses_required_length(self):
         calls = []
@@ -65,6 +71,23 @@ class HsCodeRuleTests(unittest.TestCase):
         )
 
         self.assertEqual(codes, {})
+        self.assertEqual(calls, [])
+
+    def test_prepare_hs_codes_for_items_uses_local_fallback_when_predictor_fails(self):
+        calls = []
+
+        def exhausted_predictor(item_name, *, required_length=6, country="", country_code="", log_cb=None):
+            calls.append(item_name)
+            return ""
+
+        codes = prepare_hs_codes_for_items(
+            [{"index": "1", "pkg": "Pillow TRSN9842"}],
+            country_raw="GERMANY",
+            country_code="EU",
+            predictor=exhausted_predictor,
+        )
+
+        self.assertEqual(codes, {"1": "940490"})
         self.assertEqual(calls, [])
 
 

@@ -19,6 +19,12 @@ from job_control import (
     mark_unfinished_orders,
     update_order_status_from_log,
 )
+from pending_editor import (
+    SHIPPING_COL,
+    SHIPPING_OPTIONS,
+    apply_pending_editor_values,
+    build_pending_editor_frame,
+)
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -103,12 +109,32 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
 
         try:
             _log("🚀 任務啟動，正在載入模組...")
-            from bot.automation import AUTOMATION_BUILD_ID, run_automation
-            from bot.sheets import backfill_results
+            from bot.automation import AUTOMATION_BUILD_ID, _prepare_batch_hs_codes, run_automation
+            from bot.sheets import COUNTRY_CODE_MAP, backfill_results
             _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
 
+            rows_for_run = df if max_rows is None else df.head(max_rows)
+            _log("🔎 正在預查本批 HS Code...")
+            hs_codes_by_order = _prepare_batch_hs_codes(
+                rows_for_run,
+                COUNTRY_CODE_MAP,
+                log_cb=_log,
+            )
+            job["hs_codes_by_order"] = hs_codes_by_order
+            for order in job.get("orders") or []:
+                codes = hs_codes_by_order.get(order.get("order_id", ""), {})
+                if codes:
+                    order["hs_codes"] = ", ".join(
+                        f"{idx}:{code}" for idx, code in sorted(codes.items(), key=lambda pair: int(pair[0]))
+                    )
             _log("✅ 模組載入成功，開始 Playwright 自動化...")
-            results = run_automation(df, max_rows=max_rows, log_cb=_log, headless=True)
+            results = run_automation(
+                df,
+                max_rows=max_rows,
+                log_cb=_log,
+                headless=True,
+                precomputed_hs_codes=hs_codes_by_order,
+            )
             job["results"] = results
             mark_results_completed(job, results)
             if results:
@@ -240,18 +266,42 @@ def _render_main_app():
             except Exception as e:
                 st.warning(f"無法讀取 Google Sheets：{e}")
 
-    st.subheader("📊 待打單預覽")
+    df_pending_for_run = df_pending
+    preview_title_col, preview_button_col = st.columns([5, 1])
+    with preview_title_col:
+        st.subheader("📊 待打單預覽")
+    with preview_button_col:
+        if not is_running and st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
+            st.session_state.pop("last_pending_df", None)
+            st.session_state.pop("last_pending_logs", None)
+            st.rerun()
     if not df_pending.empty:
-        preview_cols = [
-            c for c in [
-                "注文番号(貼上原始資料)", "Shipping Name", "收件人國家",
-                "郵局運送方式(複數商品請自行確認是否走小包)", "郵局申告金額(USD)",
-            ] if c in df_pending.columns
-        ]
-        if preview_cols:
-            st.dataframe(df_pending[preview_cols].head(20), hide_index=True, width="stretch")
+        editor_frame = build_pending_editor_frame(df_pending)
+        if is_running:
+            st.dataframe(editor_frame.head(20), hide_index=True, width="stretch")
+            df_pending_for_run = df_pending
         else:
-            st.dataframe(df_pending.head(20), hide_index=True, width="stretch")
+            edited_frame = st.data_editor(
+                editor_frame.head(20),
+                hide_index=True,
+                width="stretch",
+                num_rows="fixed",
+                disabled=[
+                    "注文番号(貼上原始資料)",
+                    "Shipping Name",
+                    "收件人國家",
+                    "HSCode",
+                ],
+                column_config={
+                    SHIPPING_COL: st.column_config.SelectboxColumn(
+                        "郵局運送方式",
+                        options=SHIPPING_OPTIONS,
+                    ),
+                    "HSCode": st.column_config.TextColumn("HSCode"),
+                },
+                key="pending_editor",
+            )
+            df_pending_for_run = apply_pending_editor_values(df_pending, edited_frame)
         if pending_logs:
             with st.expander("🔎 待製單讀取診斷", expanded=True):
                 st.code("\n".join(pending_logs), language="text")
@@ -278,10 +328,6 @@ def _render_main_app():
 
         st.divider()
         st.markdown("**執行設定**")
-        if not is_running and st.button("🔁 重新讀取待製單", width="stretch"):
-            st.session_state.pop("last_pending_df", None)
-            st.session_state.pop("last_pending_logs", None)
-            st.rerun()
         max_rows_input = st.number_input(
             "最多處理筆數（0 = 全部）",
             min_value=0, max_value=500, value=10, step=1,
@@ -300,7 +346,7 @@ def _render_main_app():
                 if df_pending.empty:
                     st.warning("沒有符合條件的待打單資料")
                 else:
-                    ok, reason = _start_job(email, df_pending, max_rows_val)
+                    ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
                     if ok:
                         st.success("✅ 已啟動！")
                         time.sleep(0.8)
@@ -339,9 +385,12 @@ def _render_main_app():
                 "status": "狀態",
                 "stage": "階段",
                 "tracking_no": "貨運單號",
+                "hs_codes": "HSCode",
                 "message": "訊息",
             })
-            show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "訊息"]
+            if "HSCode" not in df_status.columns:
+                df_status["HSCode"] = ""
+            show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
             st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
         else:
             st.info("任務開始後，這裡會逐筆顯示製單狀態。")
