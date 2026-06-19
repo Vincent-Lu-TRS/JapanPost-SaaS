@@ -241,6 +241,29 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(any("WhoWhy-Test6" in line and "基礎=FAIL" in line for line in whowhy_lines))
         self.assertTrue(any("WhoWhy-Test7" in line and "基礎=PASS" in line for line in whowhy_lines))
 
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_keeps_watched_diagnostics_concise(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": f"WhoWhy-Test{i}",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局申告金額(USD)": "1.55",
+                    "製單檢核": "",
+                    "Shipping Name": f"Name {i}",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                }
+                for i in range(12)
+            ]
+        )
+        logs = []
+
+        _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
+
+        whowhy_lines = [line for line in logs if "- 關注訂單" in line]
+        self.assertLessEqual(len(whowhy_lines), 5)
+        self.assertTrue(any("關注訂單診斷" in line and "PASS=12" in line for line in logs))
+
 
 if __name__ == "__main__":
     unittest.main()

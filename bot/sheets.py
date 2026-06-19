@@ -151,11 +151,17 @@ def _filter_pending_orders_dataframe(
         & (df[check_col].str.upper() != "TRUE")
         & (df[shipname_col] != "")
     )
-    watched_mask = df[order_id_col].str.contains("WhoWhy", case=False, na=False)
+    watched_mask = df[order_id_col].str.contains("WhoWhy|WhoWht", case=False, na=False, regex=True)
     watched_rows = df[watched_mask]
     if not watched_rows.empty:
-        _log(f"🧪 關注訂單診斷（WhoWhy*）：{len(watched_rows)} 筆")
-        for idx, row in watched_rows.iterrows():
+        watched_pass_count = int(base_mask[watched_mask].sum())
+        watched_fail_count = len(watched_rows) - watched_pass_count
+        _log(
+            f"🧪 關注訂單診斷（WhoWhy/WhoWht）："
+            f"{len(watched_rows)} 筆，PASS={watched_pass_count}，FAIL={watched_fail_count}；"
+            "僅顯示末端 5 筆"
+        )
+        for idx, row in watched_rows.tail(5).iterrows():
             result = "PASS" if bool(base_mask.loc[idx]) else "FAIL"
             _log(
                 "   - 關注訂單 "
