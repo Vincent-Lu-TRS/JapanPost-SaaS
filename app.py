@@ -344,15 +344,22 @@ def _render_main_app():
                 linear-gradient(135deg, var(--erp-bg-warm) 0%, var(--erp-bg) 45%, #11100e 100%);
             color: var(--erp-text);
         }
-        .block-container { padding-top: 2.75rem; max-width: 1540px; }
+        .block-container {
+            padding-top: 1.65rem;
+            padding-bottom: 2rem;
+            max-width: 1520px;
+        }
+        div[data-testid="stHorizontalBlock"] { gap: 1.7rem; }
+        hr { margin: .85rem 0 1.05rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
-        h3 { color: #fff7ed; }
+        h3 { color: #fff7ed; margin-bottom: .35rem; }
+        div[data-testid="stHeading"] { margin-bottom: .25rem; }
         p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: var(--erp-muted); }
         div[data-testid="stCaptionContainer"] { color: var(--erp-dim); }
         button {
             color: var(--erp-text) !important;
-            border-radius: 10px !important;
-            min-height: 2.55rem;
+            border-radius: 9px !important;
+            min-height: 2.35rem;
             white-space: nowrap !important;
         }
         button:disabled {
@@ -370,7 +377,7 @@ def _render_main_app():
         div[data-testid="stMetric"] {
             border: 1px solid var(--erp-border);
             border-radius: 10px;
-            padding: 0.75rem 0.9rem;
+            padding: 0.62rem 0.78rem;
             background: rgba(24, 24, 27, 0.86);
             color: var(--erp-text);
         }
@@ -380,6 +387,19 @@ def _render_main_app():
         }
         div[data-testid="stMetric"] [data-testid="stMetricValue"] {
             color: var(--erp-text) !important;
+        }
+        .compact-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: .65rem;
+            min-height: 2.45rem;
+            margin-top: .1rem;
+        }
+        .order-card-marker,
+        .side-panel-marker,
+        .debug-log-marker {
+            display: none;
         }
         div[data-testid="stExpander"] {
             border-radius: 12px;
@@ -396,14 +416,15 @@ def _render_main_app():
             border-radius: 10px;
             overflow: hidden;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            border-color: var(--erp-border-soft) !important;
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker) {
+            border: 1px solid rgba(251, 146, 60, 0.17) !important;
             border-radius: 12px !important;
-            background: rgba(20, 22, 26, 0.92);
-            margin-bottom: .55rem;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, .14);
+            background: rgba(19, 21, 25, 0.96);
+            margin-bottom: .75rem;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025), 0 10px 24px rgba(0, 0, 0, .12);
+            padding: .74rem .78rem !important;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker):hover {
             border-color: rgba(245, 158, 11, 0.42) !important;
             background: rgba(23, 25, 30, 0.96);
         }
@@ -433,7 +454,7 @@ def _render_main_app():
             font-weight: 700;
             line-height: 1.25;
             overflow-wrap: anywhere;
-            padding: .15rem 0;
+            padding: 0;
         }
         .order-card-body {
             padding: .62rem .72rem .72rem .72rem;
@@ -448,19 +469,19 @@ def _render_main_app():
             border: 1px solid var(--erp-border);
             background: rgba(15, 23, 42, 0.72);
             border-radius: 8px;
-            padding: .34rem .5rem;
-            min-height: 3.05rem;
+            padding: .28rem .48rem;
+            min-height: 2.72rem;
         }
         .summary-label {
             color: var(--erp-accent);
-            font-size: .72rem;
+            font-size: .68rem;
             line-height: 1.1;
             font-weight: 650;
         }
         .summary-value {
             color: var(--erp-text);
-            font-weight: 650;
-            line-height: 1.28;
+            font-weight: 700;
+            line-height: 1.22;
             white-space: normal;
             overflow-wrap: anywhere;
         }
@@ -485,20 +506,20 @@ def _render_main_app():
         }
         .select-summary-label { margin-bottom: .02rem; }
         div[data-baseweb="select"] > div {
-            background: rgba(248, 250, 252, 0.96);
-            border-color: rgba(148, 163, 184, 0.26);
-            min-height: 2.45rem;
+            background: rgba(15, 23, 42, 0.96);
+            border-color: rgba(251, 146, 60, 0.26);
+            min-height: 2.35rem;
         }
         div[data-baseweb="select"] span,
         div[data-baseweb="select"] div {
-            color: #111827;
-            font-weight: 650;
+            color: var(--erp-text) !important;
+            font-weight: 700;
         }
         .rate-caption {
             color: #fde68a;
             font-size: .78rem;
             text-align: right;
-            padding-top: .55rem;
+            padding-top: .42rem;
             white-space: nowrap;
         }
         .stButton > button[kind="primary"] {
@@ -508,19 +529,79 @@ def _render_main_app():
         div[data-testid="stDataEditor"] {
             border-radius: 10px;
             overflow: hidden;
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            background: #111827;
         }
         div[data-testid="stDataEditor"] [role="gridcell"],
         div[data-testid="stDataEditor"] [role="columnheader"] {
             line-height: 1.25;
-            min-height: 2rem !important;
+            min-height: 1.82rem !important;
         }
-        div[data-testid="stNumberInput"] input,
+        div[data-testid="stDataEditor"] [role="columnheader"] {
+            background: #1f2937 !important;
+            color: #cbd5e1 !important;
+        }
+        div[data-testid="stDataEditor"] [role="gridcell"] {
+            background: #111827 !important;
+            color: #e5e7eb !important;
+            border-color: rgba(148, 163, 184, 0.14) !important;
+        }
+        div[data-testid="stDataEditor"] [role="row"]:hover [role="gridcell"] {
+            background: #172033 !important;
+        }
+        div[data-testid="stNumberInput"] input {
+            background: rgba(15, 23, 42, 0.96) !important;
+            border-color: rgba(251, 146, 60, 0.26) !important;
+            color: var(--erp-text) !important;
+            min-height: 2.35rem;
+            border-radius: 9px;
+            font-weight: 650;
+        }
+        div[data-testid="stNumberInput"] input::-webkit-outer-spin-button,
+        div[data-testid="stNumberInput"] input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        div[data-testid="stNumberInput"] input[type=number] {
+            -moz-appearance: textfield;
+        }
+        div[data-testid="stNumberInput"] button {
+            display: none;
+        }
         div[data-testid="stTextInput"] input {
-            color: #111827;
+            color: var(--erp-text);
         }
         .compact-actions div[data-testid="column"] {
             display: flex;
             align-items: stretch;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.side-panel-marker) {
+            position: sticky;
+            top: 88px;
+            border: 1px solid rgba(251, 146, 60, 0.16);
+            border-radius: 14px;
+            background: rgba(13, 15, 18, 0.72);
+            padding: .78rem;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.side-panel-marker) h3 { margin-top: 0; }
+        div[data-testid="stExpander"]:has(.debug-log-marker) {
+            background: rgba(12, 16, 25, 0.9);
+            border-color: rgba(148, 163, 184, 0.18);
+        }
+        div[data-testid="stExpander"]:has(.debug-log-marker) summary {
+            background: rgba(17, 24, 39, 0.92) !important;
+        }
+        div[data-testid="stExpander"]:has(.debug-log-marker) pre,
+        div[data-testid="stExpander"]:has(.debug-log-marker) code {
+            max-height: 260px !important;
+            overflow-y: auto !important;
+            background: #0b1020 !important;
+            color: #d1e7ff !important;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: .82rem;
+            line-height: 1.5;
         }
         @media (max-width: 900px) {
             .order-card-header {
@@ -528,6 +609,7 @@ def _render_main_app():
                 flex-direction: column;
             }
             .rate-caption { text-align: left; }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.side-panel-marker) { position: static; }
         }
         </style>
         """,
@@ -626,6 +708,7 @@ def _render_main_app():
                     summary_row = build_pending_summary_frame(preview_df).iloc[0]
 
                     with st.container(border=True):
+                        st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
                         header_col, reset_col = st.columns([5.2, 0.9], vertical_alignment="center")
                         with header_col:
                             st.markdown(
@@ -701,10 +784,12 @@ def _render_main_app():
                     st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
             if pending_logs:
                 with st.expander("🔎 待製單讀取診斷", expanded=False):
+                    st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
                     st.code("\n".join(pending_logs), language="text")
         elif pending_logs:
             st.info("目前沒有待製單資料。")
             with st.expander("🔎 待製單讀取診斷", expanded=True):
+                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
                 st.code("\n".join(pending_logs), language="text")
         else:
             st.info("目前沒有待製單資料。")
@@ -752,55 +837,58 @@ def _render_main_app():
             st.dataframe(df_res, hide_index=True)
 
     with side_col:
-        st.subheader("📋 操作面板")
+        with st.container(border=True):
+            st.markdown('<span class="side-panel-marker"></span>', unsafe_allow_html=True)
+            st.subheader("📋 操作面板")
 
-        m1, m2 = st.columns(2)
-        with m1:
-            st.metric("⏳ 待製單", pending_count)
-        with m2:
-            done = len(job["results"]) if job else 0
-            st.metric("✅ 本次完成", done)
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric("⏳ 待製單", pending_count)
+            with m2:
+                done = len(job["results"]) if job else 0
+                st.metric("✅ 本次完成", done)
 
-        st.divider()
-        st.markdown("**執行設定**")
-        max_rows_input = st.number_input(
-            "最多處理筆數（0 = 全部）",
-            min_value=0, max_value=500, value=10, step=1,
-            disabled=is_running,
-        )
-        max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-
-        if is_running:
-            st.info("🔄 自動化進行中...")
-            if st.button("🔄 重新整理", width="stretch"):
-                st.rerun()
-        else:
-            btn_label = "🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單"
-            if zero_value_warnings:
-                st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
-            if st.button(btn_label, type="primary",
-                         disabled=(pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
-                if df_pending.empty:
-                    st.warning("沒有符合條件的待打單資料")
-                else:
-                    ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
-                    if ok:
-                        st.success("✅ 已啟動！")
-                        time.sleep(0.8)
-                        st.rerun()
-                    else:
-                        if reason == "batch_running":
-                            st.error("同一批製單已在執行中，已阻止重複啟動。")
-                        else:
-                            st.error("任務執行中，請稍候")
-
-        if job and job.get("status") in ("completed", "error"):
             st.divider()
-            icon = "✅" if job["status"] == "completed" else "❌"
-            st.markdown(f"**{icon} 上次：{job['status']}**")
-            st.caption(f"啟動於 {job.get('started_at', '')}")
-            if job.get("results"):
-                st.caption(f"完成 {len(job['results'])} 筆")
+            st.markdown("**執行設定**")
+            max_rows_input = st.number_input(
+                "最多處理筆數",
+                min_value=0, max_value=500, value=10, step=1,
+                disabled=is_running,
+            )
+            st.caption("0 = 全部")
+            max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+
+            if is_running:
+                st.info("🔄 自動化進行中...")
+                if st.button("🔄 重新整理", width="stretch"):
+                    st.rerun()
+            else:
+                btn_label = "🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單"
+                if zero_value_warnings:
+                    st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
+                if st.button(btn_label, type="primary",
+                             disabled=(pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
+                    if df_pending.empty:
+                        st.warning("沒有符合條件的待打單資料")
+                    else:
+                        ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
+                        if ok:
+                            st.success("✅ 已啟動！")
+                            time.sleep(0.8)
+                            st.rerun()
+                        else:
+                            if reason == "batch_running":
+                                st.error("同一批製單已在執行中，已阻止重複啟動。")
+                            else:
+                                st.error("任務執行中，請稍候")
+
+            if job and job.get("status") in ("completed", "error"):
+                st.divider()
+                icon = "✅" if job["status"] == "completed" else "❌"
+                st.markdown(f"**{icon} 上次：{job['status']}**")
+                st.caption(f"啟動於 {job.get('started_at', '')}")
+                if job.get("results"):
+                    st.caption(f"完成 {len(job['results'])} 筆")
 
     if job and job.get("logs"):
         st.divider()
