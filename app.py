@@ -34,7 +34,7 @@ from fx_rates import fetch_usd_jpy_rate
 # ★ set_page_config 必須在所有 st.* 呼叫之前
 # ══════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="JP Post 自動製單平台",
+    page_title="JP Post Label Maker",
     page_icon="📮",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -151,6 +151,44 @@ def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFra
             if column in edited.columns:
                 edited.at[edited.index[index], column] = value
     return edited
+
+
+def _build_pending_run_frame_from_state(
+    df_pending: pd.DataFrame,
+    editable_count: int,
+    usd_jpy_rate: float | None,
+) -> pd.DataFrame:
+    edited_summary_rows: list[dict[str, str]] = []
+    edited_items_by_position: dict[int, pd.DataFrame] = {}
+    for position in range(editable_count):
+        row = df_pending.iloc[position]
+        order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
+        name = str(row.get("Shipping Name", "")).strip()
+        country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+        default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
+        reset_version = _reset_version(order_id)
+        item_frame = build_pending_item_frame(row)
+        item_key = f"pending_items_{position}_{order_id}_{reset_version}"
+        trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
+        edited_summary_rows.append(
+            {
+                "Order No.": order_id,
+                "Name": name,
+                "Country": country,
+                "TransType": st.session_state.get(trans_key, default_trans_type),
+                "TotalValue(USD)": "",
+                "TotalValue(JPY)": "",
+            }
+        )
+        edited_items_by_position[position] = _apply_data_editor_state(item_frame, item_key)
+    if not edited_summary_rows:
+        return df_pending
+    return apply_pending_order_editor_values(
+        df_pending,
+        pd.DataFrame(edited_summary_rows),
+        edited_items_by_position,
+        usd_jpy_rate=usd_jpy_rate,
+    )
 
 
 def _summary_cell(label: str, value: str) -> str:
@@ -270,7 +308,7 @@ def _render_login_page():
 
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
-        st.markdown("## 📮 JP Post 自動製單平台")
+        st.markdown("## 📮 JP Post Label Maker")
         st.markdown("**企業專屬 SaaS・免安裝・雲端全自動**")
         st.divider()
         st.markdown("請使用公司 Google 帳號登入（@tkrjm.co.jp）")
@@ -302,9 +340,9 @@ def _render_main_app():
     name = st.session_state.get("user_name", email)
     picture = st.session_state.get("user_picture", "")
 
-    col1, col2, col3 = st.columns([6, 2, 1])
+    col1, col2, col3 = st.columns([5.5, 1.4, 0.65], vertical_alignment="center")
     with col1:
-        st.markdown("### 📮 JP Post 自動製單平台")
+        st.markdown("### 📮 JP Post Label Maker")
     with col2:
         if picture:
             st.markdown(
@@ -313,6 +351,8 @@ def _render_main_app():
                 f'<span style="font-size:0.9rem">{name}</span>',
                 unsafe_allow_html=True,
             )
+        else:
+            st.markdown(f'<span style="font-size:0.9rem">{html.escape(name)}</span>', unsafe_allow_html=True)
     with col3:
         if st.button("登出", type="secondary"):
             logout(_cm)
@@ -345,12 +385,12 @@ def _render_main_app():
             color: var(--erp-text);
         }
         .block-container {
-            padding-top: 1.65rem;
+            padding-top: 1.15rem;
             padding-bottom: 2rem;
-            max-width: 1520px;
+            max-width: 1580px;
         }
-        div[data-testid="stHorizontalBlock"] { gap: 1.7rem; }
-        hr { margin: .85rem 0 1.05rem 0; border-color: rgba(148, 163, 184, 0.12); }
+        div[data-testid="stHorizontalBlock"] { gap: 1.05rem; }
+        hr { margin: .55rem 0 .75rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
         h3 { color: #fff7ed; margin-bottom: .35rem; }
         div[data-testid="stHeading"] { margin-bottom: .25rem; }
@@ -389,15 +429,65 @@ def _render_main_app():
             color: var(--erp-text) !important;
         }
         .compact-toolbar {
+            position: sticky;
+            top: 0;
+            z-index: 5;
+            border: 1px solid rgba(251, 146, 60, 0.18);
+            border-radius: 12px;
+            background: rgba(13, 15, 18, 0.94);
+            backdrop-filter: blur(10px);
+            padding: .5rem .55rem;
+            margin: .15rem 0 .72rem 0;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, .18);
+        }
+        .compact-toolbar div[data-testid="column"] { min-width: 0; }
+        .toolbar-chip {
+            border: 1px solid rgba(251, 146, 60, 0.22);
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--erp-text);
+            min-height: 2.28rem;
+            padding: .42rem .62rem;
             display: flex;
             align-items: center;
-            justify-content: flex-end;
-            gap: .65rem;
-            min-height: 2.45rem;
-            margin-top: .1rem;
+            white-space: nowrap;
+            font-size: .82rem;
+            font-weight: 700;
+        }
+        .toolbar-chip span {
+            color: var(--erp-accent);
+            font-size: .72rem;
+            font-weight: 650;
+            margin-right: .35rem;
+        }
+        .toolbar-hint {
+            color: var(--erp-dim);
+            font-size: .72rem;
+            margin-top: -.28rem;
+            line-height: 1.1;
+        }
+        .toolbar-ghost button {
+            background: rgba(15, 23, 42, 0.28) !important;
+            border-color: rgba(148, 163, 184, 0.22) !important;
+            color: var(--erp-muted) !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.toolbar-marker) {
+            position: sticky;
+            top: 0;
+            z-index: 5;
+            border: 1px solid rgba(251, 146, 60, 0.18) !important;
+            border-radius: 12px !important;
+            background: rgba(13, 15, 18, 0.94);
+            backdrop-filter: blur(10px);
+            padding: .5rem .55rem !important;
+            margin: .15rem 0 .72rem 0;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, .18);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.toolbar-marker) div[data-testid="column"] {
+            min-width: 0;
         }
         .order-card-marker,
-        .side-panel-marker,
+        .toolbar-marker,
         .debug-log-marker {
             display: none;
         }
@@ -575,15 +665,6 @@ def _render_main_app():
             display: flex;
             align-items: stretch;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.side-panel-marker) {
-            position: sticky;
-            top: 88px;
-            border: 1px solid rgba(251, 146, 60, 0.16);
-            border-radius: 14px;
-            background: rgba(13, 15, 18, 0.72);
-            padding: .78rem;
-        }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.side-panel-marker) h3 { margin-top: 0; }
         div[data-testid="stExpander"]:has(.debug-log-marker) {
             background: rgba(12, 16, 25, 0.9);
             border-color: rgba(148, 163, 184, 0.18);
@@ -609,7 +690,8 @@ def _render_main_app():
                 flex-direction: column;
             }
             .rate-caption { text-align: left; }
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(.side-panel-marker) { position: static; }
+            .compact-toolbar,
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.toolbar-marker) { position: static; }
         }
         </style>
         """,
@@ -639,256 +721,236 @@ def _render_main_app():
             except Exception as e:
                 st.warning(f"無法讀取 Google Sheets：{e}")
 
-    df_pending_for_run = df_pending
-    main_col, side_col = st.columns([1, 0.24], gap="large")
+    rate, rate_date, rate_source = _load_usd_jpy_rate() if not df_pending.empty else (None, "", "")
+    editable_count = min(len(df_pending), 20)
+    if is_running or df_pending.empty:
+        df_pending_for_run = df_pending
+    else:
+        df_pending_for_run = _build_pending_run_frame_from_state(df_pending, editable_count, rate)
+    zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
+    done = len(job["results"]) if job else 0
 
-    with main_col:
-        preview_title_col, rate_col, reload_col, reset_all_col = st.columns([3.4, 1.65, 1.45, 1.35])
-        with preview_title_col:
-            st.subheader("📊 待打單預覽")
-        with rate_col:
-            rate, rate_date, rate_source = _load_usd_jpy_rate() if not df_pending.empty else (None, "", "")
-            if rate:
-                st.markdown(
-                    f'<div class="rate-caption">USD/JPY {rate:.4f} ({rate_date})</div>',
-                    unsafe_allow_html=True,
-                )
-        with reload_col:
-            if not is_running and st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
+    st.subheader("📊 待製單預覽")
+    with st.container(border=True):
+        st.markdown('<span class="toolbar-marker"></span>', unsafe_allow_html=True)
+        toolbar_cols = st.columns([1.18, .72, .82, .78, 1.06, 1.12, 1.2], gap="small", vertical_alignment="center")
+        with toolbar_cols[0]:
+            rate_text = f"{rate:.4f}" if rate else "N/A"
+            rate_suffix = f" ({rate_date})" if rate and rate_date else ""
+            st.markdown(f'<div class="toolbar-chip"><span>USD/JPY</span>{rate_text}{rate_suffix}</div>', unsafe_allow_html=True)
+        with toolbar_cols[1]:
+            st.markdown(f'<div class="toolbar-chip"><span>待製單</span>{pending_count}</div>', unsafe_allow_html=True)
+        with toolbar_cols[2]:
+            st.markdown(f'<div class="toolbar-chip"><span>本次完成</span>{done}</div>', unsafe_allow_html=True)
+        with toolbar_cols[3]:
+            max_rows_input = st.number_input(
+                "最大處理筆數",
+                min_value=0, max_value=500, value=10, step=1,
+                disabled=is_running,
+                label_visibility="collapsed",
+            )
+            st.markdown('<div class="toolbar-hint">0 = 全部</div>', unsafe_allow_html=True)
+        max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+        with toolbar_cols[4]:
+            if is_running:
+                if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
+                    st.rerun()
+            elif st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
                 st.session_state.pop("last_pending_df", None)
                 st.session_state.pop("last_pending_logs", None)
                 st.rerun()
-        with reset_all_col:
+        with toolbar_cols[5]:
+            btn_label = "🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單"
+            if st.button(btn_label, type="primary",
+                         disabled=(is_running or pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
+                if df_pending.empty:
+                    st.warning("沒有符合條件的待打單資料")
+                else:
+                    ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
+                    if ok:
+                        st.success("✅ 已啟動！")
+                        time.sleep(0.8)
+                        st.rerun()
+                    elif reason == "batch_running":
+                        st.error("同一批製單已在執行中，已阻止重複啟動。")
+                    else:
+                        st.error("任務執行中，請稍候")
+        with toolbar_cols[6]:
             reset_all_requested = st.button(
-                "恢復全部預設值",
+                "全訂單恢復預設值",
                 width="stretch",
                 key="reset_all_pending",
                 disabled=is_running or df_pending.empty,
             )
-        if not df_pending.empty:
-            if not rate:
-                st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
 
-            if is_running:
-                st.dataframe(build_pending_summary_frame(df_pending).head(20), hide_index=True, width="stretch")
-                df_pending_for_run = df_pending
-            else:
-                editable_count = min(len(df_pending), 20)
-                if reset_all_requested:
-                    _reset_all_order_editors(df_pending.head(editable_count))
-                    st.rerun()
-                edited_summary_rows: list[dict[str, str]] = []
-                edited_items_by_position: dict[int, pd.DataFrame] = {}
-                for position in range(editable_count):
-                    row = df_pending.iloc[position]
-                    order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
-                    name = str(row.get("Shipping Name", "")).strip()
-                    country = str(row.get("收件人國家", row.get("Country", ""))).strip()
-                    default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
-                    reset_version = _reset_version(order_id)
-                    item_frame = build_pending_item_frame(row)
-                    item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-                    summary_item_frame = _apply_data_editor_state(item_frame, item_key)
-                    trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
-                    pending_trans = st.session_state.get(trans_key, default_trans_type)
-                    summary_preview = {
-                        "Order No.": order_id,
-                        "Name": name,
-                        "Country": country,
-                        "TransType": pending_trans,
-                        "TotalValue(USD)": "",
-                        "TotalValue(JPY)": "",
-                    }
-                    preview_df = apply_pending_order_editor_values(
-                        df_pending.iloc[[position]],
-                        pd.DataFrame([summary_preview]),
-                        {0: summary_item_frame},
-                        usd_jpy_rate=rate,
-                    )
-                    summary_row = build_pending_summary_frame(preview_df).iloc[0]
+    if reset_all_requested and not df_pending.empty:
+        _reset_all_order_editors(df_pending.head(editable_count))
+        st.rerun()
+    if not rate and not df_pending.empty:
+        st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
+    if zero_value_warnings:
+        st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
 
-                    with st.container(border=True):
-                        st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                        header_col, reset_col = st.columns([5.2, 0.9], vertical_alignment="center")
-                        with header_col:
-                            st.markdown(
-                                f'<div class="order-title">{html.escape(order_id)} | {html.escape(name)}</div>',
-                                unsafe_allow_html=True,
-                            )
-                        with reset_col:
-                            if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
-                                _reset_order_editor(order_id)
-                                st.rerun()
-
-                        summary_cols = st.columns([1.1, 1.75, 1.25, 1.05, 0.9, 0.9], gap="small")
-                        with summary_cols[0]:
-                            st.markdown(_summary_cell("Order No.", summary_row["Order No."]), unsafe_allow_html=True)
-                        with summary_cols[1]:
-                            st.markdown(_summary_cell("Name", summary_row["Name"]), unsafe_allow_html=True)
-                        with summary_cols[2]:
-                            st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
-                        with summary_cols[3]:
-                            st.markdown(_summary_label("TransType"), unsafe_allow_html=True)
-                            trans_type = st.selectbox(
-                                "TransType",
-                                options=SHIPPING_OPTIONS,
-                                index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                                key=trans_key,
-                                label_visibility="collapsed",
-                            )
-                        with summary_cols[4]:
-                            st.markdown(_summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                        with summary_cols[5]:
-                            st.markdown(_summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
-
-                        edited_summary_rows.append(
-                            {
-                                "Order No.": order_id,
-                                "Name": name,
-                                "Country": country,
-                                "TransType": trans_type,
-                                "TotalValue(USD)": "",
-                                "TotalValue(JPY)": "",
-                            }
-                        )
-                        zero_items = has_zero_value_items(row)
-                        if zero_items:
-                            st.error(
-                                "Value is 0 for "
-                                + ", ".join(f"Content{i}" for i in zero_items)
-                                + ". Please edit before starting."
-                            )
-                        edited_items_by_position[position] = st.data_editor(
-                            item_frame,
-                            hide_index=True,
-                            width="stretch",
-                            num_rows="fixed",
-                            disabled=["Content"],
-                            column_config={
-                                "Content": st.column_config.TextColumn("Content", width="small"),
-                                "Description": st.column_config.TextColumn("Description", width="large"),
-                                "HSCode": st.column_config.TextColumn("HSCode", width="small"),
-                                "Value": st.column_config.TextColumn("Value", width="small"),
-                                "Quantity": st.column_config.TextColumn("Quantity", width="small"),
-                            },
-                            key=item_key,
-                        )
-
-                df_pending_for_run = apply_pending_order_editor_values(
-                    df_pending,
-                    pd.DataFrame(edited_summary_rows),
-                    edited_items_by_position,
+    if not df_pending.empty:
+        if is_running:
+            st.dataframe(build_pending_summary_frame(df_pending).head(20), hide_index=True, width="stretch")
+        else:
+            edited_summary_rows: list[dict[str, str]] = []
+            edited_items_by_position: dict[int, pd.DataFrame] = {}
+            for position in range(editable_count):
+                row = df_pending.iloc[position]
+                order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
+                name = str(row.get("Shipping Name", "")).strip()
+                country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+                default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
+                reset_version = _reset_version(order_id)
+                item_frame = build_pending_item_frame(row)
+                item_key = f"pending_items_{position}_{order_id}_{reset_version}"
+                summary_item_frame = _apply_data_editor_state(item_frame, item_key)
+                trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
+                pending_trans = st.session_state.get(trans_key, default_trans_type)
+                summary_preview = {
+                    "Order No.": order_id,
+                    "Name": name,
+                    "Country": country,
+                    "TransType": pending_trans,
+                    "TotalValue(USD)": "",
+                    "TotalValue(JPY)": "",
+                }
+                preview_df = apply_pending_order_editor_values(
+                    df_pending.iloc[[position]],
+                    pd.DataFrame([summary_preview]),
+                    {0: summary_item_frame},
                     usd_jpy_rate=rate,
                 )
-                if len(df_pending) > editable_count:
-                    st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
-            if pending_logs:
-                with st.expander("🔎 待製單讀取診斷", expanded=False):
-                    st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                    st.code("\n".join(pending_logs), language="text")
-        elif pending_logs:
-            st.info("目前沒有待製單資料。")
-            with st.expander("🔎 待製單讀取診斷", expanded=True):
+                summary_row = build_pending_summary_frame(preview_df).iloc[0]
+
+                with st.container(border=True):
+                    st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
+                    header_col, reset_col = st.columns([5.8, 1.0], vertical_alignment="center")
+                    with header_col:
+                        st.markdown(
+                            f'<div class="order-title">{html.escape(order_id)} | {html.escape(name)}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    with reset_col:
+                        if st.button("單筆恢復預設值", key=f"reset_order_{position}_{order_id}", width="stretch"):
+                            _reset_order_editor(order_id)
+                            st.rerun()
+
+                    summary_cols = st.columns([1.05, 1.55, 1.15, 1.02, .86, .86], gap="small")
+                    with summary_cols[0]:
+                        st.markdown(_summary_cell("Order No.", summary_row["Order No."]), unsafe_allow_html=True)
+                    with summary_cols[1]:
+                        st.markdown(_summary_cell("Name", summary_row["Name"]), unsafe_allow_html=True)
+                    with summary_cols[2]:
+                        st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
+                    with summary_cols[3]:
+                        st.markdown(_summary_label("TransType"), unsafe_allow_html=True)
+                        trans_type = st.selectbox(
+                            "TransType",
+                            options=SHIPPING_OPTIONS,
+                            index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
+                            key=trans_key,
+                            label_visibility="collapsed",
+                        )
+                    with summary_cols[4]:
+                        st.markdown(_summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                    with summary_cols[5]:
+                        st.markdown(_summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+
+                    edited_summary_rows.append(
+                        {
+                            "Order No.": order_id,
+                            "Name": name,
+                            "Country": country,
+                            "TransType": trans_type,
+                            "TotalValue(USD)": "",
+                            "TotalValue(JPY)": "",
+                        }
+                    )
+                    zero_items = has_zero_value_items(row)
+                    if zero_items:
+                        st.error(
+                            "Value is 0 for "
+                            + ", ".join(f"Content{i}" for i in zero_items)
+                            + ". Please edit before starting."
+                        )
+                    edited_items_by_position[position] = st.data_editor(
+                        item_frame,
+                        hide_index=True,
+                        width="stretch",
+                        num_rows="fixed",
+                        disabled=["Content"],
+                        column_config={
+                            "Content": st.column_config.TextColumn("Content", width="small"),
+                            "Description": st.column_config.TextColumn("Description", width="large"),
+                            "HSCode": st.column_config.TextColumn("HSCode", width="small"),
+                            "Value": st.column_config.TextColumn("Value", width="small"),
+                            "Quantity": st.column_config.TextColumn("Quantity", width="small"),
+                        },
+                        key=item_key,
+                    )
+
+            df_pending_for_run = apply_pending_order_editor_values(
+                df_pending,
+                pd.DataFrame(edited_summary_rows),
+                edited_items_by_position,
+                usd_jpy_rate=rate,
+            )
+            if len(df_pending) > editable_count:
+                st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
+        if pending_logs:
+            with st.expander("🔎 待製單讀取診斷", expanded=False):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
                 st.code("\n".join(pending_logs), language="text")
-        else:
-            st.info("目前沒有待製單資料。")
+    elif pending_logs:
+        st.info("目前沒有待製單資料。")
+        with st.expander("🔎 待製單讀取診斷", expanded=True):
+            st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
+            st.code("\n".join(pending_logs), language="text")
+    else:
+        st.info("目前沒有待製單資料。")
 
-        zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
+    if job and job.get("orders"):
+        st.subheader("🧾 製單狀態")
+        status_label = {
+            "queued": "待機中",
+            "running": "製單中",
+            "success": "完成",
+            "failed": "需排查",
+            "skipped": "略過",
+        }
+        df_status = pd.DataFrame(job["orders"])
+        df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
+        df_status = df_status.rename(columns={
+            "position": "#",
+            "order_id": "注文番号",
+            "recipient": "收件人",
+            "country": "國家",
+            "status": "狀態",
+            "stage": "階段",
+            "tracking_no": "貨運單號",
+            "hs_codes": "HSCode",
+            "message": "訊息",
+        })
+        if "HSCode" not in df_status.columns:
+            df_status["HSCode"] = ""
+        show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
+        st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
 
-        if job and job.get("orders"):
-            st.subheader("🧾 製單狀態")
-            status_label = {
-                "queued": "待機中",
-                "running": "製單中",
-                "success": "完成",
-                "failed": "需排查",
-                "skipped": "略過",
-            }
-            df_status = pd.DataFrame(job["orders"])
-            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
-            df_status = df_status.rename(columns={
-                "position": "#",
-                "order_id": "注文番号",
-                "recipient": "收件人",
-                "country": "國家",
-                "status": "狀態",
-                "stage": "階段",
-                "tracking_no": "貨運單號",
-                "hs_codes": "HSCode",
-                "message": "訊息",
-            })
-            if "HSCode" not in df_status.columns:
-                df_status["HSCode"] = ""
-            show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
-            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
-
-        if job and job.get("results"):
-            st.divider()
-            st.subheader("✅ 本次製單結果")
-            df_res = pd.DataFrame(job["results"])
-            df_res = df_res.rename(columns={
-                "name": "收件人",
-                "order_id": "注文番号",
-                "tracking": "貨運單號",
-                "country_raw": "國家（原始）",
-                "date": "日期",
-            })
-            st.dataframe(df_res, hide_index=True)
-
-    with side_col:
-        with st.container(border=True):
-            st.markdown('<span class="side-panel-marker"></span>', unsafe_allow_html=True)
-            st.subheader("📋 操作面板")
-
-            m1, m2 = st.columns(2)
-            with m1:
-                st.metric("⏳ 待製單", pending_count)
-            with m2:
-                done = len(job["results"]) if job else 0
-                st.metric("✅ 本次完成", done)
-
-            st.divider()
-            st.markdown("**執行設定**")
-            max_rows_input = st.number_input(
-                "最多處理筆數",
-                min_value=0, max_value=500, value=10, step=1,
-                disabled=is_running,
-            )
-            st.caption("0 = 全部")
-            max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-
-            if is_running:
-                st.info("🔄 自動化進行中...")
-                if st.button("🔄 重新整理", width="stretch"):
-                    st.rerun()
-            else:
-                btn_label = "🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單"
-                if zero_value_warnings:
-                    st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
-                if st.button(btn_label, type="primary",
-                             disabled=(pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
-                    if df_pending.empty:
-                        st.warning("沒有符合條件的待打單資料")
-                    else:
-                        ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
-                        if ok:
-                            st.success("✅ 已啟動！")
-                            time.sleep(0.8)
-                            st.rerun()
-                        else:
-                            if reason == "batch_running":
-                                st.error("同一批製單已在執行中，已阻止重複啟動。")
-                            else:
-                                st.error("任務執行中，請稍候")
-
-            if job and job.get("status") in ("completed", "error"):
-                st.divider()
-                icon = "✅" if job["status"] == "completed" else "❌"
-                st.markdown(f"**{icon} 上次：{job['status']}**")
-                st.caption(f"啟動於 {job.get('started_at', '')}")
-                if job.get("results"):
-                    st.caption(f"完成 {len(job['results'])} 筆")
+    if job and job.get("results"):
+        st.divider()
+        st.subheader("✅ 本次製單結果")
+        df_res = pd.DataFrame(job["results"])
+        df_res = df_res.rename(columns={
+            "name": "收件人",
+            "order_id": "注文番号",
+            "tracking": "貨運單號",
+            "country_raw": "國家（原始）",
+            "date": "日期",
+        })
+        st.dataframe(df_res, hide_index=True)
 
     if job and job.get("logs"):
         st.divider()
