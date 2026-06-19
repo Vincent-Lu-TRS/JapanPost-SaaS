@@ -207,8 +207,8 @@ class SheetsHelperTests(unittest.TestCase):
         result = _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
 
         self.assertTrue(result.empty)
-        self.assertTrue(any("製單檢核 TRUE 排除" in line and "WhoWhy-Test6" in line for line in logs))
-        self.assertTrue(any("Shipping Name 空白排除" in line and "WhoWhy-Test8" in line for line in logs))
+        self.assertTrue(any("製單檢核 TRUE 排除" in line and "1 筆" in line for line in logs))
+        self.assertTrue(any("Shipping Name 空白排除" in line and "1 筆" in line for line in logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
     def test_filter_pending_orders_logs_each_whowhy_row_status(self):
@@ -236,10 +236,10 @@ class SheetsHelperTests(unittest.TestCase):
 
         _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
 
-        whowhy_lines = [line for line in logs if "- 關注訂單" in line]
-        self.assertEqual(len(whowhy_lines), 2)
-        self.assertTrue(any("WhoWhy-Test6" in line and "基礎=FAIL" in line for line in whowhy_lines))
-        self.assertTrue(any("WhoWhy-Test7" in line and "基礎=PASS" in line for line in whowhy_lines))
+        whowhy_lines = [line for line in logs if "關注訂單診斷" in line]
+        self.assertEqual(len(whowhy_lines), 1)
+        self.assertTrue("PASS=1" in whowhy_lines[0])
+        self.assertTrue("FAIL=1" in whowhy_lines[0])
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
     def test_filter_pending_orders_keeps_watched_diagnostics_concise(self):
@@ -261,7 +261,7 @@ class SheetsHelperTests(unittest.TestCase):
         _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
 
         whowhy_lines = [line for line in logs if "- 關注訂單" in line]
-        self.assertLessEqual(len(whowhy_lines), 5)
+        self.assertEqual(len(whowhy_lines), 0)
         self.assertTrue(any("關注訂單診斷" in line and "PASS=12" in line for line in logs))
 
 

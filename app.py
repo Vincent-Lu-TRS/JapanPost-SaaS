@@ -6,6 +6,7 @@ Streamlit Web UI + Google OAuth（限 @tkrjm.co.jp）
 import os
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
 
+import html
 import subprocess
 import sys
 import time
@@ -108,6 +109,57 @@ def _zero_value_warning_lines(df: pd.DataFrame) -> list[str]:
             order_id = str(row.get("注文番号(貼上原始資料)", "")).strip()
             warnings.append(f"{order_id}: item {', '.join(str(i) for i in zero_items)}")
     return warnings
+
+
+def _reset_key_for(order_id: str) -> str:
+    return f"pending_reset_{order_id}"
+
+
+def _reset_version(order_id: str) -> int:
+    return int(st.session_state.get(_reset_key_for(order_id), 0))
+
+
+def _reset_order_editor(order_id: str) -> None:
+    st.session_state[_reset_key_for(order_id)] = _reset_version(order_id) + 1
+
+
+def _reset_all_order_editors(df: pd.DataFrame) -> None:
+    for _, row in df.iterrows():
+        order_id = str(row.get("注文番号(貼上原始資料)", "")).strip()
+        if order_id:
+            _reset_order_editor(order_id)
+
+
+def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFrame:
+    edited = frame.copy()
+    state = st.session_state.get(widget_key)
+    if not isinstance(state, dict):
+        return edited
+    edited_rows = state.get("edited_rows") or {}
+    if not isinstance(edited_rows, dict):
+        return edited
+    for row_index, updates in edited_rows.items():
+        if not isinstance(updates, dict):
+            continue
+        try:
+            index = int(row_index)
+        except Exception:
+            continue
+        if index < 0 or index >= len(edited):
+            continue
+        for column, value in updates.items():
+            if column in edited.columns:
+                edited.at[edited.index[index], column] = value
+    return edited
+
+
+def _summary_cell(label: str, value: str) -> str:
+    return (
+        '<div class="summary-cell">'
+        f'<div class="summary-label">{html.escape(label)}</div>'
+        f'<div class="summary-value">{html.escape(str(value))}</div>'
+        '</div>'
+    )
 
 
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
@@ -267,16 +319,64 @@ def _render_main_app():
     st.markdown(
         """
         <style>
-        .block-container { padding-top: 3.25rem; }
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(180, 83, 9, 0.12), transparent 30rem),
+                linear-gradient(135deg, #161514 0%, #0f1115 45%, #17120e 100%);
+        }
+        .block-container { padding-top: 3.25rem; max-width: 1320px; }
+        h3 { color: #f8fafc; }
+        p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: #cbd5e1; }
         div[data-testid="stMetric"] {
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
+            border: 1px solid rgba(251, 146, 60, 0.22);
+            border-radius: 10px;
             padding: 0.75rem 0.9rem;
-            background: #ffffff;
+            background: rgba(24, 24, 27, 0.82);
         }
         div[data-testid="stExpander"] {
+            border-radius: 12px;
+            border-color: rgba(251, 146, 60, 0.18);
+            background: rgba(24, 24, 27, 0.72);
+            overflow: hidden;
+        }
+        div[data-testid="stExpander"] details > summary {
+            background: rgba(39, 39, 42, 0.82);
+            min-height: 2.5rem;
+        }
+        div[data-testid="stDataFrame"] {
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .order-summary-row {
+            display: grid;
+            grid-template-columns: minmax(9rem, 1.1fr) minmax(11rem, 1.5fr) minmax(10rem, 1.5fr) minmax(7rem, .8fr) minmax(7rem, .8fr);
+            gap: .5rem;
+            margin: .15rem 0 .45rem 0;
+        }
+        .summary-cell {
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            background: rgba(15, 23, 42, 0.68);
             border-radius: 8px;
-            border-color: #d9e2ec;
+            padding: .45rem .55rem;
+        }
+        .summary-label {
+            color: #94a3b8;
+            font-size: .72rem;
+            line-height: 1.1;
+        }
+        .summary-value {
+            color: #f8fafc;
+            font-weight: 650;
+            line-height: 1.35;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+        .stButton > button[kind="primary"] {
+            background: #c2410c;
+            border-color: #ea580c;
+        }
+        @media (max-width: 900px) {
+            .order-summary-row { grid-template-columns: 1fr 1fr; }
         }
         </style>
         """,
@@ -330,6 +430,9 @@ def _render_main_app():
                 df_pending_for_run = df_pending
             else:
                 editable_count = min(len(df_pending), 20)
+                if st.button("恢復全部預設值", width="stretch", key="reset_all_pending"):
+                    _reset_all_order_editors(df_pending.head(editable_count))
+                    st.rerun()
                 edited_summary_rows: list[dict[str, str]] = []
                 edited_items_by_position: dict[int, pd.DataFrame] = {}
                 for position in range(editable_count):
@@ -339,12 +442,22 @@ def _render_main_app():
                     country = str(row.get("收件人國家", row.get("Country", ""))).strip()
                     default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
                     with st.expander(f"{order_id} | {name}", expanded=True):
-                        trans_type = st.selectbox(
-                            "TransType",
-                            options=SHIPPING_OPTIONS,
-                            index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                            key=f"pending_trans_{position}_{order_id}",
-                        )
+                        reset_version = _reset_version(order_id)
+                        trans_col, spacer_col, reset_col = st.columns([1.25, 3.75, 1])
+                        with trans_col:
+                            trans_type = st.selectbox(
+                                "TransType",
+                                options=SHIPPING_OPTIONS,
+                                index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
+                                key=f"pending_trans_{position}_{order_id}_{reset_version}",
+                            )
+                        with spacer_col:
+                            st.write("")
+                        with reset_col:
+                            st.write("")
+                            if st.button("恢復預設", key=f"reset_order_{position}_{order_id}"):
+                                _reset_order_editor(order_id)
+                                st.rerun()
                         edited_summary_rows.append(
                             {
                                 "Order No.": order_id,
@@ -363,6 +476,25 @@ def _render_main_app():
                                 + ". Please edit before starting."
                             )
                         item_frame = build_pending_item_frame(row)
+                        item_key = f"pending_items_{position}_{order_id}_{reset_version}"
+                        summary_item_frame = _apply_data_editor_state(item_frame, item_key)
+                        preview_df = apply_pending_order_editor_values(
+                            df_pending.iloc[[position]],
+                            pd.DataFrame([edited_summary_rows[-1]]),
+                            {0: summary_item_frame},
+                            usd_jpy_rate=rate,
+                        )
+                        summary_row = build_pending_summary_frame(preview_df).iloc[0]
+                        st.markdown(
+                            '<div class="order-summary-row">'
+                            + _summary_cell("Order No.", summary_row["Order No."])
+                            + _summary_cell("Name", summary_row["Name"])
+                            + _summary_cell("Country", summary_row["Country"])
+                            + _summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"])
+                            + _summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"])
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
                         edited_items_by_position[position] = st.data_editor(
                             item_frame,
                             hide_index=True,
@@ -370,20 +502,14 @@ def _render_main_app():
                             num_rows="fixed",
                             disabled=["Content", "HSCode"],
                             column_config={
-                                "Content": st.column_config.TextColumn("Content"),
-                                "Description": st.column_config.TextColumn("Description"),
-                                "Value": st.column_config.TextColumn("Value"),
-                                "Quantity": st.column_config.TextColumn("Quantity"),
+                                "Content": st.column_config.TextColumn("Content", width="small"),
+                                "Description": st.column_config.TextColumn("Description", width="large"),
+                                "HSCode": st.column_config.TextColumn("HSCode", width="small"),
+                                "Value": st.column_config.TextColumn("Value", width="small"),
+                                "Quantity": st.column_config.TextColumn("Quantity", width="small"),
                             },
-                            key=f"pending_items_{position}_{order_id}",
+                            key=item_key,
                         )
-                        preview_df = apply_pending_order_editor_values(
-                            df_pending.iloc[[position]],
-                            pd.DataFrame([edited_summary_rows[-1]]),
-                            {0: edited_items_by_position[position]},
-                            usd_jpy_rate=rate,
-                        )
-                        st.dataframe(build_pending_summary_frame(preview_df), hide_index=True, width="stretch")
 
                 df_pending_for_run = apply_pending_order_editor_values(
                     df_pending,

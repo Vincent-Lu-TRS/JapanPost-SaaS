@@ -158,25 +158,12 @@ def _filter_pending_orders_dataframe(
         watched_fail_count = len(watched_rows) - watched_pass_count
         _log(
             f"🧪 關注訂單診斷（WhoWhy/WhoWht）："
-            f"{len(watched_rows)} 筆，PASS={watched_pass_count}，FAIL={watched_fail_count}；"
-            "僅顯示末端 5 筆"
+            f"{len(watched_rows)} 筆，PASS={watched_pass_count}，FAIL={watched_fail_count}"
         )
-        for idx, row in watched_rows.tail(5).iterrows():
-            result = "PASS" if bool(base_mask.loc[idx]) else "FAIL"
-            _log(
-                "   - 關注訂單 "
-                f"{row.get(order_id_col, '')}: 基礎={result}; "
-                f"狀態={row.get(status_col, '')!r}; "
-                f"申告金額={row.get(amount_col, '')!r}; "
-                f"製單檢核={row.get(check_col, '')!r}; "
-                f"Shipping Name={row.get(shipname_col, '')!r}; "
-                f"運送方式={row.get(shipping_col, '')!r}"
-            )
     excluded = df[~base_mask]
     if not excluded.empty:
         _log(
-            "🔎 基礎篩選排除 "
-            f"{len(excluded)} 筆：{_format_sample(excluded[order_id_col].tolist())}"
+            f"🔎 基礎篩選排除：{len(excluded)} 筆"
         )
         reason_masks = [
             ("狀態不是未打單排除", df[status_col] != "未打單"),
@@ -187,7 +174,7 @@ def _filter_pending_orders_dataframe(
         for label, reason_mask in reason_masks:
             rows = df[reason_mask]
             if not rows.empty:
-                _log(f"   - {label}：{_format_sample(rows[order_id_col].tolist())}")
+                _log(f"   - {label}：{len(rows)} 筆")
     df_filtered = df[base_mask].copy()
     _log(f"📋 篩選後（未打單+必填）：{len(df_filtered)} 筆")
 
