@@ -34,7 +34,7 @@ from fx_rates import fetch_usd_jpy_rate
 # ★ set_page_config 必須在所有 st.* 呼叫之前
 # ══════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="JP Post Label Maker",
+    page_title="JP Post 製單系統",
     page_icon="📮",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -308,7 +308,7 @@ def _render_login_page():
 
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
-        st.markdown("## 📮 JP Post Label Maker")
+        st.markdown("## 📮 JP Post 製單系統")
         st.markdown("**企業專屬 SaaS・免安裝・雲端全自動**")
         st.divider()
         st.markdown("請使用公司 Google 帳號登入（@tkrjm.co.jp）")
@@ -340,9 +340,9 @@ def _render_main_app():
     name = st.session_state.get("user_name", email)
     picture = st.session_state.get("user_picture", "")
 
-    col1, col2, col3 = st.columns([5.5, 1.4, 0.65], vertical_alignment="center")
+    col1, col2, col3 = st.columns([5.7, 1.4, 0.65], vertical_alignment="center")
     with col1:
-        st.markdown("### 📮 JP Post Label Maker")
+        st.markdown("### 📮 JP Post 製單系統")
     with col2:
         if picture:
             st.markdown(
@@ -428,66 +428,36 @@ def _render_main_app():
         div[data-testid="stMetric"] [data-testid="stMetricValue"] {
             color: var(--erp-text) !important;
         }
-        .compact-toolbar {
-            position: sticky;
-            top: 0;
-            z-index: 5;
-            border: 1px solid rgba(251, 146, 60, 0.18);
-            border-radius: 12px;
-            background: rgba(13, 15, 18, 0.94);
-            backdrop-filter: blur(10px);
-            padding: .5rem .55rem;
-            margin: .15rem 0 .72rem 0;
-            box-shadow: 0 10px 24px rgba(0, 0, 0, .18);
-        }
-        .compact-toolbar div[data-testid="column"] { min-width: 0; }
         .toolbar-chip {
             border: 1px solid rgba(251, 146, 60, 0.22);
             border-radius: 999px;
             background: rgba(15, 23, 42, 0.7);
             color: var(--erp-text);
-            min-height: 2.28rem;
-            padding: .42rem .62rem;
+            min-height: 2.15rem;
+            padding: .34rem .52rem;
             display: flex;
             align-items: center;
             white-space: nowrap;
-            font-size: .82rem;
+            font-size: .8rem;
             font-weight: 700;
         }
         .toolbar-chip span {
             color: var(--erp-accent);
-            font-size: .72rem;
+            font-size: .68rem;
             font-weight: 650;
             margin-right: .35rem;
         }
-        .toolbar-hint {
+        .toolbar-inline-label {
             color: var(--erp-dim);
             font-size: .72rem;
-            margin-top: -.28rem;
             line-height: 1.1;
+            white-space: nowrap;
         }
-        .toolbar-ghost button {
-            background: rgba(15, 23, 42, 0.28) !important;
-            border-color: rgba(148, 163, 184, 0.22) !important;
-            color: var(--erp-muted) !important;
-        }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.toolbar-marker) {
-            position: sticky;
-            top: 0;
-            z-index: 5;
-            border: 1px solid rgba(251, 146, 60, 0.18) !important;
-            border-radius: 12px !important;
-            background: rgba(13, 15, 18, 0.94);
-            backdrop-filter: blur(10px);
-            padding: .5rem .55rem !important;
-            margin: .15rem 0 .72rem 0;
-            box-shadow: 0 10px 24px rgba(0, 0, 0, .18);
-        }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.toolbar-marker) div[data-testid="column"] {
-            min-width: 0;
+        .toolbar-inline-label span {
+            color: var(--erp-accent);
+            margin-left: .25rem;
         }
         .order-card-marker,
-        .toolbar-marker,
         .debug-log-marker {
             display: none;
         }
@@ -560,7 +530,7 @@ def _render_main_app():
             background: rgba(15, 23, 42, 0.72);
             border-radius: 8px;
             padding: .28rem .48rem;
-            min-height: 2.72rem;
+            min-height: 2.42rem;
         }
         .summary-label {
             color: var(--erp-accent);
@@ -598,7 +568,7 @@ def _render_main_app():
         div[data-baseweb="select"] > div {
             background: rgba(15, 23, 42, 0.96);
             border-color: rgba(251, 146, 60, 0.26);
-            min-height: 2.35rem;
+            min-height: 2.28rem;
         }
         div[data-baseweb="select"] span,
         div[data-baseweb="select"] div {
@@ -690,8 +660,6 @@ def _render_main_app():
                 flex-direction: column;
             }
             .rate-caption { text-align: left; }
-            .compact-toolbar,
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(.toolbar-marker) { position: static; }
         }
         </style>
         """,
@@ -730,58 +698,61 @@ def _render_main_app():
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    st.subheader("📊 待製單預覽")
-    with st.container(border=True):
-        st.markdown('<span class="toolbar-marker"></span>', unsafe_allow_html=True)
-        toolbar_cols = st.columns([1.18, .72, .82, .78, 1.06, 1.12, 1.2], gap="small", vertical_alignment="center")
-        with toolbar_cols[0]:
-            rate_text = f"{rate:.4f}" if rate else "N/A"
-            rate_suffix = f" ({rate_date})" if rate and rate_date else ""
-            st.markdown(f'<div class="toolbar-chip"><span>USD/JPY</span>{rate_text}{rate_suffix}</div>', unsafe_allow_html=True)
-        with toolbar_cols[1]:
-            st.markdown(f'<div class="toolbar-chip"><span>待製單</span>{pending_count}</div>', unsafe_allow_html=True)
-        with toolbar_cols[2]:
-            st.markdown(f'<div class="toolbar-chip"><span>本次完成</span>{done}</div>', unsafe_allow_html=True)
-        with toolbar_cols[3]:
+    toolbar_cols = st.columns([1.35, 1.18, .62, .72, .95, 1.03, 1.05, 1.12], gap="small", vertical_alignment="center")
+    with toolbar_cols[0]:
+        st.subheader("📊 待打單預覽")
+    with toolbar_cols[1]:
+        rate_text = f"{rate:.4f}" if rate else "N/A"
+        rate_suffix = f" ({rate_date})" if rate and rate_date else ""
+        st.markdown(f'<div class="toolbar-chip"><span>USD/JPY</span>{rate_text}{rate_suffix}</div>', unsafe_allow_html=True)
+    with toolbar_cols[2]:
+        st.markdown(f'<div class="toolbar-chip"><span>待製單</span>{pending_count}</div>', unsafe_allow_html=True)
+    with toolbar_cols[3]:
+        st.markdown(f'<div class="toolbar-chip"><span>本次完成</span>{done}</div>', unsafe_allow_html=True)
+    with toolbar_cols[4]:
+        max_label_col, max_input_col = st.columns([.92, .78], gap="small", vertical_alignment="center")
+        with max_label_col:
+            st.markdown('<div class="toolbar-inline-label">最大處理 <span>0=全部</span></div>', unsafe_allow_html=True)
+        with max_input_col:
             max_rows_input = st.number_input(
-                "最大處理筆數",
+                "最大處理筆數（0=全部）",
                 min_value=0, max_value=500, value=10, step=1,
                 disabled=is_running,
                 label_visibility="collapsed",
             )
-            st.markdown('<div class="toolbar-hint">0 = 全部</div>', unsafe_allow_html=True)
-        max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-        with toolbar_cols[4]:
-            if is_running:
-                if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
-                    st.rerun()
-            elif st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
-                st.session_state.pop("last_pending_df", None)
-                st.session_state.pop("last_pending_logs", None)
+    max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+    with toolbar_cols[5]:
+        if is_running:
+            if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                 st.rerun()
-        with toolbar_cols[5]:
-            btn_label = "🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單"
-            if st.button(btn_label, type="primary",
-                         disabled=(is_running or pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
-                if df_pending.empty:
-                    st.warning("沒有符合條件的待打單資料")
+        elif st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
+            st.session_state.pop("last_pending_df", None)
+            st.session_state.pop("last_pending_logs", None)
+            st.rerun()
+    with toolbar_cols[6]:
+        btn_label = "執行中…" if is_running else ("🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單")
+        if st.button(btn_label, type="primary",
+                     disabled=(is_running or pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
+            if df_pending.empty:
+                st.warning("沒有符合條件的待打單資料")
+            else:
+                ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
+                if ok:
+                    if hasattr(st, "toast"):
+                        st.toast("✅ 已啟動自動製單")
+                    time.sleep(0.8)
+                    st.rerun()
+                elif reason == "batch_running":
+                    st.error("同一批製單已在執行中，已阻止重複啟動。")
                 else:
-                    ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
-                    if ok:
-                        st.success("✅ 已啟動！")
-                        time.sleep(0.8)
-                        st.rerun()
-                    elif reason == "batch_running":
-                        st.error("同一批製單已在執行中，已阻止重複啟動。")
-                    else:
-                        st.error("任務執行中，請稍候")
-        with toolbar_cols[6]:
-            reset_all_requested = st.button(
-                "全訂單恢復預設值",
-                width="stretch",
-                key="reset_all_pending",
-                disabled=is_running or df_pending.empty,
-            )
+                    st.error("任務執行中，請稍候")
+    with toolbar_cols[7]:
+        reset_all_requested = st.button(
+            "恢復全部預設",
+            width="stretch",
+            key="reset_all_pending",
+            disabled=is_running or df_pending.empty,
+        )
 
     if reset_all_requested and not df_pending.empty:
         _reset_all_order_editors(df_pending.head(editable_count))
@@ -827,25 +798,21 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    header_col, reset_col = st.columns([5.8, 1.0], vertical_alignment="center")
+                    header_col, reset_col = st.columns([5.8, .92], vertical_alignment="center")
                     with header_col:
                         st.markdown(
                             f'<div class="order-title">{html.escape(order_id)} | {html.escape(name)}</div>',
                             unsafe_allow_html=True,
                         )
                     with reset_col:
-                        if st.button("單筆恢復預設值", key=f"reset_order_{position}_{order_id}", width="stretch"):
+                        if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
                             _reset_order_editor(order_id)
                             st.rerun()
 
-                    summary_cols = st.columns([1.05, 1.55, 1.15, 1.02, .86, .86], gap="small")
+                    summary_cols = st.columns([1.45, 1.05, .86, .86], gap="small", vertical_alignment="center")
                     with summary_cols[0]:
-                        st.markdown(_summary_cell("Order No.", summary_row["Order No."]), unsafe_allow_html=True)
-                    with summary_cols[1]:
-                        st.markdown(_summary_cell("Name", summary_row["Name"]), unsafe_allow_html=True)
-                    with summary_cols[2]:
                         st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
-                    with summary_cols[3]:
+                    with summary_cols[1]:
                         st.markdown(_summary_label("TransType"), unsafe_allow_html=True)
                         trans_type = st.selectbox(
                             "TransType",
@@ -854,9 +821,9 @@ def _render_main_app():
                             key=trans_key,
                             label_visibility="collapsed",
                         )
-                    with summary_cols[4]:
+                    with summary_cols[2]:
                         st.markdown(_summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                    with summary_cols[5]:
+                    with summary_cols[3]:
                         st.markdown(_summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
 
                     edited_summary_rows.append(
@@ -901,12 +868,12 @@ def _render_main_app():
             if len(df_pending) > editable_count:
                 st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
         if pending_logs:
-            with st.expander("🔎 待製單讀取診斷", expanded=False):
+            with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=False):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
                 st.code("\n".join(pending_logs), language="text")
     elif pending_logs:
         st.info("目前沒有待製單資料。")
-        with st.expander("🔎 待製單讀取診斷", expanded=True):
+        with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=False):
             st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
             st.code("\n".join(pending_logs), language="text")
     else:
