@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
 
 import html
+from datetime import datetime
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ from pending_editor import (
     build_pending_item_frame,
     build_pending_summary_frame,
     has_zero_value_items,
+    sanitize_hscode,
 )
 from fx_rates import fetch_usd_jpy_rate
 
@@ -130,6 +132,21 @@ def _reset_all_order_editors(df: pd.DataFrame) -> None:
             _reset_order_editor(order_id)
 
 
+def _name_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_name_{position}_{order_id}_{reset_version}"
+
+
+def _format_short_rate(rate: float | None, rate_date: str) -> str:
+    rate_text = f"{rate:.2f}" if rate else "N/A"
+    date_text = ""
+    if rate_date:
+        try:
+            date_text = datetime.strptime(rate_date, "%Y-%m-%d").strftime("%y/%m/%d")
+        except Exception:
+            date_text = str(rate_date)
+    return f"USD/JPY {rate_text}" + (f"｜{date_text}" if date_text else "")
+
+
 def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFrame:
     edited = frame.copy()
     state = st.session_state.get(widget_key)
@@ -149,6 +166,8 @@ def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFra
             continue
         for column, value in updates.items():
             if column in edited.columns:
+                if column == "HSCode":
+                    value = sanitize_hscode(value)
                 edited.at[edited.index[index], column] = value
     return edited
 
@@ -170,10 +189,11 @@ def _build_pending_run_frame_from_state(
         item_frame = build_pending_item_frame(row)
         item_key = f"pending_items_{position}_{order_id}_{reset_version}"
         trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
+        name_key = _name_key_for(position, order_id, reset_version)
         edited_summary_rows.append(
             {
                 "Order No.": order_id,
-                "Name": name,
+                "Name": st.session_state.get(name_key, name),
                 "Country": country,
                 "TransType": st.session_state.get(trans_key, default_trans_type),
                 "TotalValue(USD)": "",
@@ -529,8 +549,8 @@ def _render_main_app():
             border: 1px solid var(--erp-border);
             background: rgba(15, 23, 42, 0.72);
             border-radius: 8px;
-            padding: .28rem .48rem;
-            min-height: 2.42rem;
+            padding: .24rem .46rem;
+            min-height: 2.28rem;
         }
         .summary-label {
             color: var(--erp-accent);
@@ -568,7 +588,7 @@ def _render_main_app():
         div[data-baseweb="select"] > div {
             background: rgba(15, 23, 42, 0.96);
             border-color: rgba(251, 146, 60, 0.26);
-            min-height: 2.28rem;
+            min-height: 2.32rem;
         }
         div[data-baseweb="select"] span,
         div[data-baseweb="select"] div {
@@ -629,7 +649,12 @@ def _render_main_app():
             display: none;
         }
         div[data-testid="stTextInput"] input {
-            color: var(--erp-text);
+            background: rgba(15, 23, 42, 0.96) !important;
+            border-color: rgba(251, 146, 60, 0.26) !important;
+            color: var(--erp-text) !important;
+            min-height: 2.32rem;
+            border-radius: 9px;
+            font-weight: 650;
         }
         .compact-actions div[data-testid="column"] {
             display: flex;
@@ -653,6 +678,21 @@ def _render_main_app():
             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
             font-size: .82rem;
             line-height: 1.5;
+        }
+        .inline-static {
+            min-height: 2.32rem;
+            display: flex;
+            align-items: center;
+        }
+        .sent-compact {
+            border: 1px solid rgba(34, 197, 94, 0.2);
+            border-radius: 8px;
+            background: rgba(20, 83, 45, 0.16);
+            color: #bbf7d0;
+            font-size: .82rem;
+            padding: .32rem .48rem;
+            margin-top: .42rem;
+            white-space: normal;
         }
         @media (max-width: 900px) {
             .order-card-header {
@@ -702,9 +742,7 @@ def _render_main_app():
     with toolbar_cols[0]:
         st.subheader("📊 待打單預覽")
     with toolbar_cols[1]:
-        rate_text = f"{rate:.4f}" if rate else "N/A"
-        rate_suffix = f" ({rate_date})" if rate and rate_date else ""
-        st.markdown(f'<div class="toolbar-chip"><span>USD/JPY</span>{rate_text}{rate_suffix}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="toolbar-chip">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
     with toolbar_cols[2]:
         st.markdown(f'<div class="toolbar-chip"><span>待製單</span>{pending_count}</div>', unsafe_allow_html=True)
     with toolbar_cols[3]:
@@ -768,6 +806,7 @@ def _render_main_app():
         else:
             edited_summary_rows: list[dict[str, str]] = []
             edited_items_by_position: dict[int, pd.DataFrame] = {}
+            job_order_by_id = {str(order.get("order_id", "")): order for order in (job or {}).get("orders", [])}
             for position in range(editable_count):
                 row = df_pending.iloc[position]
                 order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
@@ -779,10 +818,12 @@ def _render_main_app():
                 item_key = f"pending_items_{position}_{order_id}_{reset_version}"
                 summary_item_frame = _apply_data_editor_state(item_frame, item_key)
                 trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
+                name_key = _name_key_for(position, order_id, reset_version)
                 pending_trans = st.session_state.get(trans_key, default_trans_type)
+                pending_name = st.session_state.get(name_key, name)
                 summary_preview = {
                     "Order No.": order_id,
-                    "Name": name,
+                    "Name": pending_name,
                     "Country": country,
                     "TransType": pending_trans,
                     "TotalValue(USD)": "",
@@ -798,22 +839,19 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    header_col, reset_col = st.columns([5.8, .92], vertical_alignment="center")
-                    with header_col:
-                        st.markdown(
-                            f'<div class="order-title">{html.escape(order_id)} | {html.escape(name)}</div>',
-                            unsafe_allow_html=True,
+                    row_cols = st.columns([1.05, 1.65, 1.18, 1.08, .74, .74, .9], gap="small", vertical_alignment="center")
+                    with row_cols[0]:
+                        st.markdown(f'<div class="order-title inline-static">{html.escape(order_id)}</div>', unsafe_allow_html=True)
+                    with row_cols[1]:
+                        edited_name = st.text_input(
+                            "Name",
+                            value=pending_name,
+                            key=name_key,
+                            label_visibility="collapsed",
                         )
-                    with reset_col:
-                        if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
-                            _reset_order_editor(order_id)
-                            st.rerun()
-
-                    summary_cols = st.columns([1.45, 1.05, .86, .86], gap="small", vertical_alignment="center")
-                    with summary_cols[0]:
+                    with row_cols[2]:
                         st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
-                    with summary_cols[1]:
-                        st.markdown(_summary_label("TransType"), unsafe_allow_html=True)
+                    with row_cols[3]:
                         trans_type = st.selectbox(
                             "TransType",
                             options=SHIPPING_OPTIONS,
@@ -821,15 +859,19 @@ def _render_main_app():
                             key=trans_key,
                             label_visibility="collapsed",
                         )
-                    with summary_cols[2]:
-                        st.markdown(_summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                    with summary_cols[3]:
-                        st.markdown(_summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+                    with row_cols[4]:
+                        st.markdown(_summary_cell("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                    with row_cols[5]:
+                        st.markdown(_summary_cell("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+                    with row_cols[6]:
+                        if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
+                            _reset_order_editor(order_id)
+                            st.rerun()
 
                     edited_summary_rows.append(
                         {
                             "Order No.": order_id,
-                            "Name": name,
+                            "Name": edited_name,
                             "Country": country,
                             "TransType": trans_type,
                             "TotalValue(USD)": "",
@@ -858,6 +900,17 @@ def _render_main_app():
                         },
                         key=item_key,
                     )
+                    sent_order = job_order_by_id.get(order_id)
+                    if sent_order and sent_order.get("status") == "success":
+                        hs_text = str(sent_order.get("hs_codes", "")).strip()
+                        st.markdown(
+                            '<div class="sent-compact">'
+                            f'已製單｜Name {html.escape(edited_name)}｜TransType {html.escape(trans_type)}'
+                            f'｜HS {html.escape(hs_text)}｜USD {html.escape(str(summary_row["TotalValue(USD)"]))}'
+                            f'｜JPY {html.escape(str(summary_row["TotalValue(JPY)"]))}'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
 
             df_pending_for_run = apply_pending_order_editor_values(
                 df_pending,
@@ -909,15 +962,19 @@ def _render_main_app():
     if job and job.get("results"):
         st.divider()
         st.subheader("✅ 本次製單結果")
-        df_res = pd.DataFrame(job["results"])
-        df_res = df_res.rename(columns={
-            "name": "收件人",
-            "order_id": "注文番号",
-            "tracking": "貨運單號",
-            "country_raw": "國家（原始）",
-            "date": "日期",
-        })
-        st.dataframe(df_res, hide_index=True)
+        order_lookup = {str(order.get("order_id", "")): order for order in job.get("orders", [])}
+        for result in job["results"]:
+            order_id = str(result.get("order_id", "")).strip()
+            order_state = order_lookup.get(order_id, {})
+            hs_text = str(order_state.get("hs_codes", "")).strip()
+            st.markdown(
+                '<div class="sent-compact">'
+                f'已製單｜Name {html.escape(str(result.get("name", "")))}'
+                f'｜Tracking {html.escape(str(result.get("tracking", "")))}'
+                + (f'｜HS {html.escape(hs_text)}' if hs_text else '')
+                + '</div>',
+                unsafe_allow_html=True,
+            )
 
     if job and job.get("logs"):
         st.divider()

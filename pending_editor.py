@@ -1,4 +1,5 @@
 import pandas as pd
+import re
 
 
 SHIPPING_COL = "郵局運送方式(複數商品請自行確認是否走小包)"
@@ -44,6 +45,10 @@ def _str_value(value) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
+
+
+def sanitize_hscode(value) -> str:
+    return re.sub(r"\D", "", _str_value(value))
 
 
 def _money_to_float(value) -> float:
@@ -146,7 +151,7 @@ def build_pending_item_frame(
             {
                 "Content": f"Content{index}",
                 "Description": content,
-                "HSCode": hs_codes.get(str(index), _str_value(row.get(_hscode_col(index), ""))),
+                "HSCode": sanitize_hscode(hs_codes.get(str(index), _str_value(row.get(_hscode_col(index), "")))),
                 "Value": value,
                 "Quantity": quantity or "1",
             }
@@ -175,6 +180,9 @@ def apply_pending_order_editor_values(
         trans_type = _summary_value(edited_summary, position, "TransType")
         if trans_type:
             applied.at[source_index, SHIPPING_COL] = trans_type
+        shipping_name = _summary_value(edited_summary, position, "Name")
+        if shipping_name:
+            applied.at[source_index, "Shipping Name"] = shipping_name
 
         item_frame = edited_items_by_position.get(position)
         if item_frame is None:
@@ -198,6 +206,8 @@ def apply_pending_order_editor_values(
             ]
             for target_col, edited_col in mappings:
                 new_value = _str_value(item.get(edited_col, ""))
+                if edited_col == "HSCode":
+                    new_value = sanitize_hscode(new_value)
                 if target_col not in applied.columns:
                     applied[target_col] = ""
                 if _str_value(applied.at[source_index, target_col]) != new_value:

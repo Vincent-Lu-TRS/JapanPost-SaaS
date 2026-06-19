@@ -867,7 +867,7 @@ class AutomationHtmlTests(unittest.TestCase):
                 "注文番号(貼上原始資料)": "DE-1",
                 "收件人國家": "GERMANY",
                 "內容物1": "Mask",
-                "HSCode1": "330499",
+                "HSCode1": "HS:3304.99",
             }
         ]
 

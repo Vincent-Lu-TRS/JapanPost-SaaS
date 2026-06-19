@@ -14,6 +14,7 @@ from pending_editor import (
     coerce_pending_editor_values,
     display_country,
     has_zero_value_items,
+    sanitize_hscode,
 )
 
 
@@ -85,6 +86,11 @@ class PendingEditorTests(unittest.TestCase):
 
         self.assertEqual(has_zero_value_items(row), [1])
 
+    def test_sanitize_hscode_keeps_digits_only(self):
+        self.assertEqual(sanitize_hscode("9404.90"), "940490")
+        self.assertEqual(sanitize_hscode("HS:940490"), "940490")
+        self.assertEqual(sanitize_hscode("9404-90"), "940490")
+
     def test_apply_pending_order_editor_values_updates_original_fields_and_recalculates_totals(self):
         original = pd.DataFrame(
             [
@@ -105,11 +111,12 @@ class PendingEditorTests(unittest.TestCase):
         )
         summary = build_pending_summary_frame(original)
         summary.loc[0, "TransType"] = "EMS"
+        summary.loc[0, "Name"] = "Edited Banda"
         items_by_position = {
             0: pd.DataFrame(
                 [
-                    {"Content": "1", "Description": "Dietary Supplement", "HSCode": "330499", "Value": "7", "Quantity": "2"},
-                    {"Content": "2", "Description": "Pillow", "HSCode": "940490", "Value": "3", "Quantity": "1"},
+                    {"Content": "1", "Description": "Dietary Supplement", "HSCode": "HS:3304.99", "Value": "7", "Quantity": "2"},
+                    {"Content": "2", "Description": "Pillow", "HSCode": "9404-90", "Value": "3", "Quantity": "1"},
                 ]
             )
         }
@@ -122,6 +129,7 @@ class PendingEditorTests(unittest.TestCase):
         )
 
         self.assertEqual(applied.loc[0, "郵局運送方式(複數商品請自行確認是否走小包)"], "EMS")
+        self.assertEqual(applied.loc[0, "Shipping Name"], "Edited Banda")
         self.assertEqual(applied.loc[0, "申告金額1"], "7")
         self.assertEqual(applied.loc[0, "數量1"], "2")
         self.assertEqual(applied.loc[0, "申告金額2"], "3")

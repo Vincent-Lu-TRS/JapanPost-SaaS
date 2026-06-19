@@ -23,7 +23,7 @@ AUTOMATION_BUILD_ID = "2026-06-18-m060800-ordered-payload"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
-from .hs_codes import prepare_hs_codes_for_items, required_hs_code_length
+from .hs_codes import normalize_hs_code, prepare_hs_codes_for_items, required_hs_code_length
 
 # ── 日本郵政登入憑證 ────────────────────────────────────
 def _get_jp_post_creds() -> tuple[str, str]:
@@ -735,11 +735,11 @@ def _prepare_batch_hs_codes(rows, country_code_map: dict[str, str], predictor=pr
             continue
         if log_cb:
             log_cb(f"🔎 HS Code 預查：訂單 {order_id}，{len(items)} 個品項，需要 {required_length} 碼")
-        manual_codes = {
-            item["index"]: _row_val(row, [f"HSCode{item['index']}"])
-            for item in items
-            if _row_val(row, [f"HSCode{item['index']}"])
-        }
+        manual_codes = {}
+        for item in items:
+            manual_code = normalize_hs_code(_row_val(row, [f"HSCode{item['index']}"]), required_length)
+            if manual_code:
+                manual_codes[item["index"]] = manual_code
         unresolved_items = [
             item for item in items
             if item["index"] not in manual_codes
