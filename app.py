@@ -162,6 +162,10 @@ def _summary_cell(label: str, value: str) -> str:
     )
 
 
+def _summary_label(label: str) -> str:
+    return f'<div class="summary-label select-summary-label">{html.escape(label)}</div>'
+
+
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
     ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
     if not ok or job is None:
@@ -319,72 +323,211 @@ def _render_main_app():
     st.markdown(
         """
         <style>
+        :root {
+            --erp-bg: #0b0d10;
+            --erp-bg-warm: #15100c;
+            --erp-surface: #15171b;
+            --erp-surface-2: #1d2026;
+            --erp-surface-3: #101722;
+            --erp-border: rgba(251, 146, 60, 0.24);
+            --erp-border-soft: rgba(148, 163, 184, 0.18);
+            --erp-text: #f8fafc;
+            --erp-muted: #cbd5e1;
+            --erp-dim: #94a3b8;
+            --erp-accent: #f59e0b;
+            --erp-accent-2: #ea580c;
+            --erp-danger: #ef4444;
+        }
         .stApp {
             background:
-                radial-gradient(circle at top left, rgba(180, 83, 9, 0.12), transparent 30rem),
-                linear-gradient(135deg, #161514 0%, #0f1115 45%, #17120e 100%);
+                radial-gradient(circle at 8% 4%, rgba(180, 83, 9, 0.24), transparent 30rem),
+                linear-gradient(135deg, var(--erp-bg-warm) 0%, var(--erp-bg) 45%, #11100e 100%);
+            color: var(--erp-text);
         }
-        .block-container { padding-top: 3.25rem; max-width: 1480px; }
-        h3 { color: #fef3c7; letter-spacing: 0; }
-        p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: #e5e7eb; }
-        button { color: #f8fafc !important; }
+        .block-container { padding-top: 2.75rem; max-width: 1540px; }
+        h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
+        h3 { color: #fff7ed; }
+        p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: var(--erp-muted); }
+        div[data-testid="stCaptionContainer"] { color: var(--erp-dim); }
+        button {
+            color: var(--erp-text) !important;
+            border-radius: 10px !important;
+            min-height: 2.55rem;
+            white-space: nowrap !important;
+        }
+        button:disabled {
+            color: #94a3b8 !important;
+            opacity: .72;
+        }
+        .stButton > button {
+            border-color: var(--erp-border-soft);
+            background: rgba(24, 24, 27, 0.78);
+        }
+        .stButton > button:hover {
+            border-color: rgba(245, 158, 11, 0.62);
+            background: rgba(39, 39, 42, 0.95);
+        }
         div[data-testid="stMetric"] {
-            border: 1px solid rgba(251, 146, 60, 0.22);
+            border: 1px solid var(--erp-border);
             border-radius: 10px;
             padding: 0.75rem 0.9rem;
-            background: rgba(24, 24, 27, 0.82);
+            background: rgba(24, 24, 27, 0.86);
+            color: var(--erp-text);
+        }
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+            color: var(--erp-muted) !important;
+        }
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+            color: var(--erp-text) !important;
         }
         div[data-testid="stExpander"] {
             border-radius: 12px;
-            border-color: rgba(251, 146, 60, 0.18);
-            background: rgba(24, 24, 27, 0.72);
+            border-color: var(--erp-border-soft);
+            background: rgba(24, 24, 27, 0.82);
             overflow: hidden;
         }
         div[data-testid="stExpander"] details > summary {
-            background: rgba(39, 39, 42, 0.82);
+            background: rgba(39, 39, 42, 0.92);
             min-height: 2.35rem;
-            color: #f8fafc;
+            color: var(--erp-text);
         }
         div[data-testid="stDataFrame"] {
             border-radius: 10px;
             overflow: hidden;
         }
-        .order-summary-row {
-            display: grid;
-            grid-template-columns: minmax(9rem, 1fr) minmax(12rem, 1.25fr) minmax(8rem, .95fr) minmax(7rem, .72fr) minmax(7rem, .72fr) minmax(7rem, .72fr);
-            gap: .5rem;
-            margin: .2rem 0 .4rem 0;
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-color: var(--erp-border-soft) !important;
+            border-radius: 12px !important;
+            background: rgba(20, 22, 26, 0.92);
+            margin-bottom: .55rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, .14);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+            border-color: rgba(245, 158, 11, 0.42) !important;
+            background: rgba(23, 25, 30, 0.96);
+        }
+        .order-card {
+            border: 1px solid var(--erp-border-soft);
+            border-radius: 12px;
+            background: rgba(20, 22, 26, 0.92);
+            margin: 0 0 .82rem 0;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+        }
+        .order-card:hover {
+            border-color: rgba(245, 158, 11, 0.42);
+            background: rgba(23, 25, 30, 0.96);
+        }
+        .order-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: .75rem;
+            padding: .52rem .72rem;
+            background: rgba(39, 39, 42, 0.92);
+            border-bottom: 1px solid var(--erp-border-soft);
+        }
+        .order-title {
+            color: var(--erp-text);
+            font-weight: 700;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+            padding: .15rem 0;
+        }
+        .order-card-body {
+            padding: .62rem .72rem .72rem .72rem;
+        }
+        .order-summary-grid {
+            margin-bottom: .45rem;
+        }
+        .order-summary-grid div[data-testid="column"] {
+            min-width: 0;
         }
         .summary-cell {
-            border: 1px solid rgba(251, 146, 60, 0.20);
-            background: rgba(17, 24, 39, 0.82);
+            border: 1px solid var(--erp-border);
+            background: rgba(15, 23, 42, 0.72);
             border-radius: 8px;
-            padding: .38rem .5rem;
+            padding: .34rem .5rem;
+            min-height: 3.05rem;
         }
         .summary-label {
-            color: #fbbf24;
+            color: var(--erp-accent);
             font-size: .72rem;
             line-height: 1.1;
+            font-weight: 650;
         }
         .summary-value {
-            color: #f8fafc;
+            color: var(--erp-text);
             font-weight: 650;
-            line-height: 1.35;
+            line-height: 1.28;
             white-space: normal;
             overflow-wrap: anywhere;
+        }
+        .trans-select-cell {
+            border: 1px solid var(--erp-border);
+            background: rgba(15, 23, 42, 0.72);
+            border-radius: 8px;
+            padding: .24rem .42rem .34rem .42rem;
+            min-height: 3.05rem;
+        }
+        .trans-select-cell div[data-baseweb="select"] > div {
+            background: transparent;
+            border: 0;
+            min-height: 1.45rem;
+            padding-left: 0;
+            color: var(--erp-text);
+        }
+        .trans-select-cell [data-baseweb="select"] span,
+        .trans-select-cell [data-baseweb="select"] div {
+            color: var(--erp-text) !important;
+            font-weight: 700;
+        }
+        .select-summary-label { margin-bottom: .02rem; }
+        div[data-baseweb="select"] > div {
+            background: rgba(248, 250, 252, 0.96);
+            border-color: rgba(148, 163, 184, 0.26);
+            min-height: 2.45rem;
+        }
+        div[data-baseweb="select"] span,
+        div[data-baseweb="select"] div {
+            color: #111827;
+            font-weight: 650;
         }
         .rate-caption {
             color: #fde68a;
             font-size: .78rem;
             text-align: right;
-            padding-top: .35rem;
+            padding-top: .55rem;
+            white-space: nowrap;
         }
         .stButton > button[kind="primary"] {
             background: #c2410c;
-            border-color: #ea580c;
+            border-color: var(--erp-accent-2);
+        }
+        div[data-testid="stDataEditor"] {
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        div[data-testid="stDataEditor"] [role="gridcell"],
+        div[data-testid="stDataEditor"] [role="columnheader"] {
+            line-height: 1.25;
+            min-height: 2rem !important;
+        }
+        div[data-testid="stNumberInput"] input,
+        div[data-testid="stTextInput"] input {
+            color: #111827;
+        }
+        .compact-actions div[data-testid="column"] {
+            display: flex;
+            align-items: stretch;
         }
         @media (max-width: 900px) {
-            .order-summary-row { grid-template-columns: 1fr 1fr; }
+            .order-card-header {
+                align-items: stretch;
+                flex-direction: column;
+            }
+            .rate-caption { text-align: left; }
         }
         </style>
         """,
@@ -415,10 +558,10 @@ def _render_main_app():
                 st.warning(f"無法讀取 Google Sheets：{e}")
 
     df_pending_for_run = df_pending
-    main_col, side_col = st.columns([4.2, 1.15])
+    main_col, side_col = st.columns([1, 0.24], gap="large")
 
     with main_col:
-        preview_title_col, rate_col, reload_col, reset_all_col = st.columns([3.2, 1.8, 1.25, 1.2])
+        preview_title_col, rate_col, reload_col, reset_all_col = st.columns([3.4, 1.65, 1.45, 1.35])
         with preview_title_col:
             st.subheader("📊 待打單預覽")
         with rate_col:
@@ -460,41 +603,49 @@ def _render_main_app():
                     name = str(row.get("Shipping Name", "")).strip()
                     country = str(row.get("收件人國家", row.get("Country", ""))).strip()
                     default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
-                    with st.expander(f"{order_id} | {name}", expanded=True):
-                        reset_version = _reset_version(order_id)
-                        item_frame = build_pending_item_frame(row)
-                        item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-                        summary_item_frame = _apply_data_editor_state(item_frame, item_key)
-                        trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
-                        pending_trans = st.session_state.get(trans_key, default_trans_type)
-                        summary_preview = {
-                            "Order No.": order_id,
-                            "Name": name,
-                            "Country": country,
-                            "TransType": pending_trans,
-                            "TotalValue(USD)": "",
-                            "TotalValue(JPY)": "",
-                        }
-                        preview_df = apply_pending_order_editor_values(
-                            df_pending.iloc[[position]],
-                            pd.DataFrame([summary_preview]),
-                            {0: summary_item_frame},
-                            usd_jpy_rate=rate,
-                        )
-                        summary_row = build_pending_summary_frame(preview_df).iloc[0]
-                        st.markdown(
-                            '<div class="order-summary-row">'
-                            + _summary_cell("Order No.", summary_row["Order No."])
-                            + _summary_cell("Name", summary_row["Name"])
-                            + _summary_cell("Country", summary_row["Country"])
-                            + _summary_cell("TransType", pending_trans)
-                            + _summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"])
-                            + _summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"])
-                            + "</div>",
-                            unsafe_allow_html=True,
-                        )
-                        trans_col, spacer_col, reset_col = st.columns([1.1, 4.2, 1])
-                        with trans_col:
+                    reset_version = _reset_version(order_id)
+                    item_frame = build_pending_item_frame(row)
+                    item_key = f"pending_items_{position}_{order_id}_{reset_version}"
+                    summary_item_frame = _apply_data_editor_state(item_frame, item_key)
+                    trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
+                    pending_trans = st.session_state.get(trans_key, default_trans_type)
+                    summary_preview = {
+                        "Order No.": order_id,
+                        "Name": name,
+                        "Country": country,
+                        "TransType": pending_trans,
+                        "TotalValue(USD)": "",
+                        "TotalValue(JPY)": "",
+                    }
+                    preview_df = apply_pending_order_editor_values(
+                        df_pending.iloc[[position]],
+                        pd.DataFrame([summary_preview]),
+                        {0: summary_item_frame},
+                        usd_jpy_rate=rate,
+                    )
+                    summary_row = build_pending_summary_frame(preview_df).iloc[0]
+
+                    with st.container(border=True):
+                        header_col, reset_col = st.columns([5.2, 0.9], vertical_alignment="center")
+                        with header_col:
+                            st.markdown(
+                                f'<div class="order-title">{html.escape(order_id)} | {html.escape(name)}</div>',
+                                unsafe_allow_html=True,
+                            )
+                        with reset_col:
+                            if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
+                                _reset_order_editor(order_id)
+                                st.rerun()
+
+                        summary_cols = st.columns([1.1, 1.75, 1.25, 1.05, 0.9, 0.9], gap="small")
+                        with summary_cols[0]:
+                            st.markdown(_summary_cell("Order No.", summary_row["Order No."]), unsafe_allow_html=True)
+                        with summary_cols[1]:
+                            st.markdown(_summary_cell("Name", summary_row["Name"]), unsafe_allow_html=True)
+                        with summary_cols[2]:
+                            st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
+                        with summary_cols[3]:
+                            st.markdown(_summary_label("TransType"), unsafe_allow_html=True)
                             trans_type = st.selectbox(
                                 "TransType",
                                 options=SHIPPING_OPTIONS,
@@ -502,13 +653,11 @@ def _render_main_app():
                                 key=trans_key,
                                 label_visibility="collapsed",
                             )
-                        with spacer_col:
-                            st.write("")
-                        with reset_col:
-                            st.write("")
-                            if st.button("恢復預設", key=f"reset_order_{position}_{order_id}"):
-                                _reset_order_editor(order_id)
-                                st.rerun()
+                        with summary_cols[4]:
+                            st.markdown(_summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                        with summary_cols[5]:
+                            st.markdown(_summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+
                         edited_summary_rows.append(
                             {
                                 "Order No.": order_id,
