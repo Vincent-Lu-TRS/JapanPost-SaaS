@@ -735,13 +735,23 @@ def _prepare_batch_hs_codes(rows, country_code_map: dict[str, str], predictor=pr
             continue
         if log_cb:
             log_cb(f"🔎 HS Code 預查：訂單 {order_id}，{len(items)} 個品項，需要 {required_length} 碼")
+        manual_codes = {
+            item["index"]: _row_val(row, [f"HSCode{item['index']}"])
+            for item in items
+            if _row_val(row, [f"HSCode{item['index']}"])
+        }
+        unresolved_items = [
+            item for item in items
+            if item["index"] not in manual_codes
+        ]
         codes = prepare_hs_codes_for_items(
-            items,
+            unresolved_items,
             country_raw=country_raw,
             country_code=country_code,
             predictor=cached_predictor,
             log_cb=log_cb,
         )
+        codes.update(manual_codes)
         if codes:
             prepared[order_id] = codes
     return prepared

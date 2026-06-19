@@ -855,6 +855,31 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(codes["DE-2"], {"1": "330499"})
         self.assertEqual(calls, [("Mask", 6, "GERMANY", "EU")])
 
+    def test_prepare_batch_hs_codes_prefers_manual_hscode_columns(self):
+        calls = []
+
+        def predictor(item_name, *, required_length=6, country="", country_code="", log_cb=None):
+            calls.append(item_name)
+            return "000000"
+
+        rows = [
+            {
+                "注文番号(貼上原始資料)": "DE-1",
+                "收件人國家": "GERMANY",
+                "內容物1": "Mask",
+                "HSCode1": "330499",
+            }
+        ]
+
+        codes = _prepare_batch_hs_codes(
+            rows,
+            {"GERMANY": "EU"},
+            predictor=predictor,
+        )
+
+        self.assertEqual(codes["DE-1"], {"1": "330499"})
+        self.assertEqual(calls, [])
+
     def test_validate_required_hs_codes_rejects_missing_before_any_item_submit(self):
         items = [
             {"index": "1", "pkg": "Facial Mask"},

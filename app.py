@@ -324,9 +324,10 @@ def _render_main_app():
                 radial-gradient(circle at top left, rgba(180, 83, 9, 0.12), transparent 30rem),
                 linear-gradient(135deg, #161514 0%, #0f1115 45%, #17120e 100%);
         }
-        .block-container { padding-top: 3.25rem; max-width: 1320px; }
-        h3 { color: #f8fafc; }
-        p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: #cbd5e1; }
+        .block-container { padding-top: 3.25rem; max-width: 1480px; }
+        h3 { color: #fef3c7; letter-spacing: 0; }
+        p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: #e5e7eb; }
+        button { color: #f8fafc !important; }
         div[data-testid="stMetric"] {
             border: 1px solid rgba(251, 146, 60, 0.22);
             border-radius: 10px;
@@ -341,7 +342,8 @@ def _render_main_app():
         }
         div[data-testid="stExpander"] details > summary {
             background: rgba(39, 39, 42, 0.82);
-            min-height: 2.5rem;
+            min-height: 2.35rem;
+            color: #f8fafc;
         }
         div[data-testid="stDataFrame"] {
             border-radius: 10px;
@@ -349,18 +351,18 @@ def _render_main_app():
         }
         .order-summary-row {
             display: grid;
-            grid-template-columns: minmax(9rem, 1.1fr) minmax(11rem, 1.5fr) minmax(10rem, 1.5fr) minmax(7rem, .8fr) minmax(7rem, .8fr);
+            grid-template-columns: minmax(9rem, 1fr) minmax(12rem, 1.25fr) minmax(8rem, .95fr) minmax(7rem, .72fr) minmax(7rem, .72fr) minmax(7rem, .72fr);
             gap: .5rem;
-            margin: .15rem 0 .45rem 0;
+            margin: .2rem 0 .4rem 0;
         }
         .summary-cell {
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            background: rgba(15, 23, 42, 0.68);
+            border: 1px solid rgba(251, 146, 60, 0.20);
+            background: rgba(17, 24, 39, 0.82);
             border-radius: 8px;
-            padding: .45rem .55rem;
+            padding: .38rem .5rem;
         }
         .summary-label {
-            color: #94a3b8;
+            color: #fbbf24;
             font-size: .72rem;
             line-height: 1.1;
         }
@@ -370,6 +372,12 @@ def _render_main_app():
             line-height: 1.35;
             white-space: normal;
             overflow-wrap: anywhere;
+        }
+        .rate-caption {
+            color: #fde68a;
+            font-size: .78rem;
+            text-align: right;
+            padding-top: .35rem;
         }
         .stButton > button[kind="primary"] {
             background: #c2410c;
@@ -407,22 +415,33 @@ def _render_main_app():
                 st.warning(f"無法讀取 Google Sheets：{e}")
 
     df_pending_for_run = df_pending
-    main_col, side_col = st.columns([3, 1])
+    main_col, side_col = st.columns([4.2, 1.15])
 
     with main_col:
-        preview_title_col, preview_button_col = st.columns([5, 1])
+        preview_title_col, rate_col, reload_col, reset_all_col = st.columns([3.2, 1.8, 1.25, 1.2])
         with preview_title_col:
             st.subheader("📊 待打單預覽")
-        with preview_button_col:
+        with rate_col:
+            rate, rate_date, rate_source = _load_usd_jpy_rate() if not df_pending.empty else (None, "", "")
+            if rate:
+                st.markdown(
+                    f'<div class="rate-caption">USD/JPY {rate:.4f} ({rate_date})</div>',
+                    unsafe_allow_html=True,
+                )
+        with reload_col:
             if not is_running and st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
                 st.session_state.pop("last_pending_df", None)
                 st.session_state.pop("last_pending_logs", None)
                 st.rerun()
+        with reset_all_col:
+            reset_all_requested = st.button(
+                "恢復全部預設值",
+                width="stretch",
+                key="reset_all_pending",
+                disabled=is_running or df_pending.empty,
+            )
         if not df_pending.empty:
-            rate, rate_date, rate_source = _load_usd_jpy_rate()
-            if rate:
-                st.caption(f"USD/JPY rate: {rate:.4f} ({rate_date})")
-            else:
+            if not rate:
                 st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
 
             if is_running:
@@ -430,7 +449,7 @@ def _render_main_app():
                 df_pending_for_run = df_pending
             else:
                 editable_count = min(len(df_pending), 20)
-                if st.button("恢復全部預設值", width="stretch", key="reset_all_pending"):
+                if reset_all_requested:
                     _reset_all_order_editors(df_pending.head(editable_count))
                     st.rerun()
                 edited_summary_rows: list[dict[str, str]] = []
@@ -443,13 +462,45 @@ def _render_main_app():
                     default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
                     with st.expander(f"{order_id} | {name}", expanded=True):
                         reset_version = _reset_version(order_id)
-                        trans_col, spacer_col, reset_col = st.columns([1.25, 3.75, 1])
+                        item_frame = build_pending_item_frame(row)
+                        item_key = f"pending_items_{position}_{order_id}_{reset_version}"
+                        summary_item_frame = _apply_data_editor_state(item_frame, item_key)
+                        trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
+                        pending_trans = st.session_state.get(trans_key, default_trans_type)
+                        summary_preview = {
+                            "Order No.": order_id,
+                            "Name": name,
+                            "Country": country,
+                            "TransType": pending_trans,
+                            "TotalValue(USD)": "",
+                            "TotalValue(JPY)": "",
+                        }
+                        preview_df = apply_pending_order_editor_values(
+                            df_pending.iloc[[position]],
+                            pd.DataFrame([summary_preview]),
+                            {0: summary_item_frame},
+                            usd_jpy_rate=rate,
+                        )
+                        summary_row = build_pending_summary_frame(preview_df).iloc[0]
+                        st.markdown(
+                            '<div class="order-summary-row">'
+                            + _summary_cell("Order No.", summary_row["Order No."])
+                            + _summary_cell("Name", summary_row["Name"])
+                            + _summary_cell("Country", summary_row["Country"])
+                            + _summary_cell("TransType", pending_trans)
+                            + _summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"])
+                            + _summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"])
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
+                        trans_col, spacer_col, reset_col = st.columns([1.1, 4.2, 1])
                         with trans_col:
                             trans_type = st.selectbox(
                                 "TransType",
                                 options=SHIPPING_OPTIONS,
                                 index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                                key=f"pending_trans_{position}_{order_id}_{reset_version}",
+                                key=trans_key,
+                                label_visibility="collapsed",
                             )
                         with spacer_col:
                             st.write("")
@@ -475,32 +526,12 @@ def _render_main_app():
                                 + ", ".join(f"Content{i}" for i in zero_items)
                                 + ". Please edit before starting."
                             )
-                        item_frame = build_pending_item_frame(row)
-                        item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-                        summary_item_frame = _apply_data_editor_state(item_frame, item_key)
-                        preview_df = apply_pending_order_editor_values(
-                            df_pending.iloc[[position]],
-                            pd.DataFrame([edited_summary_rows[-1]]),
-                            {0: summary_item_frame},
-                            usd_jpy_rate=rate,
-                        )
-                        summary_row = build_pending_summary_frame(preview_df).iloc[0]
-                        st.markdown(
-                            '<div class="order-summary-row">'
-                            + _summary_cell("Order No.", summary_row["Order No."])
-                            + _summary_cell("Name", summary_row["Name"])
-                            + _summary_cell("Country", summary_row["Country"])
-                            + _summary_cell("TotalValue(USD)", summary_row["TotalValue(USD)"])
-                            + _summary_cell("TotalValue(JPY)", summary_row["TotalValue(JPY)"])
-                            + "</div>",
-                            unsafe_allow_html=True,
-                        )
                         edited_items_by_position[position] = st.data_editor(
                             item_frame,
                             hide_index=True,
                             width="stretch",
                             num_rows="fixed",
-                            disabled=["Content", "HSCode"],
+                            disabled=["Content"],
                             column_config={
                                 "Content": st.column_config.TextColumn("Content", width="small"),
                                 "Description": st.column_config.TextColumn("Description", width="large"),

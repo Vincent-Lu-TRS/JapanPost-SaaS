@@ -81,6 +81,18 @@ def _quantity_col(index: int) -> str:
     return f"數量{index}"
 
 
+def _hscode_col(index: int) -> str:
+    return f"HSCode{index}"
+
+
+def display_country(value: str) -> str:
+    text = _str_value(value)
+    for separator in ("（", "("):
+        if separator in text:
+            return text.split(separator, 1)[0].strip()
+    return text
+
+
 def calculate_total_value_usd(row: pd.Series, max_items: int = MAX_EDITOR_ITEMS) -> float:
     total = 0.0
     for index in range(1, max_items + 1):
@@ -108,7 +120,7 @@ def build_pending_summary_frame(df: pd.DataFrame) -> pd.DataFrame:
             {
                 "Order No.": _str_value(row.get("注文番号(貼上原始資料)", "")),
                 "Name": _str_value(row.get("Shipping Name", row.get("Shipping Name_1", ""))),
-                "Country": _str_value(row.get("收件人國家", row.get("Country", ""))),
+                "Country": display_country(row.get("收件人國家", row.get("Country", ""))),
                 "TransType": _str_value(row.get(SHIPPING_COL, "")),
                 "TotalValue(USD)": _format_usd(calculate_total_value_usd(row)),
                 "TotalValue(JPY)": _str_value(row.get("訂單合計申告金額(JPY)", "")),
@@ -134,13 +146,15 @@ def build_pending_item_frame(
             {
                 "Content": f"Content{index}",
                 "Description": content,
-                "HSCode": hs_codes.get(str(index), ""),
+                "HSCode": hs_codes.get(str(index), _str_value(row.get(_hscode_col(index), ""))),
                 "Value": value,
                 "Quantity": quantity or "1",
             }
         )
     if not rows:
-        rows.append({"Content": "Content1", "Description": "", "HSCode": "", "Value": "", "Quantity": "1"})
+        rows.append({"Content": "1", "Description": "", "HSCode": "", "Value": "", "Quantity": "1"})
+    for row in rows:
+        row["Content"] = str(row["Content"]).replace("Content", "")
     return pd.DataFrame(rows, columns=["Content", "Description", "HSCode", "Value", "Quantity"])
 
 
@@ -178,6 +192,7 @@ def apply_pending_order_editor_values(
 
             mappings = [
                 (_content_col(item_index), "Description"),
+                (_hscode_col(item_index), "HSCode"),
                 (_value_col(item_index), "Value"),
                 (_quantity_col(item_index), "Quantity"),
             ]

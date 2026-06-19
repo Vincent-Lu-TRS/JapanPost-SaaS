@@ -12,6 +12,7 @@ from pending_editor import (
     build_pending_item_frame,
     build_pending_summary_frame,
     coerce_pending_editor_values,
+    display_country,
     has_zero_value_items,
 )
 
@@ -39,7 +40,7 @@ class PendingEditorTests(unittest.TestCase):
         self.assertEqual(list(summary.columns), PENDING_SUMMARY_COLUMNS)
         self.assertEqual(summary.iloc[0]["Order No."], "WhoWht-Test2")
         self.assertEqual(summary.iloc[0]["Name"], "Chimwemwe Banda")
-        self.assertEqual(summary.iloc[0]["Country"], "GERMANY（ドイツ）")
+        self.assertEqual(summary.iloc[0]["Country"], "GERMANY")
         self.assertEqual(summary.iloc[0]["TransType"], "ePacket")
         self.assertEqual(summary.iloc[0]["TotalValue(USD)"], "23.25")
         self.assertEqual(summary.iloc[0]["TotalValue(JPY)"], "3749")
@@ -60,13 +61,13 @@ class PendingEditorTests(unittest.TestCase):
 
         self.assertEqual(list(items.columns), ["Content", "Description", "HSCode", "Value", "Quantity"])
         self.assertEqual(items.iloc[0].to_dict(), {
-            "Content": "Content1",
+            "Content": "1",
             "Description": "Dietary Supplement",
             "HSCode": "330499",
             "Value": "6.12",
             "Quantity": "1",
         })
-        self.assertEqual(items.iloc[1]["Content"], "Content2")
+        self.assertEqual(items.iloc[1]["Content"], "2")
         self.assertEqual(items.iloc[1]["Description"], "Pillow")
         self.assertEqual(items.iloc[1]["HSCode"], "940490")
 
@@ -107,8 +108,8 @@ class PendingEditorTests(unittest.TestCase):
         items_by_position = {
             0: pd.DataFrame(
                 [
-                    {"Content": "Content1", "Description": "Dietary Supplement", "HSCode": "", "Value": "7", "Quantity": "2"},
-                    {"Content": "Content2", "Description": "Pillow", "HSCode": "", "Value": "3", "Quantity": "1"},
+                    {"Content": "1", "Description": "Dietary Supplement", "HSCode": "330499", "Value": "7", "Quantity": "2"},
+                    {"Content": "2", "Description": "Pillow", "HSCode": "940490", "Value": "3", "Quantity": "1"},
                 ]
             )
         }
@@ -124,6 +125,8 @@ class PendingEditorTests(unittest.TestCase):
         self.assertEqual(applied.loc[0, "申告金額1"], "7")
         self.assertEqual(applied.loc[0, "數量1"], "2")
         self.assertEqual(applied.loc[0, "申告金額2"], "3")
+        self.assertEqual(applied.loc[0, "HSCode1"], "330499")
+        self.assertEqual(applied.loc[0, "HSCode2"], "940490")
         self.assertEqual(applied.loc[0, "郵局申告金額(USD)"], "17.00")
         self.assertEqual(applied.loc[0, "訂單合計申告金額(JPY)"], "2550")
 
@@ -144,7 +147,7 @@ class PendingEditorTests(unittest.TestCase):
         summary = build_pending_summary_frame(original)
         items_by_position = {
             0: pd.DataFrame(
-                [{"Content": "Content1", "Description": "New Name", "HSCode": "", "Value": "6.12", "Quantity": "1"}]
+                [{"Content": "1", "Description": "New Name", "HSCode": "", "Value": "6.12", "Quantity": "1"}]
             )
         }
 
@@ -152,6 +155,11 @@ class PendingEditorTests(unittest.TestCase):
 
         self.assertEqual(applied.loc[0, "內容物1"], "New Name")
         self.assertEqual(applied.loc[0, "訂單合計申告金額(JPY)"], "999")
+
+    def test_display_country_uses_english_prefix_only(self):
+        self.assertEqual(display_country("GERMANY（ドイツ）"), "GERMANY")
+        self.assertEqual(display_country("AUSTRALIA（オーストラリア）"), "AUSTRALIA")
+        self.assertEqual(display_country("Portugal"), "Portugal")
 
     def test_build_pending_editor_frame_includes_content_and_amount_columns(self):
         df = pd.DataFrame(
