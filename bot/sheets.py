@@ -5,6 +5,7 @@ Google Sheets 操作模組
 """
 import os
 import logging
+import time
 import pandas as pd
 import streamlit as st
 import gspread
@@ -227,6 +228,22 @@ def _get_gspread_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
+def _get_worksheet_by_gid(spreadsheet, gid: str):
+    try:
+        return spreadsheet.get_worksheet_by_id(int(str(gid).strip()))
+    except Exception:
+        return None
+
+
+def _last_non_empty_row_sample(df: pd.DataFrame, order_id_col: str, limit: int = 5) -> str:
+    if df.empty or order_id_col not in df.columns:
+        return "-"
+    ids = [str(v).strip() for v in df[order_id_col].tolist() if str(v).strip()]
+    if not ids:
+        return "-"
+    return ", ".join(ids[-limit:])
+
+
 def get_pending_orders(log_cb=None) -> pd.DataFrame:
     """
     從來源表單取得待打單清單，並執行雙重過濾防重製：
@@ -243,19 +260,23 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
             logging.info(msg)
 
     try:
+        started_at = time.perf_counter()
         client = _get_gspread_client()
 
         # ── 讀取來源表單 ────────────────────────────────
+        source_started_at = time.perf_counter()
         sh_source = client.open_by_key(SOURCE_SHEET_ID)
-        ws_source = next(
-            (ws for ws in sh_source.worksheets() if str(ws.id) == SOURCE_GID), None
-        )
+        ws_source = _get_worksheet_by_gid(sh_source, SOURCE_GID)
         if not ws_source:
             _log(f"❌ 找不到來源表單 GID {SOURCE_GID}")
             return pd.DataFrame()
 
         _log(f"🌐 讀取來源表單：{sh_source.title}")
         all_values = ws_source.get_all_values()
+        _log(
+            "⏱️ 來源表 API 讀取完成："
+            f"{len(all_values)} 列，耗時 {time.perf_counter() - source_started_at:.1f}s"
+        )
         if len(all_values) < 2:
             _log("ℹ️ 來源表單無資料列")
             return pd.DataFrame()
@@ -273,15 +294,17 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
 
         df = pd.DataFrame(all_values[1:], columns=header)
         _log(f"📊 來源原始筆數：{len(df)}")
+        _log(
+            "🧾 API 讀到的來源末端注文番号："
+            f"{_last_non_empty_row_sample(df, '注文番号(貼上原始資料)')}"
+        )
 
         # ── 🔥 雙重過濾：即時讀取目標表單已完成單號 ──────
         completed_ids: set[str] = set()
         try:
+            target_started_at = time.perf_counter()
             sh_target = client.open_by_key(TARGET_SHEET_ID)
-            ws_target = next(
-                (ws for ws in sh_target.worksheets() if str(ws.id) == TARGET_GID),
-                None,
-            )
+            ws_target = _get_worksheet_by_gid(sh_target, TARGET_GID)
             if ws_target:
                 completed_col_c = ws_target.col_values(3)  # C 欄 = 注文番号
                 completed_ids = {
@@ -289,6 +312,10 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
                     for v in completed_col_c[1:]  # 跳過標題
                     if str(v).strip()
                 }
+                _log(
+                    "⏱️ 目標表 C 欄讀取完成："
+                    f"{len(completed_ids)} 個完成單號，耗時 {time.perf_counter() - target_started_at:.1f}s"
+                )
         except Exception as e:
             _log(f"⚠️ 無法讀取目標表單（跳過雙重過濾）: {e}")
 
@@ -298,7 +325,7 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
             log_cb=log_cb,
         )
         _log(
-            f"✅ 最終可打單：{len(df_filtered)} 筆"
+            f"✅ 最終可打單：{len(df_filtered)} 筆，總讀取耗時 {time.perf_counter() - started_at:.1f}s"
         )
 
         return df_filtered

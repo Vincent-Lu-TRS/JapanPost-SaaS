@@ -13,12 +13,41 @@ sys.modules.setdefault("streamlit", types.SimpleNamespace(secrets={}))
 from bot.sheets import (
     COUNTRY_CODE_MAP,
     _filter_pending_orders_dataframe,
+    _get_worksheet_by_gid,
     _prefer_shipping_method_rows,
     _shipping_priority,
 )
 
 
 class SheetsHelperTests(unittest.TestCase):
+    def test_get_worksheet_by_gid_uses_direct_lookup(self):
+        class FakeSpreadsheet:
+            title = "Fake Sheet"
+
+            def __init__(self):
+                self.requested_ids = []
+
+            def get_worksheet_by_id(self, gid):
+                self.requested_ids.append(gid)
+                return f"worksheet-{gid}"
+
+            def worksheets(self):
+                raise AssertionError("worksheets() should not be called for direct GID lookup")
+
+        spreadsheet = FakeSpreadsheet()
+
+        result = _get_worksheet_by_gid(spreadsheet, "605188303")
+
+        self.assertEqual(result, "worksheet-605188303")
+        self.assertEqual(spreadsheet.requested_ids, [605188303])
+
+    def test_get_worksheet_by_gid_returns_none_when_missing(self):
+        class FakeSpreadsheet:
+            def get_worksheet_by_id(self, gid):
+                raise LookupError(f"missing {gid}")
+
+        self.assertIsNone(_get_worksheet_by_gid(FakeSpreadsheet(), "605188303"))
+
     def test_country_code_map_includes_new_japanese_variants(self):
         self.assertEqual(COUNTRY_CODE_MAP["KOREA（韓国）"], "KR")
         self.assertEqual(COUNTRY_CODE_MAP["BELGIUM（ベルギー）"], "EU")
