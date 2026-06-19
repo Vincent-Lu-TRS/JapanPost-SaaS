@@ -58,15 +58,16 @@ class PendingEditorTests(unittest.TestCase):
 
         items = build_pending_item_frame(row, hs_codes={"1": "330499", "2": "940490"})
 
-        self.assertEqual(list(items.columns), ["Item", "Content", "HSCode", "Value", "Quantity"])
+        self.assertEqual(list(items.columns), ["Content", "Description", "HSCode", "Value", "Quantity"])
         self.assertEqual(items.iloc[0].to_dict(), {
-            "Item": 1,
-            "Content": "Dietary Supplement",
+            "Content": "Content1",
+            "Description": "Dietary Supplement",
             "HSCode": "330499",
             "Value": "6.12",
             "Quantity": "1",
         })
-        self.assertEqual(items.iloc[1]["Content"], "Pillow")
+        self.assertEqual(items.iloc[1]["Content"], "Content2")
+        self.assertEqual(items.iloc[1]["Description"], "Pillow")
         self.assertEqual(items.iloc[1]["HSCode"], "940490")
 
     def test_zero_value_items_are_detected(self):
@@ -106,8 +107,8 @@ class PendingEditorTests(unittest.TestCase):
         items_by_position = {
             0: pd.DataFrame(
                 [
-                    {"Item": 1, "Content": "Dietary Supplement", "HSCode": "", "Value": "7", "Quantity": "2"},
-                    {"Item": 2, "Content": "Pillow", "HSCode": "", "Value": "3", "Quantity": "1"},
+                    {"Content": "Content1", "Description": "Dietary Supplement", "HSCode": "", "Value": "7", "Quantity": "2"},
+                    {"Content": "Content2", "Description": "Pillow", "HSCode": "", "Value": "3", "Quantity": "1"},
                 ]
             )
         }
@@ -143,7 +144,7 @@ class PendingEditorTests(unittest.TestCase):
         summary = build_pending_summary_frame(original)
         items_by_position = {
             0: pd.DataFrame(
-                [{"Item": 1, "Content": "New Name", "HSCode": "", "Value": "6.12", "Quantity": "1"}]
+                [{"Content": "Content1", "Description": "New Name", "HSCode": "", "Value": "6.12", "Quantity": "1"}]
             )
         }
 

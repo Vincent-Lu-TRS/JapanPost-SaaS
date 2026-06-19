@@ -132,16 +132,16 @@ def build_pending_item_frame(
             continue
         rows.append(
             {
-                "Item": index,
-                "Content": content,
+                "Content": f"Content{index}",
+                "Description": content,
                 "HSCode": hs_codes.get(str(index), ""),
                 "Value": value,
                 "Quantity": quantity or "1",
             }
         )
     if not rows:
-        rows.append({"Item": 1, "Content": "", "HSCode": "", "Value": "", "Quantity": "1"})
-    return pd.DataFrame(rows, columns=["Item", "Content", "HSCode", "Value", "Quantity"])
+        rows.append({"Content": "Content1", "Description": "", "HSCode": "", "Value": "", "Quantity": "1"})
+    return pd.DataFrame(rows, columns=["Content", "Description", "HSCode", "Value", "Quantity"])
 
 
 def _summary_value(summary: pd.DataFrame, position: int, column: str) -> str:
@@ -169,14 +169,15 @@ def apply_pending_order_editor_values(
         value_or_quantity_changed = False
         for _, item in item_frame.iterrows():
             try:
-                item_index = int(float(item.get("Item", 0)))
+                content_key = _str_value(item.get("Content", ""))
+                item_index = int("".join(ch for ch in content_key if ch.isdigit()) or "0")
             except Exception:
                 continue
             if item_index < 1 or item_index > MAX_EDITOR_ITEMS:
                 continue
 
             mappings = [
-                (_content_col(item_index), "Content"),
+                (_content_col(item_index), "Description"),
                 (_value_col(item_index), "Value"),
                 (_quantity_col(item_index), "Quantity"),
             ]

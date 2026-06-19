@@ -27,6 +27,7 @@ from pending_editor import (
     build_pending_summary_frame,
     has_zero_value_items,
 )
+from fx_rates import fetch_usd_jpy_rate
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -92,24 +93,11 @@ def _load_pending_orders() -> tuple[pd.DataFrame, list[str]]:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_usd_jpy_rate() -> tuple[float | None, str]:
-    try:
-        import requests
-
-        resp = requests.get(
-            "https://api.frankfurter.dev/v2/rates?base=USD&quotes=JPY",
-            timeout=8,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        rate = float(data.get("rates", {}).get("JPY"))
-        rate_date = str(data.get("date", "latest"))
-        if rate <= 0:
-            raise ValueError("non-positive rate")
-        return rate, rate_date
-    except Exception as e:
-        print(f"[FX] USDJPY fetch failed: {e}", file=sys.stderr, flush=True)
-        return None, ""
+def _load_usd_jpy_rate() -> tuple[float | None, str, str]:
+    rate, rate_date, source = fetch_usd_jpy_rate()
+    if not rate:
+        print(f"[FX] USDJPY fetch failed: {source}", file=sys.stderr, flush=True)
+    return rate, rate_date, source
 
 
 def _zero_value_warning_lines(df: pd.DataFrame) -> list[str]:
@@ -319,98 +307,145 @@ def _render_main_app():
                 st.warning(f"無法讀取 Google Sheets：{e}")
 
     df_pending_for_run = df_pending
-    preview_title_col, preview_button_col = st.columns([5, 1])
-    with preview_title_col:
-        st.subheader("📊 待打單預覽")
-    with preview_button_col:
-        if not is_running and st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
-            st.session_state.pop("last_pending_df", None)
-            st.session_state.pop("last_pending_logs", None)
-            st.rerun()
-    if not df_pending.empty:
-        rate, rate_date = _load_usd_jpy_rate()
-        if rate:
-            st.caption(f"USD/JPY rate: {rate:.4f} ({rate_date})")
-        else:
-            st.warning("暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。")
+    main_col, side_col = st.columns([3, 1])
 
-        summary_frame = build_pending_summary_frame(df_pending)
-        if is_running:
-            st.dataframe(summary_frame.head(20), hide_index=True, width="stretch")
-            df_pending_for_run = df_pending
-        else:
-            editable_count = min(len(df_pending), 20)
-            edited_summary = st.data_editor(
-                summary_frame.head(20),
-                hide_index=True,
-                width="stretch",
-                num_rows="fixed",
-                disabled=[
-                    "Order No.",
-                    "Name",
-                    "Country",
-                    "TotalValue(USD)",
-                    "TotalValue(JPY)",
-                ],
-                column_config={
-                    "TransType": st.column_config.SelectboxColumn(
-                        "TransType",
-                        options=SHIPPING_OPTIONS,
-                    ),
-                },
-                key="pending_summary_editor",
-            )
-            edited_items_by_position: dict[int, pd.DataFrame] = {}
-            for position in range(editable_count):
-                row = df_pending.iloc[position]
-                order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
-                name = str(row.get("Shipping Name", "")).strip()
-                with st.expander(f"{order_id}  |  {name}", expanded=bool(has_zero_value_items(row))):
-                    zero_items = has_zero_value_items(row)
-                    if zero_items:
-                        st.error(
-                            "Value is 0 for item "
-                            + ", ".join(str(i) for i in zero_items)
-                            + ". Please edit before starting."
+    with main_col:
+        preview_title_col, preview_button_col = st.columns([5, 1])
+        with preview_title_col:
+            st.subheader("📊 待打單預覽")
+        with preview_button_col:
+            if not is_running and st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
+                st.session_state.pop("last_pending_df", None)
+                st.session_state.pop("last_pending_logs", None)
+                st.rerun()
+        if not df_pending.empty:
+            rate, rate_date, rate_source = _load_usd_jpy_rate()
+            if rate:
+                st.caption(f"USD/JPY rate: {rate:.4f} ({rate_date})")
+            else:
+                st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
+
+            if is_running:
+                st.dataframe(build_pending_summary_frame(df_pending).head(20), hide_index=True, width="stretch")
+                df_pending_for_run = df_pending
+            else:
+                editable_count = min(len(df_pending), 20)
+                edited_summary_rows: list[dict[str, str]] = []
+                edited_items_by_position: dict[int, pd.DataFrame] = {}
+                for position in range(editable_count):
+                    row = df_pending.iloc[position]
+                    order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
+                    name = str(row.get("Shipping Name", "")).strip()
+                    country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+                    default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
+                    with st.expander(f"{order_id} | {name}", expanded=True):
+                        trans_type = st.selectbox(
+                            "TransType",
+                            options=SHIPPING_OPTIONS,
+                            index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
+                            key=f"pending_trans_{position}_{order_id}",
                         )
-                    item_frame = build_pending_item_frame(row)
-                    edited_items_by_position[position] = st.data_editor(
-                        item_frame,
-                        hide_index=True,
-                        width="stretch",
-                        num_rows="fixed",
-                        disabled=["Item", "HSCode"],
-                        column_config={
-                            "Content": st.column_config.TextColumn("Content"),
-                            "Value": st.column_config.TextColumn("Value"),
-                            "Quantity": st.column_config.TextColumn("Quantity"),
-                        },
-                        key=f"pending_items_{position}_{order_id}",
-                    )
-            df_pending_for_run = apply_pending_order_editor_values(
-                df_pending,
-                edited_summary,
-                edited_items_by_position,
-                usd_jpy_rate=rate,
-            )
-            if len(df_pending) > editable_count:
-                st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
-        if pending_logs:
-            with st.expander("🔎 待製單讀取診斷", expanded=False):
+                        edited_summary_rows.append(
+                            {
+                                "Order No.": order_id,
+                                "Name": name,
+                                "Country": country,
+                                "TransType": trans_type,
+                                "TotalValue(USD)": "",
+                                "TotalValue(JPY)": "",
+                            }
+                        )
+                        zero_items = has_zero_value_items(row)
+                        if zero_items:
+                            st.error(
+                                "Value is 0 for "
+                                + ", ".join(f"Content{i}" for i in zero_items)
+                                + ". Please edit before starting."
+                            )
+                        item_frame = build_pending_item_frame(row)
+                        edited_items_by_position[position] = st.data_editor(
+                            item_frame,
+                            hide_index=True,
+                            width="stretch",
+                            num_rows="fixed",
+                            disabled=["Content", "HSCode"],
+                            column_config={
+                                "Content": st.column_config.TextColumn("Content"),
+                                "Description": st.column_config.TextColumn("Description"),
+                                "Value": st.column_config.TextColumn("Value"),
+                                "Quantity": st.column_config.TextColumn("Quantity"),
+                            },
+                            key=f"pending_items_{position}_{order_id}",
+                        )
+                        preview_df = apply_pending_order_editor_values(
+                            df_pending.iloc[[position]],
+                            pd.DataFrame([edited_summary_rows[-1]]),
+                            {0: edited_items_by_position[position]},
+                            usd_jpy_rate=rate,
+                        )
+                        st.dataframe(build_pending_summary_frame(preview_df), hide_index=True, width="stretch")
+
+                df_pending_for_run = apply_pending_order_editor_values(
+                    df_pending,
+                    pd.DataFrame(edited_summary_rows),
+                    edited_items_by_position,
+                    usd_jpy_rate=rate,
+                )
+                if len(df_pending) > editable_count:
+                    st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
+            if pending_logs:
+                with st.expander("🔎 待製單讀取診斷", expanded=False):
+                    st.code("\n".join(pending_logs), language="text")
+        elif pending_logs:
+            st.info("目前沒有待製單資料。")
+            with st.expander("🔎 待製單讀取診斷", expanded=True):
                 st.code("\n".join(pending_logs), language="text")
-    elif pending_logs:
-        st.info("目前沒有待製單資料。")
-        with st.expander("🔎 待製單讀取診斷", expanded=True):
-            st.code("\n".join(pending_logs), language="text")
-    else:
-        st.info("目前沒有待製單資料。")
+        else:
+            st.info("目前沒有待製單資料。")
 
-    st.divider()
+        zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
 
-    col_left, col_right = st.columns([1, 2])
-    zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
+        if job and job.get("orders"):
+            st.subheader("🧾 製單狀態")
+            status_label = {
+                "queued": "待機中",
+                "running": "製單中",
+                "success": "完成",
+                "failed": "需排查",
+                "skipped": "略過",
+            }
+            df_status = pd.DataFrame(job["orders"])
+            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
+            df_status = df_status.rename(columns={
+                "position": "#",
+                "order_id": "注文番号",
+                "recipient": "收件人",
+                "country": "國家",
+                "status": "狀態",
+                "stage": "階段",
+                "tracking_no": "貨運單號",
+                "hs_codes": "HSCode",
+                "message": "訊息",
+            })
+            if "HSCode" not in df_status.columns:
+                df_status["HSCode"] = ""
+            show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
+            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
 
-    with col_left:
+        if job and job.get("results"):
+            st.divider()
+            st.subheader("✅ 本次製單結果")
+            df_res = pd.DataFrame(job["results"])
+            df_res = df_res.rename(columns={
+                "name": "收件人",
+                "order_id": "注文番号",
+                "tracking": "貨運單號",
+                "country_raw": "國家（原始）",
+                "date": "日期",
+            })
+            st.dataframe(df_res, hide_index=True)
+
+    with side_col:
         st.subheader("📋 操作面板")
 
         m1, m2 = st.columns(2)
@@ -460,47 +495,6 @@ def _render_main_app():
             st.caption(f"啟動於 {job.get('started_at', '')}")
             if job.get("results"):
                 st.caption(f"完成 {len(job['results'])} 筆")
-
-    with col_right:
-        if job and job.get("orders"):
-            st.subheader("🧾 製單狀態")
-            status_label = {
-                "queued": "待機中",
-                "running": "製單中",
-                "success": "完成",
-                "failed": "需排查",
-                "skipped": "略過",
-            }
-            df_status = pd.DataFrame(job["orders"])
-            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
-            df_status = df_status.rename(columns={
-                "position": "#",
-                "order_id": "注文番号",
-                "recipient": "收件人",
-                "country": "國家",
-                "status": "狀態",
-                "stage": "階段",
-                "tracking_no": "貨運單號",
-                "hs_codes": "HSCode",
-                "message": "訊息",
-            })
-            if "HSCode" not in df_status.columns:
-                df_status["HSCode"] = ""
-            show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
-            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
-
-        if job and job.get("results"):
-            st.divider()
-            st.subheader("✅ 本次製單結果")
-            df_res = pd.DataFrame(job["results"])
-            df_res = df_res.rename(columns={
-                "name": "收件人",
-                "order_id": "注文番号",
-                "tracking": "貨運單號",
-                "country_raw": "國家（原始）",
-                "date": "日期",
-            })
-            st.dataframe(df_res, hide_index=True)
 
     if job and job.get("logs"):
         st.divider()
