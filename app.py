@@ -730,6 +730,7 @@ def _render_main_app():
             align-items: center;
             gap: .34rem;
             white-space: nowrap;
+            min-width: 0;
         }
         .native-info-label {
             color: var(--erp-accent);
@@ -803,6 +804,7 @@ def _render_main_app():
             overflow: hidden;
             border: 1px solid rgba(148, 163, 184, 0.16);
             background: #111827;
+            max-width: 100%;
         }
         div[data-testid="stDataEditor"] [role="gridcell"],
         div[data-testid="stDataEditor"] [role="columnheader"] {
@@ -940,12 +942,108 @@ def _render_main_app():
             margin-top: .42rem;
             white-space: normal;
         }
-        @media (max-width: 900px) {
-            .order-card-header {
-                align-items: stretch;
-                flex-direction: column;
+        @media (max-width: 1200px) {
+            .block-container {
+                padding-left: 1.35rem;
+                padding-right: 1.35rem;
             }
-            .rate-caption { text-align: left; }
+            .toolbar-title {
+                font-size: 1.42rem;
+            }
+            .toolbar-count strong {
+                font-size: 1.42rem;
+            }
+            .native-info-value {
+                font-size: 1.04rem;
+            }
+            .native-info-order .native-info-value {
+                font-size: 1.12rem;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker) {
+                padding: .42rem .54rem .5rem .54rem !important;
+            }
+        }
+        @media (max-width: 900px) {
+            .app-header-title {
+                padding-top: .5rem;
+            }
+            .app-header-user,
+            div[data-testid="stVerticalBlock"]:has(.logout-button-marker) div[data-testid="stButton"] {
+                padding-top: .5rem;
+            }
+            .toolbar-title,
+            .toolbar-text,
+            .native-info {
+                white-space: normal;
+            }
+            .toolbar-text {
+                align-items: flex-start;
+                line-height: 1.2;
+                min-height: auto;
+            }
+            .toolbar-count {
+                align-items: center;
+            }
+            .native-info {
+                align-items: baseline;
+                line-height: 1.2;
+            }
+            .native-info-label,
+            .native-info-value {
+                line-height: 1.2;
+            }
+        }
+        @media (max-width: 640px) {
+            .block-container {
+                padding-left: .75rem;
+                padding-right: .75rem;
+            }
+            .app-header-title {
+                font-size: 1.34rem;
+                padding-top: .25rem;
+            }
+            .app-header-user,
+            div[data-testid="stVerticalBlock"]:has(.logout-button-marker) div[data-testid="stButton"] {
+                padding-top: .1rem;
+            }
+            .toolbar-title {
+                font-size: 1.28rem;
+                min-height: 1.65rem;
+            }
+            .toolbar-count strong {
+                font-size: 1.36rem;
+            }
+            button {
+                min-height: 44px;
+                height: 44px;
+            }
+            div[data-testid="stButton"],
+            div[data-testid="stNumberInput"] {
+                min-height: 44px;
+                height: 44px;
+            }
+            div[data-testid="stNumberInput"] {
+                grid-template-columns: auto 64px;
+            }
+            div[data-testid="stTextInput"],
+            div[data-testid="stSelectbox"] {
+                grid-template-columns: 4.5rem minmax(0, 1fr);
+            }
+            div[data-testid="stTextInput"] input,
+            div[data-baseweb="select"] > div,
+            div[data-testid="stNumberInput"] input {
+                min-height: 44px;
+                height: 44px;
+            }
+            .native-info-value {
+                font-size: 1rem;
+            }
+            .native-info-order .native-info-value {
+                font-size: 1.08rem;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker) {
+                padding: .5rem .5rem .55rem .5rem !important;
+            }
         }
         </style>
         """,
@@ -985,7 +1083,7 @@ def _render_main_app():
     required_id_warnings = _required_id_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_info_cols = st.columns([1.08, 1.28, .62, .72, 4.0], gap="small", vertical_alignment="center")
+    toolbar_info_cols = st.columns([1.75, 1.45, .9, 1.02, 1.2], gap="small", vertical_alignment="center")
     with toolbar_info_cols[0]:
         st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_info_cols[1]:
@@ -1001,7 +1099,7 @@ def _render_main_app():
             unsafe_allow_html=True,
         )
     st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
-    toolbar_action_cols = st.columns([.82, .46, 1.0, 1.0, 2.67, 1.12], gap="small", vertical_alignment="center")
+    toolbar_action_cols = st.columns([.88, .45, 1.0, 1.0, 1.5, 1.12], gap="small", vertical_alignment="center")
     with toolbar_action_cols[0]:
         max_rows_input = st.number_input(
             "最大處理",
@@ -1101,7 +1199,7 @@ def _render_main_app():
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
                     st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
-                    info_cols = st.columns([1.65, 1.22, .72, .72, 4.0], gap="small", vertical_alignment="center")
+                    info_cols = st.columns([2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
                     with info_cols[0]:
                         st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
                     with info_cols[1]:
