@@ -150,6 +150,10 @@ def _pccc_key_for(position: int, order_id: str, reset_version: int) -> str:
     return f"pending_pccc_{position}_{order_id}_{reset_version}"
 
 
+def _order_id_for_position(row: pd.Series, position: int) -> str:
+    return str(row.get("注文番号(貼上原始資料)", row.get("Order No.", ""))).strip() or f"row-{position + 1}"
+
+
 def _selected_key_for(position: int, order_id: str, reset_version: int) -> str:
     return f"pending_selected_{position}_{order_id}_{reset_version}"
 
@@ -231,7 +235,7 @@ def _build_pending_run_frame_from_state(
     edited_items_by_position: dict[int, pd.DataFrame] = {}
     for position in range(editable_count):
         row = df_pending.iloc[position]
-        order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
+        order_id = _order_id_for_position(row, position)
         country = str(row.get("收件人國家", row.get("Country", ""))).strip()
         parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
         default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
@@ -272,7 +276,7 @@ def _selected_source_indices_from_state(df_pending: pd.DataFrame, editable_count
     selected_indices: list[object] = []
     for position, source_index in enumerate(df_pending.index[:editable_count]):
         row = df_pending.iloc[position]
-        order_id = str(row.get("瘜冽??芸(鞎潔???鞈?)", "")).strip() or f"row-{position + 1}"
+        order_id = _order_id_for_position(row, position)
         reset_version = _reset_version(order_id)
         selected_key = _selected_key_for(position, order_id, reset_version)
         if bool(st.session_state.get(selected_key, True)):
@@ -285,7 +289,7 @@ def _extra_trans_types_by_index_from_state(df_pending: pd.DataFrame, editable_co
     extra_trans_types: dict[object, list[str]] = {}
     for position, source_index in enumerate(df_pending.index[:editable_count]):
         row = df_pending.iloc[position]
-        order_id = str(row.get("瘜冽??芸(鞎潔???鞈?)", "")).strip() or f"row-{position + 1}"
+        order_id = _order_id_for_position(row, position)
         reset_version = _reset_version(order_id)
         extra_key = _extra_trans_key_for(position, order_id, reset_version)
         selected = st.session_state.get(extra_key, [])
@@ -339,12 +343,18 @@ def _render_running_progress(job: dict) -> None:
     )
 
 
-def _install_start_button_guard() -> None:
+def _install_start_button_guard(is_running: bool) -> None:
+    running_flag = "true" if is_running else "false"
     components.html(
         """
         <script>
         const doc = window.parent.document;
         const overlayId = "jp-post-start-guard";
+        const isRunning = __RUNNING__;
+        if (!isRunning) {
+          const staleOverlay = doc.getElementById(overlayId);
+          if (staleOverlay) staleOverlay.remove();
+        }
         function showGuard() {
           if (doc.getElementById(overlayId)) return;
           const overlay = doc.createElement("div");
@@ -391,6 +401,11 @@ def _install_start_button_guard() -> None:
             }`;
           doc.head.appendChild(style);
           doc.body.appendChild(overlay);
+          window.setTimeout(() => window.parent.location.reload(), 1200);
+          window.setTimeout(() => {
+            const staleOverlay = doc.getElementById(overlayId);
+            if (staleOverlay) staleOverlay.remove();
+          }, 30000);
         }
         function wireButtons() {
           for (const button of doc.querySelectorAll("button")) {
@@ -403,7 +418,7 @@ def _install_start_button_guard() -> None:
         wireButtons();
         new MutationObserver(wireButtons).observe(doc.body, { childList: true, subtree: true });
         </script>
-        """,
+        """.replace("__RUNNING__", running_flag),
         height=0,
     )
 
@@ -1283,10 +1298,10 @@ def _render_main_app():
         """,
         unsafe_allow_html=True,
     )
-    _install_start_button_guard()
 
     job = _get_job(email)
     is_running = job is not None and job.get("status") == "running"
+    _install_start_button_guard(is_running)
     if job is not None:
         st.session_state.pop("job_launching", None)
 
@@ -1410,7 +1425,7 @@ def _render_main_app():
             job_order_by_id = {str(order.get("order_id", "")): order for order in (job or {}).get("orders", [])}
             for position in range(editable_count):
                 row = df_pending.iloc[position]
-                order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
+                order_id = _order_id_for_position(row, position)
                 country = str(row.get("收件人國家", row.get("Country", ""))).strip()
                 kind = country_kind(country)
                 parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
