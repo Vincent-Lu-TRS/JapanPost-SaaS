@@ -128,6 +128,9 @@ def _reset_version(order_id: str) -> int:
 
 def _reset_order_editor(order_id: str) -> None:
     st.session_state[_reset_key_for(order_id)] = _reset_version(order_id) + 1
+    selected_by_order = st.session_state.get("pending_selected_by_order")
+    if isinstance(selected_by_order, dict):
+        selected_by_order[order_id] = True
 
 
 def _reset_all_order_editors(df: pd.DataFrame) -> None:
@@ -155,6 +158,29 @@ def _order_id_for_position(row: pd.Series, position: int) -> str:
 
 def _selected_key_for(position: int, order_id: str, reset_version: int) -> str:
     return f"pending_selected_{position}_{order_id}_{reset_version}"
+
+
+def _selected_by_order_state() -> dict[str, bool]:
+    selected_by_order = st.session_state.get("pending_selected_by_order")
+    if not isinstance(selected_by_order, dict):
+        selected_by_order = {}
+        st.session_state["pending_selected_by_order"] = selected_by_order
+    return selected_by_order
+
+
+def _is_order_selected(order_id: str) -> bool:
+    return bool(_selected_by_order_state().get(order_id, True))
+
+
+def _sync_order_selected_from_widget(order_id: str, widget_key: str) -> None:
+    _selected_by_order_state()[order_id] = bool(st.session_state.get(widget_key, True))
+
+
+def _initialize_order_selected_widget(order_id: str, widget_key: str) -> None:
+    selected_by_order = _selected_by_order_state()
+    if order_id not in selected_by_order:
+        selected_by_order[order_id] = bool(st.session_state.get(widget_key, True))
+    st.session_state[widget_key] = bool(selected_by_order.get(order_id, True))
 
 
 def _extra_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
@@ -276,9 +302,7 @@ def _selected_source_indices_from_state(df_pending: pd.DataFrame, editable_count
     for position, source_index in enumerate(df_pending.index[:editable_count]):
         row = df_pending.iloc[position]
         order_id = _order_id_for_position(row, position)
-        reset_version = _reset_version(order_id)
-        selected_key = _selected_key_for(position, order_id, reset_version)
-        if bool(st.session_state.get(selected_key, True)):
+        if _is_order_selected(order_id):
             selected_indices.append(source_index)
     selected_indices.extend(list(df_pending.index[editable_count:]))
     return selected_indices
@@ -1303,6 +1327,7 @@ def _render_main_app():
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
             st.session_state.pop("pending_refresh_notice", None)
+            st.session_state.pop("pending_selected_by_order", None)
             st.rerun()
     with toolbar_action_cols[3]:
         btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
@@ -1332,6 +1357,7 @@ def _render_main_app():
         )
 
     if reset_all_requested and not df_pending.empty:
+        st.session_state.pop("pending_selected_by_order", None)
         _reset_all_order_editors(df_pending.head(editable_count))
         st.rerun()
     if not rate and not df_pending.empty:
@@ -1411,11 +1437,12 @@ def _render_main_app():
                     st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
                     info_cols = st.columns([.58, 2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
                     with info_cols[0]:
-                        if selected_key not in st.session_state:
-                            st.session_state[selected_key] = True
+                        _initialize_order_selected_widget(order_id, selected_key)
                         st.checkbox(
                             "製單",
                             key=selected_key,
+                            on_change=_sync_order_selected_from_widget,
+                            args=(order_id, selected_key),
                         )
                     with info_cols[1]:
                         st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
