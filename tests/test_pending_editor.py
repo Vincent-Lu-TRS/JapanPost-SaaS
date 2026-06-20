@@ -103,6 +103,10 @@ class PendingEditorTests(unittest.TestCase):
             parse_shipping_name("Eunseo Ha (PCCC：P180026936191)"),
             {"clean_name": "Eunseo Ha", "prc_id": "", "pccc": "P180026936191"},
         )
+        self.assertEqual(
+            parse_shipping_name("Eunseo Ha (PCCC:P18026936191)"),
+            {"clean_name": "Eunseo Ha", "prc_id": "", "pccc": "P18026936191"},
+        )
 
     def test_compose_shipping_name_restores_country_specific_identifier(self):
         self.assertEqual(country_kind("CHINA（中國）"), "china")

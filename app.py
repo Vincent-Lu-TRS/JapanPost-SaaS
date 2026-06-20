@@ -147,6 +147,20 @@ def _pccc_key_for(position: int, order_id: str, reset_version: int) -> str:
     return f"pending_pccc_{position}_{order_id}_{reset_version}"
 
 
+def _sync_recipient_id_session_fields(name_key: str, prc_id_key: str, pccc_key: str) -> None:
+    current_name = st.session_state.get(name_key)
+    if not isinstance(current_name, str):
+        return
+    parsed = parse_shipping_name(current_name)
+    if parsed["clean_name"] == current_name or not (parsed["prc_id"] or parsed["pccc"]):
+        return
+    st.session_state[name_key] = parsed["clean_name"]
+    if parsed["prc_id"] and not st.session_state.get(prc_id_key):
+        st.session_state[prc_id_key] = parsed["prc_id"]
+    if parsed["pccc"] and not st.session_state.get(pccc_key):
+        st.session_state[pccc_key] = parsed["pccc"]
+
+
 def _required_id_warning_lines(df: pd.DataFrame) -> list[str]:
     warnings: list[str] = []
     for _, row in df.iterrows():
@@ -217,6 +231,7 @@ def _build_pending_run_frame_from_state(
         name_key = _name_key_for(position, order_id, reset_version)
         prc_id_key = _prc_id_key_for(position, order_id, reset_version)
         pccc_key = _pccc_key_for(position, order_id, reset_version)
+        _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
         edited_name = st.session_state.get(name_key, parsed_name["clean_name"])
         edited_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
         edited_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
@@ -252,8 +267,9 @@ def _summary_cell(label: str, value: str) -> str:
 
 
 def _native_info(label: str, value: str) -> str:
+    label_class = "native-info-order" if label == "Order No." else "native-info-standard"
     return (
-        '<div class="native-info">'
+        f'<div class="native-info {label_class}">'
         f'<span class="native-info-label">{html.escape(label)}</span>'
         f'<span class="native-info-value">{html.escape(str(value))}</span>'
         '</div>'
@@ -437,11 +453,11 @@ def _render_main_app():
             --erp-accent: #f59e0b;
             --erp-accent-2: #ea580c;
             --erp-danger: #ef4444;
-            --control-h: 38px;
-            --row-h: 42px;
+            --control-h: 36px;
+            --row-h: 38px;
             --control-radius: 10px;
             --control-pad-x: 12px;
-            --row-gap: 12px;
+            --row-gap: 8px;
         }
         * { box-sizing: border-box; }
         .stApp {
@@ -451,15 +467,15 @@ def _render_main_app():
             color: var(--erp-text);
         }
         .block-container {
-            padding-top: 1.15rem;
+            padding-top: .72rem;
             padding-bottom: 2rem;
             max-width: 1580px;
         }
         div[data-testid="stHorizontalBlock"] { gap: var(--row-gap); }
-        hr { margin: .04rem 0 .08rem 0; border-color: rgba(148, 163, 184, 0.12); }
+        hr { margin: 0 0 .02rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
-        h3 { color: #fff7ed; margin-bottom: .35rem; }
-        div[data-testid="stHeading"] { margin-bottom: .25rem; }
+        h3 { color: #fff7ed; margin-bottom: .18rem; }
+        div[data-testid="stHeading"] { margin-bottom: .08rem; }
         p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: var(--erp-muted); }
         div[data-testid="stCaptionContainer"] { color: var(--erp-dim); }
         button {
@@ -511,8 +527,8 @@ def _render_main_app():
             display: flex;
             align-items: center;
             padding: 0;
-            font-size: 1.34rem;
-            font-weight: 800;
+            font-size: 1.52rem;
+            font-weight: 850;
             line-height: 1;
             white-space: nowrap;
         }
@@ -521,28 +537,29 @@ def _render_main_app():
             display: flex;
             align-items: center;
             color: var(--erp-text);
-            font-size: .82rem;
+            font-size: .9rem;
             font-weight: 700;
             white-space: nowrap;
         }
         .toolbar-text span {
             color: var(--erp-accent);
-            font-size: .72rem;
-            margin-right: .35rem;
+            font-size: .78rem;
+            margin-right: .22rem;
         }
         .toolbar-muted {
             color: var(--erp-muted);
-            font-size: .72rem;
-            margin-left: .3rem;
+            font-size: .78rem;
+            margin-left: .12rem;
         }
         .toolbar-count {
             display: inline-flex;
             align-items: baseline;
-            gap: .38rem;
+            gap: .28rem;
         }
         .toolbar-count strong {
             color: var(--erp-text);
-            font-size: 1.15rem;
+            font-size: 1.32rem;
+            font-weight: 850;
             line-height: 1;
         }
         .brand-title,
@@ -615,9 +632,9 @@ def _render_main_app():
             border: 1px solid rgba(251, 146, 60, 0.17) !important;
             border-radius: 12px !important;
             background: rgba(19, 21, 25, 0.96);
-            margin-bottom: .75rem;
+            margin-bottom: .62rem;
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025), 0 10px 24px rgba(0, 0, 0, .12);
-            padding: .66rem .78rem .72rem .78rem !important;
+            padding: .46rem .62rem .52rem .62rem !important;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker):hover {
             border-color: rgba(245, 158, 11, 0.42) !important;
@@ -652,10 +669,10 @@ def _render_main_app():
             padding: 0;
         }
         .order-card-body {
-            padding: .62rem .72rem .72rem .72rem;
+            padding: .46rem .62rem .54rem .62rem;
         }
         .order-summary-grid {
-            margin-bottom: .45rem;
+            margin-bottom: .26rem;
         }
         .order-summary-grid div[data-testid="column"] {
             min-width: 0;
@@ -688,28 +705,32 @@ def _render_main_app():
             min-height: var(--control-h);
             display: flex;
             align-items: center;
-            gap: .42rem;
+            gap: .34rem;
             white-space: nowrap;
         }
         .native-info-label {
             color: var(--erp-accent);
-            font-size: .75rem;
-            font-weight: 650;
+            font-size: .8rem;
+            font-weight: 700;
             line-height: var(--control-h);
         }
         .native-info-value {
             color: var(--erp-text);
-            font-size: .95rem;
-            font-weight: 700;
+            font-size: 1.02rem;
+            font-weight: 820;
             line-height: var(--control-h);
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .native-info-order .native-info-value {
+            font-size: 1.08rem;
+            font-weight: 850;
+        }
         .order-info-row {
-            margin-bottom: .28rem;
+            margin-bottom: .12rem;
         }
         .order-action-row {
-            margin-bottom: .36rem;
+            margin-bottom: .2rem;
         }
         .trans-select-cell {
             border: 1px solid var(--erp-border);
@@ -755,15 +776,15 @@ def _render_main_app():
             border-color: var(--erp-accent-2);
         }
         div[data-testid="stDataEditor"] {
-            border-radius: 10px;
+            border-radius: 8px;
             overflow: hidden;
             border: 1px solid rgba(148, 163, 184, 0.16);
             background: #111827;
         }
         div[data-testid="stDataEditor"] [role="gridcell"],
         div[data-testid="stDataEditor"] [role="columnheader"] {
-            line-height: 1.25;
-            min-height: 1.82rem !important;
+            line-height: 1.12;
+            min-height: 1.56rem !important;
         }
         div[data-testid="stDataEditor"] [role="columnheader"] {
             background: #1f2937 !important;
@@ -934,8 +955,8 @@ def _render_main_app():
             f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
             unsafe_allow_html=True,
         )
-    st.markdown('<div style="height:.18rem"></div>', unsafe_allow_html=True)
-    toolbar_action_cols = st.columns([.62, .38, .62, 1.0, 1.02, 1.05, 3.2], gap="small", vertical_alignment="center")
+    st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
+    toolbar_action_cols = st.columns([.52, .28, .48, 1.0, 1.0, 2.55, 1.12], gap="small", vertical_alignment="center")
     with toolbar_action_cols[0]:
         st.markdown('<div class="toolbar-text"><span>最大處理</span></div>', unsafe_allow_html=True)
     with toolbar_action_cols[1]:
@@ -952,12 +973,12 @@ def _render_main_app():
         if is_running:
             if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                 st.rerun()
-        elif st.button("🔁 重新讀取待製單", width="stretch", key="reload_pending_top"):
+        elif st.button("🔁 重新製單", width="stretch", key="reload_pending_top"):
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
             st.rerun()
     with toolbar_action_cols[4]:
-        btn_label = "執行中…" if is_running else ("🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單")
+        btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
         if st.button(btn_label, type="primary",
                      disabled=(is_running or pending_count == 0 or bool(zero_value_warnings) or bool(required_id_warnings)), width="stretch"):
             if df_pending.empty:
@@ -973,7 +994,7 @@ def _render_main_app():
                     st.error("同一批製單已在執行中，已阻止重複啟動。")
                 else:
                     st.error("任務執行中，請稍候")
-    with toolbar_action_cols[5]:
+    with toolbar_action_cols[6]:
         reset_all_requested = st.button(
             "恢復全部預設",
             width="stretch",
@@ -1013,6 +1034,7 @@ def _render_main_app():
                 name_key = _name_key_for(position, order_id, reset_version)
                 prc_id_key = _prc_id_key_for(position, order_id, reset_version)
                 pccc_key = _pccc_key_for(position, order_id, reset_version)
+                _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
                 pending_trans = st.session_state.get(trans_key, default_trans_type)
                 pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
                 pending_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
@@ -1049,9 +1071,9 @@ def _render_main_app():
 
                     st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
                     if kind in {"china", "korea"}:
-                        action_cols = st.columns([1.42, 1.2, 1.35, .9, 2.0], gap="small", vertical_alignment="center")
+                        action_cols = st.columns([1.42, 1.2, 1.35, 2.0, .9], gap="small", vertical_alignment="center")
                     else:
-                        action_cols = st.columns([1.42, 1.2, .9, 3.35], gap="small", vertical_alignment="center")
+                        action_cols = st.columns([1.42, 1.2, 3.35, .9], gap="small", vertical_alignment="center")
                     with action_cols[0]:
                         edited_name = st.text_input(
                             "Name",
@@ -1065,18 +1087,15 @@ def _render_main_app():
                             index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
                             key=trans_key,
                         )
-                    id_col_offset = 0
                     edited_prc_id = pending_prc_id
                     edited_pccc = pending_pccc
                     if kind == "china":
                         with action_cols[2]:
                             edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
-                        id_col_offset = 1
                     elif kind == "korea":
                         with action_cols[2]:
                             edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
-                        id_col_offset = 1
-                    with action_cols[2 + id_col_offset]:
+                    with action_cols[-1]:
                         if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
                             _reset_order_editor(order_id)
                             st.rerun()
