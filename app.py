@@ -328,7 +328,7 @@ def _render_login_page():
 
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
-        st.markdown("## 📮 JP Post 製單系統")
+        st.markdown('## 📮 <span class="brand-accent">JP Post</span> 製單系統', unsafe_allow_html=True)
         st.markdown("**企業專屬 SaaS・免安裝・雲端全自動**")
         st.divider()
         st.markdown("請使用公司 Google 帳號登入（@tkrjm.co.jp）")
@@ -362,7 +362,7 @@ def _render_main_app():
 
     col1, col2, col3 = st.columns([5.7, 1.4, 0.65], vertical_alignment="center")
     with col1:
-        st.markdown("### 📮 JP Post 製單系統")
+        st.markdown('### 📮 <span class="brand-accent">JP Post</span> 製單系統', unsafe_allow_html=True)
     with col2:
         if picture:
             st.markdown(
@@ -397,7 +397,13 @@ def _render_main_app():
             --erp-accent: #f59e0b;
             --erp-accent-2: #ea580c;
             --erp-danger: #ef4444;
+            --control-h: 38px;
+            --row-h: 42px;
+            --control-radius: 10px;
+            --control-pad-x: 12px;
+            --row-gap: 12px;
         }
+        * { box-sizing: border-box; }
         .stApp {
             background:
                 radial-gradient(circle at 8% 4%, rgba(180, 83, 9, 0.24), transparent 30rem),
@@ -409,7 +415,7 @@ def _render_main_app():
             padding-bottom: 2rem;
             max-width: 1580px;
         }
-        div[data-testid="stHorizontalBlock"] { gap: 1.05rem; }
+        div[data-testid="stHorizontalBlock"] { gap: var(--row-gap); }
         hr { margin: .55rem 0 .75rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
         h3 { color: #fff7ed; margin-bottom: .35rem; }
@@ -418,8 +424,11 @@ def _render_main_app():
         div[data-testid="stCaptionContainer"] { color: var(--erp-dim); }
         button {
             color: var(--erp-text) !important;
-            border-radius: 9px !important;
-            min-height: 2.35rem;
+            border-radius: var(--control-radius) !important;
+            min-height: var(--control-h);
+            height: var(--control-h);
+            padding-left: var(--control-pad-x) !important;
+            padding-right: var(--control-pad-x) !important;
             white-space: nowrap !important;
         }
         button:disabled {
@@ -448,13 +457,31 @@ def _render_main_app():
         div[data-testid="stMetric"] [data-testid="stMetricValue"] {
             color: var(--erp-text) !important;
         }
+        .toolbar-title {
+            height: var(--control-h);
+            border-left: 3px solid var(--erp-accent);
+            border-radius: var(--control-radius);
+            background: rgba(15, 23, 42, 0.34);
+            color: var(--erp-text);
+            display: flex;
+            align-items: center;
+            gap: .48rem;
+            padding: 0 var(--control-pad-x);
+            font-size: 1.18rem;
+            font-weight: 800;
+            line-height: 1;
+            white-space: nowrap;
+        }
+        .toolbar-title span { color: var(--erp-accent); }
+        .brand-accent { color: var(--erp-accent); }
         .toolbar-chip {
             border: 1px solid rgba(251, 146, 60, 0.22);
-            border-radius: 999px;
+            border-radius: var(--control-radius);
             background: rgba(15, 23, 42, 0.7);
             color: var(--erp-text);
-            min-height: 2.15rem;
-            padding: .34rem .52rem;
+            height: var(--control-h);
+            min-height: var(--control-h);
+            padding: 0 var(--control-pad-x);
             display: flex;
             align-items: center;
             white-space: nowrap;
@@ -470,12 +497,21 @@ def _render_main_app():
         .toolbar-inline-label {
             color: var(--erp-dim);
             font-size: .72rem;
-            line-height: 1.1;
+            line-height: var(--control-h);
+            height: var(--control-h);
             white-space: nowrap;
         }
         .toolbar-inline-label span {
             color: var(--erp-accent);
             margin-left: .25rem;
+        }
+        .field-inline-label {
+            color: var(--erp-accent);
+            font-size: .68rem;
+            font-weight: 650;
+            line-height: var(--control-h);
+            height: var(--control-h);
+            white-space: nowrap;
         }
         .order-card-marker,
         .debug-log-marker {
@@ -548,9 +584,13 @@ def _render_main_app():
         .summary-cell {
             border: 1px solid var(--erp-border);
             background: rgba(15, 23, 42, 0.72);
-            border-radius: 8px;
-            padding: .24rem .46rem;
-            min-height: 2.28rem;
+            border-radius: var(--control-radius);
+            padding: .22rem var(--control-pad-x);
+            height: var(--control-h);
+            min-height: var(--control-h);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
         }
         .summary-label {
             color: var(--erp-accent);
@@ -561,7 +601,7 @@ def _render_main_app():
         .summary-value {
             color: var(--erp-text);
             font-weight: 700;
-            line-height: 1.22;
+            line-height: 1.12;
             white-space: normal;
             overflow-wrap: anywhere;
         }
@@ -588,7 +628,9 @@ def _render_main_app():
         div[data-baseweb="select"] > div {
             background: rgba(15, 23, 42, 0.96);
             border-color: rgba(251, 146, 60, 0.26);
-            min-height: 2.32rem;
+            min-height: var(--control-h);
+            height: var(--control-h);
+            border-radius: var(--control-radius);
         }
         div[data-baseweb="select"] span,
         div[data-baseweb="select"] div {
@@ -633,8 +675,9 @@ def _render_main_app():
             background: rgba(15, 23, 42, 0.96) !important;
             border-color: rgba(251, 146, 60, 0.26) !important;
             color: var(--erp-text) !important;
-            min-height: 2.35rem;
-            border-radius: 9px;
+            min-height: var(--control-h);
+            height: var(--control-h);
+            border-radius: var(--control-radius);
             font-weight: 650;
         }
         div[data-testid="stNumberInput"] input::-webkit-outer-spin-button,
@@ -652,9 +695,17 @@ def _render_main_app():
             background: rgba(15, 23, 42, 0.96) !important;
             border-color: rgba(251, 146, 60, 0.26) !important;
             color: var(--erp-text) !important;
-            min-height: 2.32rem;
-            border-radius: 9px;
+            min-height: var(--control-h);
+            height: var(--control-h);
+            border-radius: var(--control-radius);
             font-weight: 650;
+        }
+        div[data-testid="stTextInput"],
+        div[data-testid="stNumberInput"],
+        div[data-testid="stSelectbox"],
+        div[data-testid="stButton"] {
+            min-height: var(--control-h);
+            margin-bottom: 0;
         }
         .compact-actions div[data-testid="column"] {
             display: flex;
@@ -680,7 +731,7 @@ def _render_main_app():
             line-height: 1.5;
         }
         .inline-static {
-            min-height: 2.32rem;
+            min-height: var(--control-h);
             display: flex;
             align-items: center;
         }
@@ -738,9 +789,9 @@ def _render_main_app():
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_cols = st.columns([1.35, 1.18, .62, .72, .95, 1.03, 1.05, 1.12], gap="small", vertical_alignment="center")
+    toolbar_cols = st.columns([1.28, 1.15, .58, .68, 1.18, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
     with toolbar_cols[0]:
-        st.subheader("📊 待打單預覽")
+        st.markdown('<div class="toolbar-title"><span>📊</span>待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_cols[1]:
         st.markdown(f'<div class="toolbar-chip">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
     with toolbar_cols[2]:
@@ -748,9 +799,9 @@ def _render_main_app():
     with toolbar_cols[3]:
         st.markdown(f'<div class="toolbar-chip"><span>本次完成</span>{done}</div>', unsafe_allow_html=True)
     with toolbar_cols[4]:
-        max_label_col, max_input_col = st.columns([.92, .78], gap="small", vertical_alignment="center")
+        max_label_col, max_input_col, max_hint_col = st.columns([.62, .46, .54], gap="small", vertical_alignment="center")
         with max_label_col:
-            st.markdown('<div class="toolbar-inline-label">最大處理 <span>0=全部</span></div>', unsafe_allow_html=True)
+            st.markdown('<div class="toolbar-inline-label">最大處理</div>', unsafe_allow_html=True)
         with max_input_col:
             max_rows_input = st.number_input(
                 "最大處理筆數（0=全部）",
@@ -758,6 +809,8 @@ def _render_main_app():
                 disabled=is_running,
                 label_visibility="collapsed",
             )
+        with max_hint_col:
+            st.markdown('<div class="toolbar-inline-label"><span>0=全部</span></div>', unsafe_allow_html=True)
     max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
     with toolbar_cols[5]:
         if is_running:
@@ -839,26 +892,34 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    row_cols = st.columns([1.05, 1.65, 1.18, 1.08, .74, .74, .9], gap="small", vertical_alignment="center")
+                    row_cols = st.columns([1.0, 1.72, 1.08, 1.28, .68, .68, .86], gap="small", vertical_alignment="center")
                     with row_cols[0]:
-                        st.markdown(f'<div class="order-title inline-static">{html.escape(order_id)}</div>', unsafe_allow_html=True)
+                        st.markdown(_summary_cell("Order No.", order_id), unsafe_allow_html=True)
                     with row_cols[1]:
-                        edited_name = st.text_input(
-                            "Name",
-                            value=pending_name,
-                            key=name_key,
-                            label_visibility="collapsed",
-                        )
+                        name_label_col, name_input_col = st.columns([.36, 1.26], gap="small", vertical_alignment="center")
+                        with name_label_col:
+                            st.markdown('<div class="field-inline-label">Name</div>', unsafe_allow_html=True)
+                        with name_input_col:
+                            edited_name = st.text_input(
+                                "Name",
+                                value=pending_name,
+                                key=name_key,
+                                label_visibility="collapsed",
+                            )
                     with row_cols[2]:
                         st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
                     with row_cols[3]:
-                        trans_type = st.selectbox(
-                            "TransType",
-                            options=SHIPPING_OPTIONS,
-                            index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                            key=trans_key,
-                            label_visibility="collapsed",
-                        )
+                        trans_label_col, trans_input_col = st.columns([.58, .98], gap="small", vertical_alignment="center")
+                        with trans_label_col:
+                            st.markdown('<div class="field-inline-label">TransType</div>', unsafe_allow_html=True)
+                        with trans_input_col:
+                            trans_type = st.selectbox(
+                                "TransType",
+                                options=SHIPPING_OPTIONS,
+                                index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
+                                key=trans_key,
+                                label_visibility="collapsed",
+                            )
                     with row_cols[4]:
                         st.markdown(_summary_cell("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
                     with row_cols[5]:
