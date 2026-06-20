@@ -1,5 +1,24 @@
 # JP Post SaaS Claude Handoff
 
+## 2026-06-20 Latest Continuation Note
+
+Use `CLAUDE.md` as the current first-read handoff file, and use `memory.md` for durable UI/data preferences. This file contains older but still useful auth and automation context.
+
+Latest confirmed working commit before the 2026-06-20 documentation handoff:
+
+```text
+a849f1c feat: split command rows and recipient IDs
+```
+
+The current UI direction is Streamlit-native, single-column, and split into type-homogeneous rows:
+
+- toolbar info row: text only
+- toolbar operation row: widgets only
+- order info row: text only
+- order operation row: Name / TransType / optional PRC ID or PCCC / reset widgets
+
+Do not return to forcing mixed custom text and Streamlit widgets into one perfectly aligned framed row; that caused repeated visual alignment regressions.
+
 Last updated: 2026-06-17
 
 ## Current Project Direction
