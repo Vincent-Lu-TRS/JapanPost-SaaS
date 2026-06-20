@@ -339,6 +339,92 @@ def _render_running_progress(job: dict) -> None:
     )
 
 
+def _install_start_button_guard() -> None:
+    components.html(
+        """
+        <script>
+        const doc = window.parent.document;
+        const overlayId = "jp-post-start-guard";
+        function showGuard() {
+          if (doc.getElementById(overlayId)) return;
+          const overlay = doc.createElement("div");
+          overlay.id = overlayId;
+          overlay.innerHTML = `
+            <div class="jp-post-guard-box">
+              <div class="jp-post-guard-title">製單已啟動</div>
+              <div class="jp-post-guard-text">正在建立製單任務，請勿重複操作。畫面會自動更新進度。</div>
+            </div>`;
+          overlay.style.cssText = [
+            "position:fixed",
+            "inset:0",
+            "z-index:2147483647",
+            "background:rgba(3,7,18,.62)",
+            "backdrop-filter:blur(2px)",
+            "display:flex",
+            "align-items:flex-start",
+            "justify-content:center",
+            "padding-top:210px",
+            "cursor:wait"
+          ].join(";");
+          const style = doc.createElement("style");
+          style.textContent = `
+            #${overlayId} .jp-post-guard-box {
+              min-width: 360px;
+              max-width: 560px;
+              border: 1px solid rgba(251,146,60,.48);
+              background: rgba(15,23,42,.96);
+              color: white;
+              border-radius: 8px;
+              padding: 18px 22px;
+              box-shadow: 0 20px 70px rgba(0,0,0,.45);
+              font-family: sans-serif;
+            }
+            #${overlayId} .jp-post-guard-title {
+              font-size: 22px;
+              font-weight: 850;
+              margin-bottom: 8px;
+            }
+            #${overlayId} .jp-post-guard-text {
+              color: #fbbf24;
+              font-size: 15px;
+              font-weight: 700;
+            }`;
+          doc.head.appendChild(style);
+          doc.body.appendChild(overlay);
+        }
+        function wireButtons() {
+          for (const button of doc.querySelectorAll("button")) {
+            if (button.dataset.jpPostGuarded === "1") continue;
+            if (!button.innerText.includes("開始製單")) continue;
+            button.dataset.jpPostGuarded = "1";
+            button.addEventListener("click", showGuard, { capture: true });
+          }
+        }
+        wireButtons();
+        new MutationObserver(wireButtons).observe(doc.body, { childList: true, subtree: true });
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _render_blocking_running_guard(job: dict | None) -> None:
+    progress = summarize_job_progress(job)
+    total = progress["total"]
+    done = progress["done"]
+    active_order = progress["active_order_id"] or "準備中"
+    active_stage = progress["active_stage"] or "建立製單任務"
+    st.markdown(
+        '<div class="running-guard-overlay">'
+        '<div class="running-guard-box">'
+        f'<div class="running-guard-title">製單進行中｜{done}/{total}</div>'
+        f'<div class="running-guard-text">目前處理：{html.escape(active_order)}｜{html.escape(active_stage)}</div>'
+        '<div class="running-guard-sub">已鎖定操作以避免重複製單，畫面會自動更新。</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _summary_cell(label: str, value: str) -> str:
     return (
         '<div class="summary-cell">'
@@ -858,6 +944,52 @@ def _render_main_app():
             line-height: 1.25;
             margin-top: .18rem;
         }
+        .running-guard-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 999999;
+            background: rgba(3, 7, 18, 0.48);
+            backdrop-filter: blur(1.5px);
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding-top: 14.5rem;
+            pointer-events: all;
+        }
+        .running-guard-box {
+            width: min(560px, calc(100vw - 32px));
+            border: 1px solid rgba(251, 146, 60, 0.48);
+            background: rgba(15, 23, 42, 0.96);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+        }
+        .running-guard-title {
+            color: #ffffff;
+            font-size: 1.25rem;
+            font-weight: 900;
+            line-height: 1.2;
+        }
+        .running-guard-text {
+            color: #fbbf24;
+            font-size: .95rem;
+            font-weight: 750;
+            margin-top: .42rem;
+        }
+        .running-guard-sub {
+            color: #cbd5e1;
+            font-size: .82rem;
+            margin-top: .35rem;
+        }
+        div[data-testid="stCheckbox"] {
+            min-height: var(--control-h);
+            display: flex;
+            align-items: center;
+            padding-top: .15rem;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker) div[data-testid="stCheckbox"] {
+            padding-top: .36rem;
+        }
         .trans-select-cell {
             border: 1px solid var(--erp-border);
             background: rgba(15, 23, 42, 0.72);
@@ -1151,9 +1283,12 @@ def _render_main_app():
         """,
         unsafe_allow_html=True,
     )
+    _install_start_button_guard()
 
     job = _get_job(email)
     is_running = job is not None and job.get("status") == "running"
+    if job is not None:
+        st.session_state.pop("job_launching", None)
 
     df_pending = pd.DataFrame()
     pending_count = 0
@@ -1237,9 +1372,9 @@ def _render_main_app():
             else:
                 ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
                 if ok:
+                    st.session_state["job_launching"] = True
                     if hasattr(st, "toast"):
                         st.toast("✅ 已啟動自動製單")
-                    time.sleep(0.8)
                     st.rerun()
                 elif reason == "batch_running":
                     st.error("同一批製單已在執行中，已阻止重複啟動。")
@@ -1264,6 +1399,7 @@ def _render_main_app():
         st.error("；".join(required_id_warnings[:5]))
     if is_running and job:
         _render_running_progress(job)
+        _render_blocking_running_guard(job)
 
     if not df_pending.empty:
         if is_running:
