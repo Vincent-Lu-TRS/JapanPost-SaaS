@@ -778,6 +778,13 @@ def _render_main_app():
             min-height: 1.2rem;
             padding-bottom: .1rem;
         }
+        div[data-testid="stTextInput"] label *,
+        div[data-testid="stSelectbox"] label *,
+        div[data-testid="stTextInput"] [data-testid="stWidgetLabel"] *,
+        div[data-testid="stSelectbox"] [data-testid="stWidgetLabel"] * {
+            color: var(--erp-accent) !important;
+            font-weight: 650 !important;
+        }
         .compact-actions div[data-testid="column"] {
             display: flex;
             align-items: stretch;
