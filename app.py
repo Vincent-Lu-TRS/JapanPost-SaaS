@@ -418,18 +418,21 @@ def _render_main_app():
 
     col1, col2, col3 = st.columns([5.7, 1.4, 0.65], vertical_alignment="center")
     with col1:
-        st.markdown('### <span class="brand-title">JP Post 製單系統</span>', unsafe_allow_html=True)
+        st.markdown('<div class="app-header-title">JP Post 製單系統</div>', unsafe_allow_html=True)
     with col2:
         if picture:
             st.markdown(
+                '<div class="app-header-user">'
                 f'<img src="{picture}" width="28" style="border-radius:50%;'
                 f'vertical-align:middle;margin-right:6px;">'
-                f'<span style="font-size:0.9rem">{name}</span>',
+                f'<span>{name}</span>'
+                '</div>',
                 unsafe_allow_html=True,
             )
         else:
-            st.markdown(f'<span style="font-size:0.9rem">{html.escape(name)}</span>', unsafe_allow_html=True)
+            st.markdown(f'<div class="app-header-user"><span>{html.escape(name)}</span></div>', unsafe_allow_html=True)
     with col3:
+        st.markdown('<span class="logout-button-marker"></span>', unsafe_allow_html=True)
         if st.button("登出", type="secondary"):
             logout(_cm)
             st.rerun()
@@ -478,6 +481,26 @@ def _render_main_app():
         div[data-testid="stHeading"] { margin-bottom: .08rem; }
         p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: var(--erp-muted); }
         div[data-testid="stCaptionContainer"] { color: var(--erp-dim); }
+        .app-header-title {
+            color: var(--erp-accent);
+            font-size: 1.66rem;
+            font-weight: 850;
+            line-height: 1.05;
+            padding-top: 1.05rem;
+            padding-bottom: .18rem;
+        }
+        .app-header-user {
+            color: var(--erp-text);
+            display: flex;
+            align-items: center;
+            min-height: var(--control-h);
+            padding-top: 1.05rem;
+            font-size: .9rem;
+            white-space: nowrap;
+        }
+        div[data-testid="stVerticalBlock"]:has(.logout-button-marker) div[data-testid="stButton"] {
+            padding-top: 1.05rem;
+        }
         button {
             color: var(--erp-text) !important;
             border-radius: var(--control-radius) !important;
@@ -558,8 +581,8 @@ def _render_main_app():
         }
         .toolbar-count strong {
             color: var(--erp-text);
-            font-size: 1.32rem;
-            font-weight: 850;
+            font-size: 1.52rem;
+            font-weight: 900;
             line-height: 1;
         }
         .brand-title,
@@ -716,15 +739,15 @@ def _render_main_app():
         }
         .native-info-value {
             color: var(--erp-text);
-            font-size: 1.02rem;
-            font-weight: 820;
+            font-size: 1.13rem;
+            font-weight: 850;
             line-height: var(--control-h);
             overflow: hidden;
             text-overflow: ellipsis;
         }
         .native-info-order .native-info-value {
-            font-size: 1.08rem;
-            font-weight: 850;
+            font-size: 1.2rem;
+            font-weight: 900;
         }
         .order-info-row {
             margin-bottom: .12rem;
@@ -817,6 +840,28 @@ def _render_main_app():
         }
         div[data-testid="stNumberInput"] button {
             display: none;
+        }
+        div[data-testid="stNumberInput"] {
+            display: grid;
+            grid-template-columns: auto 58px;
+            align-items: center;
+            gap: .5rem;
+        }
+        div[data-testid="stNumberInput"] label {
+            color: var(--erp-accent) !important;
+            font-size: .8rem !important;
+            font-weight: 700 !important;
+            min-height: var(--control-h);
+            height: var(--control-h);
+            display: flex;
+            align-items: center;
+            padding: 0;
+            margin: 0;
+            white-space: nowrap;
+        }
+        div[data-testid="stNumberInput"] label * {
+            color: var(--erp-accent) !important;
+            font-weight: 700 !important;
         }
         div[data-testid="stTextInput"] input {
             background: rgba(15, 23, 42, 0.96) !important;
@@ -956,20 +1001,17 @@ def _render_main_app():
             unsafe_allow_html=True,
         )
     st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
-    toolbar_action_cols = st.columns([.52, .28, .48, 1.0, 1.0, 2.55, 1.12], gap="small", vertical_alignment="center")
+    toolbar_action_cols = st.columns([.82, .46, 1.0, 1.0, 2.67, 1.12], gap="small", vertical_alignment="center")
     with toolbar_action_cols[0]:
-        st.markdown('<div class="toolbar-text"><span>最大處理</span></div>', unsafe_allow_html=True)
-    with toolbar_action_cols[1]:
         max_rows_input = st.number_input(
-            "最大處理筆數（0=全部）",
+            "最大處理",
             min_value=0, max_value=500, value=20, step=1,
             disabled=is_running,
-            label_visibility="collapsed",
         )
-    with toolbar_action_cols[2]:
+    with toolbar_action_cols[1]:
         st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
     max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-    with toolbar_action_cols[3]:
+    with toolbar_action_cols[2]:
         if is_running:
             if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                 st.rerun()
@@ -977,7 +1019,7 @@ def _render_main_app():
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
             st.rerun()
-    with toolbar_action_cols[4]:
+    with toolbar_action_cols[3]:
         btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
         if st.button(btn_label, type="primary",
                      disabled=(is_running or pending_count == 0 or bool(zero_value_warnings) or bool(required_id_warnings)), width="stretch"):
@@ -994,7 +1036,7 @@ def _render_main_app():
                     st.error("同一批製單已在執行中，已阻止重複啟動。")
                 else:
                     st.error("任務執行中，請稍候")
-    with toolbar_action_cols[6]:
+    with toolbar_action_cols[5]:
         reset_all_requested = st.button(
             "恢復全部預設",
             width="stretch",
