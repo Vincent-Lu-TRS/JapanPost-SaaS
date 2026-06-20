@@ -775,8 +775,12 @@ def _render_main_app():
             color: var(--erp-accent) !important;
             font-size: .75rem !important;
             font-weight: 650 !important;
-            min-height: 1.2rem;
-            padding-bottom: .1rem;
+            min-height: var(--control-h);
+            height: var(--control-h);
+            display: flex;
+            align-items: center;
+            padding: 0 .42rem 0 0;
+            margin: 0;
         }
         div[data-testid="stTextInput"] label *,
         div[data-testid="stSelectbox"] label *,
@@ -784,6 +788,17 @@ def _render_main_app():
         div[data-testid="stSelectbox"] [data-testid="stWidgetLabel"] * {
             color: var(--erp-accent) !important;
             font-weight: 650 !important;
+        }
+        div[data-testid="stTextInput"],
+        div[data-testid="stSelectbox"] {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            align-items: center;
+            gap: .5rem;
+        }
+        div[data-testid="stTextInput"] > div,
+        div[data-testid="stSelectbox"] > div {
+            min-width: 0;
         }
         .compact-actions div[data-testid="column"] {
             display: flex;
@@ -867,7 +882,7 @@ def _render_main_app():
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_cols = st.columns([1.05, 1.18, .58, .68, .72, .44, .52, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
+    toolbar_cols = st.columns([1.05, 1.18, .58, .68, .5, .38, .5, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
     with toolbar_cols[0]:
         st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_cols[1]:
@@ -974,7 +989,7 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    row_cols = st.columns([1.0, 1.62, 1.08, 1.32, .68, .68, .86], gap="small", vertical_alignment="top")
+                    row_cols = st.columns([1.0, 1.45, 1.08, 1.18, .68, .68, .86], gap="small", vertical_alignment="center")
                     with row_cols[0]:
                         st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
                     with row_cols[1]:
