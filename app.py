@@ -1248,7 +1248,15 @@ def _render_main_app():
     editable_count = min(len(df_pending), 20)
     if is_running or df_pending.empty:
         df_pending_for_run = df_pending
-        selected_count = pending_count
+        if is_running and job:
+            selected_order_ids = {
+                str(order.get("order_id", "")).strip()
+                for order in (job.get("orders") or [])
+                if str(order.get("order_id", "")).strip()
+            }
+            selected_count = len(selected_order_ids)
+        else:
+            selected_count = pending_count
     else:
         selected_count = len(_selected_source_indices_from_state(df_pending, editable_count))
         df_pending_for_run = _prepare_pending_run_frame_from_state(df_pending, editable_count, rate)
@@ -1340,7 +1348,21 @@ def _render_main_app():
 
     if not df_pending.empty:
         if is_running:
-            st.dataframe(build_pending_summary_frame(df_pending).head(20), hide_index=True, width="stretch")
+            running_orders = pd.DataFrame((job or {}).get("orders") or [])
+            if not running_orders.empty:
+                run_cols = ["position", "order_id", "recipient", "country", "trans_type", "total_usd", "total_jpy"]
+                run_cols = [column for column in run_cols if column in running_orders.columns]
+                running_preview = running_orders[run_cols].rename(columns={
+                    "position": "#",
+                    "order_id": "注文番号",
+                    "recipient": "收件人",
+                    "country": "國家",
+                    "trans_type": "TransType",
+                    "total_usd": "USD",
+                    "total_jpy": "JPY",
+                })
+                st.caption("本次送出製單")
+                st.dataframe(running_preview, hide_index=True, width="stretch")
         else:
             edited_summary_rows: list[dict[str, str]] = []
             edited_items_by_position: dict[int, pd.DataFrame] = {}
