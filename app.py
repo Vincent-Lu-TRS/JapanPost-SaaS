@@ -738,6 +738,10 @@ def _render_main_app():
             padding-top: 15px !important;
             padding-bottom: 3px !important;
         }
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            padding-top: 5px !important;
+            padding-bottom: 0 !important;
+        }
         .compact-actions div[data-testid="column"] {
             display: flex;
             align-items: stretch;
