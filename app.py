@@ -13,7 +13,6 @@ import sys
 import time
 import threading
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 from job_control import (
     BatchJobRegistry,
@@ -331,96 +330,6 @@ def _render_running_progress(job: dict) -> None:
     latest_logs = (job.get("logs") or [])[-3:]
     if latest_logs:
         st.caption("最新狀態：" + "　".join(html.escape(line) for line in latest_logs))
-    components.html(
-        """
-        <script>
-        window.setTimeout(() => {
-          window.parent.location.reload();
-        }, 3000);
-        </script>
-        """,
-        height=0,
-    )
-
-
-def _install_start_button_guard(is_running: bool) -> None:
-    running_flag = "true" if is_running else "false"
-    components.html(
-        """
-        <script>
-        const doc = window.parent.document;
-        const overlayId = "jp-post-start-guard";
-        const isRunning = __RUNNING__;
-        if (!isRunning) {
-          const staleOverlay = doc.getElementById(overlayId);
-          if (staleOverlay) staleOverlay.remove();
-        }
-        function showGuard() {
-          if (doc.getElementById(overlayId)) return;
-          const overlay = doc.createElement("div");
-          overlay.id = overlayId;
-          overlay.innerHTML = `
-            <div class="jp-post-guard-box">
-              <div class="jp-post-guard-title">製單已啟動</div>
-              <div class="jp-post-guard-text">正在建立製單任務，請勿重複操作。畫面會自動更新進度。</div>
-            </div>`;
-          overlay.style.cssText = [
-            "position:fixed",
-            "inset:0",
-            "z-index:2147483647",
-            "background:rgba(3,7,18,.62)",
-            "backdrop-filter:blur(2px)",
-            "display:flex",
-            "align-items:flex-start",
-            "justify-content:center",
-            "padding-top:210px",
-            "cursor:wait"
-          ].join(";");
-          const style = doc.createElement("style");
-          style.textContent = `
-            #${overlayId} .jp-post-guard-box {
-              min-width: 360px;
-              max-width: 560px;
-              border: 1px solid rgba(251,146,60,.48);
-              background: rgba(15,23,42,.96);
-              color: white;
-              border-radius: 8px;
-              padding: 18px 22px;
-              box-shadow: 0 20px 70px rgba(0,0,0,.45);
-              font-family: sans-serif;
-            }
-            #${overlayId} .jp-post-guard-title {
-              font-size: 22px;
-              font-weight: 850;
-              margin-bottom: 8px;
-            }
-            #${overlayId} .jp-post-guard-text {
-              color: #fbbf24;
-              font-size: 15px;
-              font-weight: 700;
-            }`;
-          doc.head.appendChild(style);
-          doc.body.appendChild(overlay);
-          window.setTimeout(() => window.parent.location.reload(), 1200);
-          window.setTimeout(() => {
-            const staleOverlay = doc.getElementById(overlayId);
-            if (staleOverlay) staleOverlay.remove();
-          }, 30000);
-        }
-        function wireButtons() {
-          for (const button of doc.querySelectorAll("button")) {
-            if (button.dataset.jpPostGuarded === "1") continue;
-            if (!button.innerText.includes("開始製單")) continue;
-            button.dataset.jpPostGuarded = "1";
-            button.addEventListener("click", showGuard, { capture: true });
-          }
-        }
-        wireButtons();
-        new MutationObserver(wireButtons).observe(doc.body, { childList: true, subtree: true });
-        </script>
-        """.replace("__RUNNING__", running_flag),
-        height=0,
-    )
 
 
 def _render_blocking_running_guard(job: dict | None) -> None:
@@ -1301,7 +1210,6 @@ def _render_main_app():
 
     job = _get_job(email)
     is_running = job is not None and job.get("status") == "running"
-    _install_start_button_guard(is_running)
     if job is not None:
         st.session_state.pop("job_launching", None)
 
@@ -1313,17 +1221,28 @@ def _render_main_app():
         pending_logs = st.session_state.get("last_pending_logs", [])
         pending_count = len(df_pending)
     else:
-        if job and job.pop("pending_refresh_needed", False):
-            st.session_state.pop("last_pending_df", None)
-            st.session_state.pop("last_pending_logs", None)
-        with st.spinner("讀取 Google Sheets 待打單資料..."):
-            try:
-                df_pending, pending_logs = _load_pending_orders()
-                pending_count = len(df_pending)
-                st.session_state.last_pending_df = df_pending
-                st.session_state.last_pending_logs = pending_logs
-            except Exception as e:
-                st.warning(f"無法讀取 Google Sheets：{e}")
+        refresh_notice = bool(job and job.pop("pending_refresh_needed", False))
+        if refresh_notice:
+            st.session_state["pending_refresh_notice"] = True
+        cached_pending = st.session_state.get("last_pending_df")
+        cached_logs = st.session_state.get("last_pending_logs", [])
+        if isinstance(cached_pending, pd.DataFrame):
+            df_pending = cached_pending
+            pending_logs = cached_logs
+            pending_count = len(df_pending)
+        else:
+            df_pending = pd.DataFrame()
+            pending_logs = []
+            pending_count = 0
+        if not isinstance(cached_pending, pd.DataFrame):
+            with st.spinner("讀取 Google Sheets 待打單資料..."):
+                try:
+                    df_pending, pending_logs = _load_pending_orders()
+                    pending_count = len(df_pending)
+                    st.session_state.last_pending_df = df_pending
+                    st.session_state.last_pending_logs = pending_logs
+                except Exception as e:
+                    st.warning(f"無法讀取 Google Sheets：{e}")
 
     rate, rate_date, rate_source = _load_usd_jpy_rate() if not df_pending.empty else (None, "", "")
     editable_count = min(len(df_pending), 20)
@@ -1375,6 +1294,7 @@ def _render_main_app():
         elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
+            st.session_state.pop("pending_refresh_notice", None)
             st.rerun()
     with toolbar_action_cols[3]:
         btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
@@ -1412,6 +1332,8 @@ def _render_main_app():
         st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
     if required_id_warnings:
         st.error("；".join(required_id_warnings[:5]))
+    if st.session_state.get("pending_refresh_notice") and not is_running:
+        st.info("製單已完成。為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。")
     if is_running and job:
         _render_running_progress(job)
         _render_blocking_running_guard(job)
