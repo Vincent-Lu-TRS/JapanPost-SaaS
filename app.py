@@ -223,8 +223,8 @@ def _summary_cell(label: str, value: str) -> str:
 def _native_info(label: str, value: str) -> str:
     return (
         '<div class="native-info">'
-        f'<div class="native-info-label">{html.escape(label)}</div>'
-        f'<div class="native-info-value">{html.escape(str(value))}</div>'
+        f'<span class="native-info-label">{html.escape(label)}</span>'
+        f'<span class="native-info-value">{html.escape(str(value))}</span>'
         '</div>'
     )
 
@@ -425,7 +425,7 @@ def _render_main_app():
             max-width: 1580px;
         }
         div[data-testid="stHorizontalBlock"] { gap: var(--row-gap); }
-        hr { margin: .22rem 0 .42rem 0; border-color: rgba(148, 163, 184, 0.12); }
+        hr { margin: .1rem 0 .18rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
         h3 { color: #fff7ed; margin-bottom: .35rem; }
         div[data-testid="stHeading"] { margin-bottom: .25rem; }
@@ -498,6 +498,11 @@ def _render_main_app():
             color: var(--erp-accent);
             font-size: .72rem;
             margin-right: .35rem;
+        }
+        .toolbar-muted {
+            color: var(--erp-muted);
+            font-size: .72rem;
+            margin-left: .3rem;
         }
         .toolbar-count {
             display: inline-flex;
@@ -651,24 +656,22 @@ def _render_main_app():
         .native-info {
             min-height: 3.55rem;
             display: flex;
-            flex-direction: column;
-            justify-content: flex-start;
-            padding-top: .2rem;
+            align-items: center;
+            gap: .42rem;
+            padding-top: 1.42rem;
+            white-space: nowrap;
         }
         .native-info-label {
             color: var(--erp-accent);
             font-size: .75rem;
             font-weight: 650;
-            line-height: 1.2;
-            margin-bottom: .32rem;
+            line-height: var(--control-h);
         }
         .native-info-value {
             color: var(--erp-text);
             font-size: .95rem;
             font-weight: 700;
             line-height: var(--control-h);
-            min-height: var(--control-h);
-            white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
@@ -857,7 +860,7 @@ def _render_main_app():
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_cols = st.columns([1.05, 1.18, .58, .68, .88, .44, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
+    toolbar_cols = st.columns([1.05, 1.18, .58, .68, .72, .44, .52, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
     with toolbar_cols[0]:
         st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_cols[1]:
@@ -873,16 +876,18 @@ def _render_main_app():
             unsafe_allow_html=True,
         )
     with toolbar_cols[4]:
-        st.markdown('<div class="toolbar-text"><span>最大處理</span>0=全部</div>', unsafe_allow_html=True)
+        st.markdown('<div class="toolbar-text"><span>最大處理</span></div>', unsafe_allow_html=True)
     with toolbar_cols[5]:
         max_rows_input = st.number_input(
             "最大處理筆數（0=全部）",
-            min_value=0, max_value=500, value=10, step=1,
+            min_value=0, max_value=500, value=20, step=1,
             disabled=is_running,
             label_visibility="collapsed",
         )
-    max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
     with toolbar_cols[6]:
+        st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
+    max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+    with toolbar_cols[7]:
         if is_running:
             if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                 st.rerun()
@@ -890,7 +895,7 @@ def _render_main_app():
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
             st.rerun()
-    with toolbar_cols[7]:
+    with toolbar_cols[8]:
         btn_label = "執行中…" if is_running else ("🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單")
         if st.button(btn_label, type="primary",
                      disabled=(is_running or pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
@@ -907,7 +912,7 @@ def _render_main_app():
                     st.error("同一批製單已在執行中，已阻止重複啟動。")
                 else:
                     st.error("任務執行中，請稍候")
-    with toolbar_cols[8]:
+    with toolbar_cols[9]:
         reset_all_requested = st.button(
             "恢復全部預設",
             width="stretch",
