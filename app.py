@@ -526,6 +526,17 @@ def _render_main_app():
             justify-content: center;
             padding-left: .5rem;
             padding-right: .5rem;
+            border-right: 0;
+            border-top-right-radius: 0;
+            border-bottom-right-radius: 0;
+        }
+        div[data-testid="column"]:has(.field-inline-label) + div[data-testid="column"] input {
+            border-top-left-radius: 0 !important;
+            border-bottom-left-radius: 0 !important;
+        }
+        div[data-testid="column"]:has(.field-inline-label) + div[data-testid="column"] div[data-baseweb="select"] > div {
+            border-top-left-radius: 0 !important;
+            border-bottom-left-radius: 0 !important;
         }
         .order-card-marker,
         .debug-log-marker {
@@ -803,7 +814,7 @@ def _render_main_app():
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_cols = st.columns([1.28, 1.18, .58, .68, 1.32, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
+    toolbar_cols = st.columns([1.28, 1.18, .58, .68, 1.32, 1.0, 1.02, 1.12], gap="small", vertical_alignment="center")
     with toolbar_cols[0]:
         st.markdown('<div class="toolbar-title"><span>📊</span>待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_cols[1]:
@@ -813,7 +824,7 @@ def _render_main_app():
     with toolbar_cols[3]:
         st.markdown(f'<div class="toolbar-chip"><span>本次完成</span>{done}</div>', unsafe_allow_html=True)
     with toolbar_cols[4]:
-        max_label_col, max_input_col, max_hint_col = st.columns([.66, .42, .46], gap="small", vertical_alignment="center")
+        max_label_col, max_input_col, max_hint_col = st.columns([.72, .42, .5], gap=None, vertical_alignment="center")
         with max_label_col:
             st.markdown('<div class="toolbar-chip"><span>最大處理</span></div>', unsafe_allow_html=True)
         with max_input_col:
@@ -906,11 +917,11 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    row_cols = st.columns([1.0, 1.76, 1.08, 1.34, .68, .68, .86], gap="small", vertical_alignment="center")
+                    row_cols = st.columns([1.0, 1.76, 1.08, 1.34, .68, .68, .92], gap="small", vertical_alignment="center")
                     with row_cols[0]:
                         st.markdown(_summary_cell("Order No.", order_id), unsafe_allow_html=True)
                     with row_cols[1]:
-                        name_label_col, name_input_col = st.columns([.42, 1.42], gap="small", vertical_alignment="center")
+                        name_label_col, name_input_col = st.columns([.42, 1.42], gap=None, vertical_alignment="center")
                         with name_label_col:
                             st.markdown('<div class="field-inline-label">Name</div>', unsafe_allow_html=True)
                         with name_input_col:
@@ -923,7 +934,7 @@ def _render_main_app():
                     with row_cols[2]:
                         st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
                     with row_cols[3]:
-                        trans_label_col, trans_input_col = st.columns([.72, 1.02], gap="small", vertical_alignment="center")
+                        trans_label_col, trans_input_col = st.columns([.72, 1.02], gap=None, vertical_alignment="center")
                         with trans_label_col:
                             st.markdown('<div class="field-inline-label">TransType</div>', unsafe_allow_html=True)
                         with trans_input_col:
