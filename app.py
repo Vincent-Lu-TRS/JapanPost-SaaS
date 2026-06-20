@@ -633,7 +633,11 @@ def _render_main_app():
         }
         .field-inline-label { display: none; }
         .order-card-marker,
-        .debug-log-marker {
+        .debug-log-marker,
+        .toolbar-info-marker,
+        .toolbar-action-marker,
+        .order-info-row-marker,
+        .order-action-row-marker {
             display: none;
         }
         div[data-testid="stExpander"] {
@@ -1044,6 +1048,71 @@ def _render_main_app():
             div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker) {
                 padding: .5rem .5rem .55rem .5rem !important;
             }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-info-marker),
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker),
+            div[data-testid="stHorizontalBlock"]:has(.order-info-row-marker),
+            div[data-testid="stHorizontalBlock"]:has(.order-action-row-marker) {
+                flex-wrap: wrap !important;
+                gap: .45rem .55rem !important;
+                align-items: stretch !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-info-marker) > div[data-testid="column"],
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker) > div[data-testid="column"],
+            div[data-testid="stHorizontalBlock"]:has(.order-info-row-marker) > div[data-testid="column"],
+            div[data-testid="stHorizontalBlock"]:has(.order-action-row-marker) > div[data-testid="column"] {
+                min-width: 0 !important;
+                width: auto !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-info-marker) > div[data-testid="column"]:nth-child(1) {
+                flex: 1 1 100% !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-info-marker) > div[data-testid="column"]:nth-child(2) {
+                flex: 1 1 100% !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-info-marker) > div[data-testid="column"]:nth-child(3),
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-info-marker) > div[data-testid="column"]:nth-child(4) {
+                flex: 1 1 calc(50% - .3rem) !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-info-marker) > div[data-testid="column"]:nth-child(5) {
+                display: none !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker) > div[data-testid="column"]:nth-child(1) {
+                flex: 1 1 calc(62% - .3rem) !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker) > div[data-testid="column"]:nth-child(2) {
+                flex: 1 1 calc(38% - .3rem) !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker) > div[data-testid="column"]:nth-child(3),
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker) > div[data-testid="column"]:nth-child(4) {
+                flex: 1 1 calc(50% - .3rem) !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker) > div[data-testid="column"]:nth-child(5) {
+                display: none !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.toolbar-action-marker) > div[data-testid="column"]:nth-child(6) {
+                flex: 1 1 100% !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.order-info-row-marker) > div[data-testid="column"]:nth-child(1) {
+                flex: 1 1 100% !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.order-info-row-marker) > div[data-testid="column"]:nth-child(2),
+            div[data-testid="stHorizontalBlock"]:has(.order-info-row-marker) > div[data-testid="column"]:nth-child(3),
+            div[data-testid="stHorizontalBlock"]:has(.order-info-row-marker) > div[data-testid="column"]:nth-child(4) {
+                flex: 1 1 calc(50% - .3rem) !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.order-info-row-marker) > div[data-testid="column"]:nth-child(5) {
+                display: none !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.order-action-row-marker) > div[data-testid="column"] {
+                flex: 1 1 100% !important;
+            }
+            .native-info {
+                min-height: 1.55rem;
+            }
+            .native-info-value {
+                overflow: visible;
+                text-overflow: clip;
+            }
         }
         </style>
         """,
@@ -1085,7 +1154,7 @@ def _render_main_app():
 
     toolbar_info_cols = st.columns([1.75, 1.45, .9, 1.02, 1.2], gap="small", vertical_alignment="center")
     with toolbar_info_cols[0]:
-        st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
+        st.markdown('<span class="toolbar-info-marker"></span><div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_info_cols[1]:
         st.markdown(f'<div class="toolbar-text">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
     with toolbar_info_cols[2]:
@@ -1101,6 +1170,7 @@ def _render_main_app():
     st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
     toolbar_action_cols = st.columns([.88, .45, 1.0, 1.0, 1.5, 1.12], gap="small", vertical_alignment="center")
     with toolbar_action_cols[0]:
+        st.markdown('<span class="toolbar-action-marker"></span>', unsafe_allow_html=True)
         max_rows_input = st.number_input(
             "最大處理",
             min_value=0, max_value=500, value=20, step=1,
@@ -1113,7 +1183,7 @@ def _render_main_app():
         if is_running:
             if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                 st.rerun()
-        elif st.button("🔁 重新製單", width="stretch", key="reload_pending_top"):
+        elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
             st.rerun()
@@ -1201,7 +1271,7 @@ def _render_main_app():
                     st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
                     info_cols = st.columns([2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
                     with info_cols[0]:
-                        st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
+                        st.markdown('<span class="order-info-row-marker"></span>' + _native_info("Order No.", order_id), unsafe_allow_html=True)
                     with info_cols[1]:
                         st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
                     with info_cols[2]:
@@ -1215,6 +1285,7 @@ def _render_main_app():
                     else:
                         action_cols = st.columns([1.42, 1.2, 3.35, .9], gap="small", vertical_alignment="center")
                     with action_cols[0]:
+                        st.markdown('<span class="order-action-row-marker"></span>', unsafe_allow_html=True)
                         edited_name = st.text_input(
                             "Name",
                             value=pending_name,
