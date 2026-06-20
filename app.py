@@ -362,7 +362,7 @@ def _render_main_app():
 
     col1, col2, col3 = st.columns([5.7, 1.4, 0.65], vertical_alignment="center")
     with col1:
-        st.markdown('### 📮 <span class="brand-accent">JP Post</span> 製單系統', unsafe_allow_html=True)
+        st.markdown('### <span class="brand-title">JP Post 製單系統</span>', unsafe_allow_html=True)
     with col2:
         if picture:
             st.markdown(
@@ -443,6 +443,16 @@ def _render_main_app():
             border-color: rgba(245, 158, 11, 0.62);
             background: rgba(39, 39, 42, 0.95);
         }
+        div[data-testid="stButton"],
+        div[data-testid="stNumberInput"],
+        div[data-testid="stTextInput"],
+        div[data-testid="stSelectbox"] {
+            height: var(--control-h);
+            min-height: var(--control-h);
+            margin-bottom: 0;
+            display: flex;
+            align-items: center;
+        }
         div[data-testid="stMetric"] {
             border: 1px solid var(--erp-border);
             border-radius: 10px;
@@ -459,24 +469,19 @@ def _render_main_app():
         }
         .toolbar-title {
             height: var(--control-h);
-            border-left: 3px solid var(--erp-accent);
-            border-top: 1px solid rgba(251, 146, 60, 0.22);
-            border-right: 1px solid rgba(251, 146, 60, 0.22);
-            border-bottom: 1px solid rgba(251, 146, 60, 0.22);
-            border-radius: var(--control-radius);
-            background: rgba(15, 23, 42, 0.34);
-            color: var(--erp-text);
+            color: var(--erp-accent);
             display: flex;
             align-items: center;
-            gap: .48rem;
-            padding: 0 var(--control-pad-x);
+            padding: 0;
             font-size: 1.18rem;
             font-weight: 800;
             line-height: 1;
             white-space: nowrap;
         }
-        .toolbar-title span { color: var(--erp-accent); }
-        .brand-accent { color: var(--erp-accent); }
+        .brand-title,
+        .brand-title * {
+            color: var(--erp-accent) !important;
+        }
         .toolbar-chip,
         .field-inline-label {
             border: 1px solid rgba(251, 146, 60, 0.22);
@@ -519,14 +524,7 @@ def _render_main_app():
             color: var(--erp-accent);
             margin-left: .25rem;
         }
-        .field-inline-label {
-            color: var(--erp-accent);
-            font-size: .68rem;
-            font-weight: 650;
-            justify-content: center;
-            padding-left: .5rem;
-            padding-right: .5rem;
-        }
+        .field-inline-label { display: none; }
         .order-card-marker,
         .debug-log-marker {
             display: none;
@@ -715,11 +713,34 @@ def _render_main_app():
             font-weight: 650;
         }
         div[data-testid="stTextInput"],
-        div[data-testid="stNumberInput"],
-        div[data-testid="stSelectbox"],
-        div[data-testid="stButton"] {
-            min-height: var(--control-h);
-            margin-bottom: 0;
+        div[data-testid="stSelectbox"] {
+            position: relative;
+        }
+        div[data-testid="stTextInput"]::before,
+        div[data-testid="stSelectbox"]::before {
+            position: absolute;
+            top: 3px;
+            left: 12px;
+            z-index: 1;
+            color: var(--erp-accent);
+            font-size: .68rem;
+            font-weight: 650;
+            line-height: 1;
+            pointer-events: none;
+        }
+        div[data-testid="stTextInput"]::before {
+            content: "Name";
+        }
+        div[data-testid="stSelectbox"]::before {
+            content: "TransType";
+        }
+        div[data-testid="stTextInput"] input {
+            padding-top: 15px !important;
+            padding-bottom: 3px !important;
+        }
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            padding-top: 12px !important;
+            padding-bottom: 2px !important;
         }
         .compact-actions div[data-testid="column"] {
             display: flex;
@@ -803,9 +824,9 @@ def _render_main_app():
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_cols = st.columns([1.28, 1.18, .58, .68, 1.32, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
+    toolbar_cols = st.columns([1.05, 1.18, .58, .68, .88, .44, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
     with toolbar_cols[0]:
-        st.markdown('<div class="toolbar-title"><span>📊</span>待打單預覽</div>', unsafe_allow_html=True)
+        st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_cols[1]:
         st.markdown(f'<div class="toolbar-chip">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
     with toolbar_cols[2]:
@@ -813,20 +834,16 @@ def _render_main_app():
     with toolbar_cols[3]:
         st.markdown(f'<div class="toolbar-chip"><span>本次完成</span>{done}</div>', unsafe_allow_html=True)
     with toolbar_cols[4]:
-        max_label_col, max_input_col, max_hint_col = st.columns([.66, .42, .46], gap="small", vertical_alignment="center")
-        with max_label_col:
-            st.markdown('<div class="toolbar-chip"><span>最大處理</span></div>', unsafe_allow_html=True)
-        with max_input_col:
-            max_rows_input = st.number_input(
-                "最大處理筆數（0=全部）",
-                min_value=0, max_value=500, value=10, step=1,
-                disabled=is_running,
-                label_visibility="collapsed",
-            )
-        with max_hint_col:
-            st.markdown('<div class="toolbar-chip toolbar-hint-chip">0=全部</div>', unsafe_allow_html=True)
-    max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+        st.markdown('<div class="toolbar-chip"><span>最大處理</span>0=全部</div>', unsafe_allow_html=True)
     with toolbar_cols[5]:
+        max_rows_input = st.number_input(
+            "最大處理筆數（0=全部）",
+            min_value=0, max_value=500, value=10, step=1,
+            disabled=is_running,
+            label_visibility="collapsed",
+        )
+    max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+    with toolbar_cols[6]:
         if is_running:
             if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                 st.rerun()
@@ -834,7 +851,7 @@ def _render_main_app():
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
             st.rerun()
-    with toolbar_cols[6]:
+    with toolbar_cols[7]:
         btn_label = "執行中…" if is_running else ("🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單")
         if st.button(btn_label, type="primary",
                      disabled=(is_running or pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
@@ -851,7 +868,7 @@ def _render_main_app():
                     st.error("同一批製單已在執行中，已阻止重複啟動。")
                 else:
                     st.error("任務執行中，請稍候")
-    with toolbar_cols[7]:
+    with toolbar_cols[8]:
         reset_all_requested = st.button(
             "恢復全部預設",
             width="stretch",
@@ -906,34 +923,26 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    row_cols = st.columns([1.0, 1.76, 1.08, 1.34, .68, .68, .86], gap="small", vertical_alignment="center")
+                    row_cols = st.columns([1.0, 1.62, 1.08, 1.32, .68, .68, .86], gap="small", vertical_alignment="center")
                     with row_cols[0]:
                         st.markdown(_summary_cell("Order No.", order_id), unsafe_allow_html=True)
                     with row_cols[1]:
-                        name_label_col, name_input_col = st.columns([.42, 1.42], gap="small", vertical_alignment="center")
-                        with name_label_col:
-                            st.markdown('<div class="field-inline-label">Name</div>', unsafe_allow_html=True)
-                        with name_input_col:
-                            edited_name = st.text_input(
-                                "Name",
-                                value=pending_name,
-                                key=name_key,
-                                label_visibility="collapsed",
-                            )
+                        edited_name = st.text_input(
+                            "Name",
+                            value=pending_name,
+                            key=name_key,
+                            label_visibility="collapsed",
+                        )
                     with row_cols[2]:
                         st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
                     with row_cols[3]:
-                        trans_label_col, trans_input_col = st.columns([.72, 1.02], gap="small", vertical_alignment="center")
-                        with trans_label_col:
-                            st.markdown('<div class="field-inline-label">TransType</div>', unsafe_allow_html=True)
-                        with trans_input_col:
-                            trans_type = st.selectbox(
-                                "TransType",
-                                options=SHIPPING_OPTIONS,
-                                index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                                key=trans_key,
-                                label_visibility="collapsed",
-                            )
+                        trans_type = st.selectbox(
+                            "TransType",
+                            options=SHIPPING_OPTIONS,
+                            index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
+                            key=trans_key,
+                            label_visibility="collapsed",
+                        )
                     with row_cols[4]:
                         st.markdown(_summary_cell("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
                     with row_cols[5]:
