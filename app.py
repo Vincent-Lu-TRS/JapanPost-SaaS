@@ -220,6 +220,15 @@ def _summary_cell(label: str, value: str) -> str:
     )
 
 
+def _native_info(label: str, value: str) -> str:
+    return (
+        '<div class="native-info">'
+        f'<div class="native-info-label">{html.escape(label)}</div>'
+        f'<div class="native-info-value">{html.escape(str(value))}</div>'
+        '</div>'
+    )
+
+
 def _summary_label(label: str) -> str:
     return f'<div class="summary-label select-summary-label">{html.escape(label)}</div>'
 
@@ -416,7 +425,7 @@ def _render_main_app():
             max-width: 1580px;
         }
         div[data-testid="stHorizontalBlock"] { gap: var(--row-gap); }
-        hr { margin: .55rem 0 .75rem 0; border-color: rgba(148, 163, 184, 0.12); }
+        hr { margin: .22rem 0 .42rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
         h3 { color: #fff7ed; margin-bottom: .35rem; }
         div[data-testid="stHeading"] { margin-bottom: .25rem; }
@@ -444,9 +453,7 @@ def _render_main_app():
             background: rgba(39, 39, 42, 0.95);
         }
         div[data-testid="stButton"],
-        div[data-testid="stNumberInput"],
-        div[data-testid="stTextInput"],
-        div[data-testid="stSelectbox"] {
+        div[data-testid="stNumberInput"] {
             height: var(--control-h);
             min-height: var(--control-h);
             margin-bottom: 0;
@@ -473,10 +480,34 @@ def _render_main_app():
             display: flex;
             align-items: center;
             padding: 0;
-            font-size: 1.18rem;
+            font-size: 1.34rem;
             font-weight: 800;
             line-height: 1;
             white-space: nowrap;
+        }
+        .toolbar-text {
+            min-height: var(--control-h);
+            display: flex;
+            align-items: center;
+            color: var(--erp-text);
+            font-size: .82rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .toolbar-text span {
+            color: var(--erp-accent);
+            font-size: .72rem;
+            margin-right: .35rem;
+        }
+        .toolbar-count {
+            display: inline-flex;
+            align-items: baseline;
+            gap: .38rem;
+        }
+        .toolbar-count strong {
+            color: var(--erp-text);
+            font-size: 1.15rem;
+            line-height: 1;
         }
         .brand-title,
         .brand-title * {
@@ -617,6 +648,30 @@ def _render_main_app():
             white-space: normal;
             overflow-wrap: anywhere;
         }
+        .native-info {
+            min-height: 3.55rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            padding-top: .2rem;
+        }
+        .native-info-label {
+            color: var(--erp-accent);
+            font-size: .75rem;
+            font-weight: 650;
+            line-height: 1.2;
+            margin-bottom: .32rem;
+        }
+        .native-info-value {
+            color: var(--erp-text);
+            font-size: .95rem;
+            font-weight: 700;
+            line-height: var(--control-h);
+            min-height: var(--control-h);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .trans-select-cell {
             border: 1px solid var(--erp-border);
             background: rgba(15, 23, 42, 0.72);
@@ -712,35 +767,13 @@ def _render_main_app():
             border-radius: var(--control-radius);
             font-weight: 650;
         }
-        div[data-testid="stTextInput"],
-        div[data-testid="stSelectbox"] {
-            position: relative;
-        }
-        div[data-testid="stTextInput"]::before,
-        div[data-testid="stSelectbox"]::before {
-            position: absolute;
-            top: 3px;
-            left: 12px;
-            z-index: 1;
-            color: var(--erp-accent);
-            font-size: .68rem;
-            font-weight: 650;
-            line-height: 1;
-            pointer-events: none;
-        }
-        div[data-testid="stTextInput"]::before {
-            content: "Name";
-        }
-        div[data-testid="stSelectbox"]::before {
-            content: "TransType";
-        }
-        div[data-testid="stTextInput"] input {
-            padding-top: 15px !important;
-            padding-bottom: 3px !important;
-        }
-        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-            padding-top: 5px !important;
-            padding-bottom: 0 !important;
+        div[data-testid="stTextInput"] label,
+        div[data-testid="stSelectbox"] label {
+            color: var(--erp-accent) !important;
+            font-size: .75rem !important;
+            font-weight: 650 !important;
+            min-height: 1.2rem;
+            padding-bottom: .1rem;
         }
         .compact-actions div[data-testid="column"] {
             display: flex;
@@ -828,13 +861,19 @@ def _render_main_app():
     with toolbar_cols[0]:
         st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_cols[1]:
-        st.markdown(f'<div class="toolbar-chip">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="toolbar-text">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
     with toolbar_cols[2]:
-        st.markdown(f'<div class="toolbar-chip"><span>待製單</span>{pending_count}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="toolbar-text toolbar-count"><span>待製單</span><strong>{pending_count}</strong></div>',
+            unsafe_allow_html=True,
+        )
     with toolbar_cols[3]:
-        st.markdown(f'<div class="toolbar-chip"><span>本次完成</span>{done}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
+            unsafe_allow_html=True,
+        )
     with toolbar_cols[4]:
-        st.markdown('<div class="toolbar-chip"><span>最大處理</span>0=全部</div>', unsafe_allow_html=True)
+        st.markdown('<div class="toolbar-text"><span>最大處理</span>0=全部</div>', unsafe_allow_html=True)
     with toolbar_cols[5]:
         max_rows_input = st.number_input(
             "最大處理筆數（0=全部）",
@@ -923,31 +962,30 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    row_cols = st.columns([1.0, 1.62, 1.08, 1.32, .68, .68, .86], gap="small", vertical_alignment="center")
+                    row_cols = st.columns([1.0, 1.62, 1.08, 1.32, .68, .68, .86], gap="small", vertical_alignment="top")
                     with row_cols[0]:
-                        st.markdown(_summary_cell("Order No.", order_id), unsafe_allow_html=True)
+                        st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
                     with row_cols[1]:
                         edited_name = st.text_input(
                             "Name",
                             value=pending_name,
                             key=name_key,
-                            label_visibility="collapsed",
                         )
                     with row_cols[2]:
-                        st.markdown(_summary_cell("Country", summary_row["Country"]), unsafe_allow_html=True)
+                        st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
                     with row_cols[3]:
                         trans_type = st.selectbox(
                             "TransType",
                             options=SHIPPING_OPTIONS,
                             index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
                             key=trans_key,
-                            label_visibility="collapsed",
                         )
                     with row_cols[4]:
-                        st.markdown(_summary_cell("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                        st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
                     with row_cols[5]:
-                        st.markdown(_summary_cell("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+                        st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
                     with row_cols[6]:
+                        st.markdown('<div class="native-info-label">&nbsp;</div>', unsafe_allow_html=True)
                         if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
                             _reset_order_editor(order_id)
                             st.rerun()
