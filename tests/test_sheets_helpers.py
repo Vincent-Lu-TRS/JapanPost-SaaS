@@ -16,6 +16,7 @@ from bot.sheets import (
     _get_worksheet_by_gid,
     _prefer_shipping_method_rows,
     _shipping_priority,
+    resolve_country_code,
 )
 
 
@@ -56,6 +57,15 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertEqual(COUNTRY_CODE_MAP["ROMANIA（ルーマニア）"], "EU")
         self.assertEqual(COUNTRY_CODE_MAP["INDONESIA（インドネシア）"], "ID")
         self.assertEqual(COUNTRY_CODE_MAP["CYPRUS（キプロス）"], "EU")
+
+    def test_resolve_country_code_uses_country_formula_dictionary_and_europe_region(self):
+        self.assertEqual(resolve_country_code("DE"), "EU")
+        self.assertEqual(resolve_country_code("GERMANY"), "EU")
+        self.assertEqual(resolve_country_code("GERMANY（ドイツ）"), "EU")
+        self.assertEqual(resolve_country_code("FRANCE（法國）"), "EU")
+        self.assertEqual(resolve_country_code("UNITED STATES OF AMERICA"), "US")
+        self.assertEqual(resolve_country_code("US"), "US")
+        self.assertEqual(resolve_country_code("KOREA"), "KR")
 
     def test_shipping_priority_orders_ems_parcel_epacket(self):
         self.assertGreater(_shipping_priority("EMS（US）"), _shipping_priority("國際小包（Air）"))

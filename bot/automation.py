@@ -23,6 +23,7 @@ AUTOMATION_BUILD_ID = "2026-06-18-m060800-ordered-payload"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
+from .countries import resolve_country_code
 from .hs_codes import normalize_hs_code, prepare_hs_codes_for_items, required_hs_code_length
 
 # ── 日本郵政登入憑證 ────────────────────────────────────
@@ -543,6 +544,21 @@ def _select_option_value(form: dict, field_name: str, label: str, fallback: str 
     return fallback
 
 
+def _resolve_addr_country_value(
+    form: dict,
+    current_fields: dict,
+    country_raw: str,
+    country_code: str,
+) -> str:
+    fallback = _clean(country_code) or _clean(current_fields.get("addrToBean.couCode", ""))
+    return _select_option_value(
+        form,
+        "addrToBean.couCode",
+        country_raw,
+        fallback=fallback,
+    )
+
+
 def _first_non_empty_option_value(form: dict, field_name: str, fallback: str = "") -> str:
     for option in form.get("selects", {}).get(field_name, []):
         value = _clean(option.get("value", ""))
@@ -701,10 +717,7 @@ def _prepare_batch_hs_codes(rows, country_code_map: dict[str, str], predictor=pr
                 yield idx, row
 
     def _country_code(country_raw: str) -> str:
-        if country_raw in country_code_map:
-            return country_code_map[country_raw]
-        upper_map = {str(key).upper(): value for key, value in country_code_map.items()}
-        return upper_map.get(str(country_raw or "").upper(), "")
+        return resolve_country_code(country_raw, country_code_map)
 
     def cached_predictor(item_name, *, required_length=6, country="", country_code="", log_cb=None):
         cache_key = (
@@ -1594,7 +1607,7 @@ def run_automation(
                 raise RuntimeError("尚未取得 M060505/addrToBean 表單 HTML，無法提交收件人 payload")
 
             country_raw = _get_excel_val(row, ["收件人國家", "Country"])
-            country_code = COUNTRY_CODE_MAP.get(country_raw, "")
+            country_code = resolve_country_code(country_raw, COUNTRY_CODE_MAP)
             name_val = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
             final_name = f"{name_val} {order_id}".strip()
 
@@ -1610,12 +1623,7 @@ def run_automation(
             )
             data = dict(form["fields"])
             data.pop("command", None)
-            country_value = _select_option_value(
-                form,
-                "addrToBean.couCode",
-                country_raw,
-                fallback=country_code if country_code != "EU" else data.get("addrToBean.couCode", ""),
-            )
+            country_value = _resolve_addr_country_value(form, data, country_raw, country_code)
             data.update({
                 f"method:{command}": "",
                 "addrToBean.couCode": country_value,

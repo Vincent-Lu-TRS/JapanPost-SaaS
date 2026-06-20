@@ -11,6 +11,8 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
+from .countries import resolve_country_code
+
 # ── 固定常數（來自需求規格書）──────────────────────────
 SOURCE_SHEET_ID = "1HDndg8GU35v6ft02pcOcfvABVt_J3rtCLfMuXWi14KM"
 SOURCE_GID = "605188303"

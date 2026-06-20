@@ -32,6 +32,7 @@ from bot.automation import (
     _has_m060800_item_book_warning,
     _iter_content_items,
     _prepare_batch_hs_codes,
+    _resolve_addr_country_value,
     _validate_required_hs_codes,
     _parse_forms,
     _pick_form,
@@ -259,6 +260,23 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(
             _select_option_value(form, "addrToBean.couCode", "United States"),
             "US",
+        )
+
+    def test_resolve_addr_country_value_uses_eu_for_europe_destination(self):
+        html = """
+        <form action="M060505.do" method="post">
+          <select name="addrToBean.couCode">
+            <option value="">Select</option>
+            <option value="EU">Europe</option>
+            <option value="US">United States</option>
+          </select>
+        </form>
+        """
+        form = _parse_forms(html)[0]
+
+        self.assertEqual(
+            _resolve_addr_country_value(form, {"addrToBean.couCode": "US"}, "GERMANY", "EU"),
+            "EU",
         )
 
     def test_parse_forms_uses_first_radio_when_none_checked_and_keeps_checked_value(self):
@@ -824,6 +842,28 @@ class AutomationHtmlTests(unittest.TestCase):
                 ("Gift", 10, "IRELAND", "EU"),
             ],
         )
+
+    def test_prepare_batch_hs_codes_resolves_country_abbreviation_from_dictionary(self):
+        calls = []
+
+        def predictor(item_name, *, required_length=6, country="", country_code="", log_cb=None):
+            calls.append((item_name, required_length, country, country_code))
+            return "940490"
+
+        rows = [
+            {
+                "注文番号(貼上原始資料)": "WhoWht-DE",
+                "收件人國家": "DE",
+                "內容物1": "Wooden Ornament",
+                "申告金額1": "23.25",
+                "數量1": "1",
+            }
+        ]
+
+        codes = _prepare_batch_hs_codes(rows, {}, predictor=predictor)
+
+        self.assertEqual(codes["WhoWht-DE"], {"1": "940490"})
+        self.assertEqual(calls, [("Wooden Ornament", 6, "DE", "EU")])
 
     def test_prepare_batch_hs_codes_dedupes_same_item_for_same_destination_rule(self):
         calls = []
