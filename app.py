@@ -183,6 +183,17 @@ def _initialize_order_selected_widget(order_id: str, widget_key: str) -> None:
     st.session_state[widget_key] = bool(selected_by_order.get(order_id, True))
 
 
+def _sync_visible_order_selection_from_widgets(df_pending: pd.DataFrame, editable_count: int) -> None:
+    selected_by_order = _selected_by_order_state()
+    for position in range(editable_count):
+        row = df_pending.iloc[position]
+        order_id = _order_id_for_position(row, position)
+        reset_version = _reset_version(order_id)
+        widget_key = _selected_key_for(position, order_id, reset_version)
+        if widget_key in st.session_state:
+            selected_by_order[order_id] = bool(st.session_state.get(widget_key))
+
+
 def _extra_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
     return f"pending_extra_trans_single_{position}_{order_id}_{reset_version}"
 
@@ -1270,6 +1281,8 @@ def _render_main_app():
 
     rate, rate_date, rate_source = _load_usd_jpy_rate() if not df_pending.empty else (None, "", "")
     editable_count = min(len(df_pending), 20)
+    if not is_running and not df_pending.empty:
+        _sync_visible_order_selection_from_widgets(df_pending, editable_count)
     if is_running or df_pending.empty:
         df_pending_for_run = df_pending
         if is_running and job:
