@@ -13,12 +13,14 @@ import sys
 import time
 import threading
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from job_control import (
     BatchJobRegistry,
     filter_key_log_lines,
     mark_results_completed,
     mark_unfinished_orders,
+    summarize_job_progress,
     update_order_status_from_log,
 )
 from pending_editor import (
@@ -153,7 +155,7 @@ def _selected_key_for(position: int, order_id: str, reset_version: int) -> str:
 
 
 def _extra_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_extra_trans_{position}_{order_id}_{reset_version}"
+    return f"pending_extra_trans_single_{position}_{order_id}_{reset_version}"
 
 
 def _sync_recipient_id_session_fields(name_key: str, prc_id_key: str, pccc_key: str) -> None:
@@ -287,7 +289,9 @@ def _extra_trans_types_by_index_from_state(df_pending: pd.DataFrame, editable_co
         reset_version = _reset_version(order_id)
         extra_key = _extra_trans_key_for(position, order_id, reset_version)
         selected = st.session_state.get(extra_key, [])
-        if isinstance(selected, (list, tuple)):
+        if isinstance(selected, str):
+            extra_trans_types[source_index] = [] if selected == "無" else [selected]
+        elif isinstance(selected, (list, tuple)):
             extra_trans_types[source_index] = [str(value) for value in selected]
     return extra_trans_types
 
@@ -304,6 +308,35 @@ def _prepare_pending_run_frame_from_state(
     selected = edited.loc[selected_indices].copy()
     extra_trans_types = _extra_trans_types_by_index_from_state(df_pending, editable_count)
     return expand_pending_orders_for_trans_types(selected, extra_trans_types)
+
+
+def _render_running_progress(job: dict) -> None:
+    progress = summarize_job_progress(job)
+    total = progress["total"]
+    done = progress["done"]
+    active_order = progress["active_order_id"] or "準備中"
+    active_stage = progress["active_stage"] or "等待下一步"
+    st.markdown(
+        '<div class="running-panel">'
+        f'<div class="running-title">製單執行中｜{done}/{total}</div>'
+        f'<div class="running-detail">目前處理：{html.escape(active_order)}｜{html.escape(active_stage)}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.progress(float(progress["ratio"]), text=f"製單進度 {done}/{total}")
+    latest_logs = (job.get("logs") or [])[-3:]
+    if latest_logs:
+        st.caption("最新狀態：" + "　".join(html.escape(line) for line in latest_logs))
+    components.html(
+        """
+        <script>
+        window.setTimeout(() => {
+          window.parent.location.reload();
+        }, 3000);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _summary_cell(label: str, value: str) -> str:
@@ -805,6 +838,26 @@ def _render_main_app():
         .order-action-row {
             margin-bottom: .2rem;
         }
+        .running-panel {
+            border: 1px solid rgba(251, 146, 60, 0.32);
+            background: rgba(15, 23, 42, 0.72);
+            border-radius: 8px;
+            padding: .55rem .7rem;
+            margin: .35rem 0 .55rem 0;
+        }
+        .running-title {
+            color: #ffffff;
+            font-weight: 850;
+            font-size: 1rem;
+            line-height: 1.2;
+        }
+        .running-detail {
+            color: #fbbf24;
+            font-weight: 700;
+            font-size: .86rem;
+            line-height: 1.25;
+            margin-top: .18rem;
+        }
         .trans-select-cell {
             border: 1px solid var(--erp-border);
             background: rgba(15, 23, 42, 0.72);
@@ -1209,6 +1262,8 @@ def _render_main_app():
         st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
     if required_id_warnings:
         st.error("；".join(required_id_warnings[:5]))
+    if is_running and job:
+        _render_running_progress(job)
 
     if not df_pending.empty:
         if is_running:
@@ -1259,45 +1314,50 @@ def _render_main_app():
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
                     st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
-                    info_cols = st.columns([2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
+                    info_cols = st.columns([.58, 2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
                     with info_cols[0]:
-                        st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
+                        if selected_key not in st.session_state:
+                            st.session_state[selected_key] = True
+                        st.checkbox(
+                            "製單",
+                            key=selected_key,
+                        )
                     with info_cols[1]:
-                        st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
+                        st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
                     with info_cols[2]:
-                        st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                        st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
                     with info_cols[3]:
+                        st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                    with info_cols[4]:
                         st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
 
                     st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
                     if kind in {"china", "korea"}:
-                        action_cols = st.columns([.55, 1.42, 1.2, 1.35, 1.45, .9], gap="small", vertical_alignment="center")
+                        action_cols = st.columns([1.42, 1.2, 1.2, 1.35, 1.65, .9], gap="small", vertical_alignment="center")
                     else:
-                        action_cols = st.columns([.55, 1.42, 1.2, 1.45, 1.9, .9], gap="small", vertical_alignment="center")
+                        action_cols = st.columns([1.42, 1.2, 1.2, 2.45, .9], gap="small", vertical_alignment="center")
                     with action_cols[0]:
-                        st.checkbox(
-                            "製單",
-                            value=bool(st.session_state.get(selected_key, True)),
-                            key=selected_key,
-                        )
-                    with action_cols[1]:
                         edited_name = st.text_input(
                             "Name",
                             value=pending_name,
                             key=name_key,
                         )
-                    with action_cols[2]:
+                    with action_cols[1]:
                         trans_type = st.selectbox(
                             "TransType",
                             options=SHIPPING_OPTIONS,
                             index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
                             key=trans_key,
                         )
-                    with action_cols[3 if kind not in {"china", "korea"} else 4]:
-                        st.multiselect(
+                    extra_options = ["無"] + SHIPPING_OPTIONS
+                    if st.session_state.get(extra_trans_key, "無") not in extra_options:
+                        st.session_state[extra_trans_key] = "無"
+                    if extra_trans_key not in st.session_state:
+                        st.session_state[extra_trans_key] = "無"
+                    with action_cols[2]:
+                        st.selectbox(
                             "追加",
-                            options=SHIPPING_OPTIONS,
-                            default=st.session_state.get(extra_trans_key, []),
+                            options=extra_options,
                             key=extra_trans_key,
                         )
                     edited_prc_id = pending_prc_id
@@ -1405,6 +1465,7 @@ def _render_main_app():
             "order_id": "注文番号",
             "recipient": "收件人",
             "country": "國家",
+            "trans_type": "TransType",
             "status": "狀態",
             "stage": "階段",
             "tracking_no": "貨運單號",
@@ -1413,7 +1474,7 @@ def _render_main_app():
         })
         if "HSCode" not in df_status.columns:
             df_status["HSCode"] = ""
-        show_cols = ["#", "注文番号", "收件人", "國家", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
+        show_cols = ["#", "注文番号", "收件人", "國家", "TransType", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
         st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
 
     if job and job.get("results"):

@@ -201,6 +201,24 @@ def mark_unfinished_orders(job: dict[str, Any], status: str, stage: str, message
             order.update({"status": status, "stage": stage, "message": message})
 
 
+def summarize_job_progress(job: dict[str, Any] | None) -> dict[str, Any]:
+    orders = (job or {}).get("orders") or []
+    total = len(orders)
+    done_statuses = {"success", "failed", "skipped"}
+    done = sum(1 for order in orders if order.get("status") in done_statuses)
+    active = next((order for order in orders if order.get("status") == "running"), None)
+    if active is None:
+        active = next((order for order in orders if order.get("status") == "queued"), None)
+    return {
+        "total": total,
+        "done": done,
+        "remaining": max(total - done, 0),
+        "ratio": (done / total) if total else 0.0,
+        "active_order_id": str((active or {}).get("order_id", "") or ""),
+        "active_stage": str((active or {}).get("stage", "") or ""),
+    }
+
+
 def _mark_order(
     orders: list[dict[str, Any]],
     order_id: str,

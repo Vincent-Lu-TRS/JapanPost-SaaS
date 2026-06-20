@@ -10,6 +10,7 @@ from job_control import (
     create_order_states,
     filter_key_log_lines,
     mark_results_completed,
+    summarize_job_progress,
     update_order_status_from_log,
 )
 
@@ -126,6 +127,23 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(job["orders"][0]["status"], "queued")
         self.assertEqual(job["orders"][1]["status"], "success")
         self.assertEqual(job["orders"][1]["tracking_no"], "LX323090458JP")
+
+    def test_summarize_job_progress_reports_current_running_order(self):
+        job = {
+            "orders": [
+                {"order_id": "WhoWht-Test1", "status": "success", "stage": "完成"},
+                {"order_id": "WhoWht-Test2", "status": "running", "stage": "填寫收件人"},
+                {"order_id": "WhoWht-Test3", "status": "queued", "stage": "待機中"},
+            ]
+        }
+
+        progress = summarize_job_progress(job)
+
+        self.assertEqual(progress["total"], 3)
+        self.assertEqual(progress["done"], 1)
+        self.assertEqual(progress["active_order_id"], "WhoWht-Test2")
+        self.assertEqual(progress["active_stage"], "填寫收件人")
+        self.assertAlmostEqual(progress["ratio"], 1 / 3)
 
     def test_update_order_status_from_log_marks_running_and_stopped(self):
         job = {"orders": create_order_states(self._pending_df(), None)}
