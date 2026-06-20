@@ -12,8 +12,11 @@ from pending_editor import (
     build_pending_item_frame,
     build_pending_summary_frame,
     coerce_pending_editor_values,
+    compose_shipping_name,
+    country_kind,
     display_country,
     has_zero_value_items,
+    parse_shipping_name,
     sanitize_hscode,
 )
 
@@ -90,6 +93,29 @@ class PendingEditorTests(unittest.TestCase):
         self.assertEqual(sanitize_hscode("9404.90"), "940490")
         self.assertEqual(sanitize_hscode("HS:940490"), "940490")
         self.assertEqual(sanitize_hscode("9404-90"), "940490")
+
+    def test_parse_shipping_name_splits_prc_id_and_pccc(self):
+        self.assertEqual(
+            parse_shipping_name("zhuxiaomu (PRC ID:110108198309121213)"),
+            {"clean_name": "zhuxiaomu", "prc_id": "110108198309121213", "pccc": ""},
+        )
+        self.assertEqual(
+            parse_shipping_name("Eunseo Ha (PCCC：P180026936191)"),
+            {"clean_name": "Eunseo Ha", "prc_id": "", "pccc": "P180026936191"},
+        )
+
+    def test_compose_shipping_name_restores_country_specific_identifier(self):
+        self.assertEqual(country_kind("CHINA（中國）"), "china")
+        self.assertEqual(country_kind("KOREA（韓國）"), "korea")
+        self.assertEqual(
+            compose_shipping_name("zhuxiaomu", "CHINA", prc_id="110108198309121213"),
+            "zhuxiaomu (PRC ID:110108198309121213)",
+        )
+        self.assertEqual(
+            compose_shipping_name("Eunseo Ha", "KOREA", pccc="P180026936191"),
+            "Eunseo Ha (PCCC:P180026936191)",
+        )
+        self.assertEqual(compose_shipping_name("Fabian Kohlhaas", "GERMANY", prc_id="x"), "Fabian Kohlhaas")
 
     def test_apply_pending_order_editor_values_updates_original_fields_and_recalculates_totals(self):
         original = pd.DataFrame(

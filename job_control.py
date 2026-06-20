@@ -11,6 +11,9 @@ import pandas as pd
 ORDER_ID_COLUMNS = ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1", "order_id"]
 RECIPIENT_COLUMNS = ["Shipping Name", "Shipping Name_1", "name"]
 COUNTRY_COLUMNS = ["收件人國家", "Country", "country"]
+TRANS_TYPE_COLUMNS = ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]
+TOTAL_USD_COLUMNS = ["郵局申告金額(USD)", "TotalValue(USD)", "total_usd"]
+TOTAL_JPY_COLUMNS = ["訂單合計申告金額(JPY)", "TotalValue(JPY)", "total_jpy"]
 
 KEY_LOG_MARKERS = (
     "任務啟動",
@@ -51,6 +54,9 @@ def create_order_states(df: pd.DataFrame, max_rows: int | None) -> list[dict[str
                 "order_id": _row_value(row, ORDER_ID_COLUMNS, f"row-{position}"),
                 "recipient": _row_value(row, RECIPIENT_COLUMNS),
                 "country": _row_value(row, COUNTRY_COLUMNS),
+                "trans_type": _row_value(row, TRANS_TYPE_COLUMNS),
+                "total_usd": _row_value(row, TOTAL_USD_COLUMNS),
+                "total_jpy": _row_value(row, TOTAL_JPY_COLUMNS),
                 "status": "queued",
                 "stage": "待機中",
                 "tracking_no": "",

@@ -27,7 +27,10 @@ from pending_editor import (
     apply_pending_order_editor_values,
     build_pending_item_frame,
     build_pending_summary_frame,
+    compose_shipping_name,
+    country_kind,
     has_zero_value_items,
+    parse_shipping_name,
     sanitize_hscode,
 )
 from fx_rates import fetch_usd_jpy_rate
@@ -136,6 +139,28 @@ def _name_key_for(position: int, order_id: str, reset_version: int) -> str:
     return f"pending_name_{position}_{order_id}_{reset_version}"
 
 
+def _prc_id_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_prc_id_{position}_{order_id}_{reset_version}"
+
+
+def _pccc_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_pccc_{position}_{order_id}_{reset_version}"
+
+
+def _required_id_warning_lines(df: pd.DataFrame) -> list[str]:
+    warnings: list[str] = []
+    for _, row in df.iterrows():
+        order_id = str(row.get("注文番号(貼上原始資料)", "")).strip()
+        country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+        parsed = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
+        kind = country_kind(country)
+        if kind == "china" and not parsed["prc_id"]:
+            warnings.append(f"{order_id}: 中國訂單需填入 PRC ID 才能製單")
+        elif kind == "korea" and not parsed["pccc"]:
+            warnings.append(f"{order_id}: 韓國訂單需填入 PCCC 才能製單")
+    return warnings
+
+
 def _format_short_rate(rate: float | None, rate_date: str) -> str:
     rate_text = f"{rate:.2f}" if rate else "N/A"
     date_text = ""
@@ -182,18 +207,24 @@ def _build_pending_run_frame_from_state(
     for position in range(editable_count):
         row = df_pending.iloc[position]
         order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
-        name = str(row.get("Shipping Name", "")).strip()
         country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+        parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
         default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
         reset_version = _reset_version(order_id)
         item_frame = build_pending_item_frame(row)
         item_key = f"pending_items_{position}_{order_id}_{reset_version}"
         trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
         name_key = _name_key_for(position, order_id, reset_version)
+        prc_id_key = _prc_id_key_for(position, order_id, reset_version)
+        pccc_key = _pccc_key_for(position, order_id, reset_version)
+        edited_name = st.session_state.get(name_key, parsed_name["clean_name"])
+        edited_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
+        edited_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
+        shipping_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
         edited_summary_rows.append(
             {
                 "Order No.": order_id,
-                "Name": st.session_state.get(name_key, name),
+                "Name": shipping_name,
                 "Country": country,
                 "TransType": st.session_state.get(trans_key, default_trans_type),
                 "TotalValue(USD)": "",
@@ -425,7 +456,7 @@ def _render_main_app():
             max-width: 1580px;
         }
         div[data-testid="stHorizontalBlock"] { gap: var(--row-gap); }
-        hr { margin: .1rem 0 .18rem 0; border-color: rgba(148, 163, 184, 0.12); }
+        hr { margin: .04rem 0 .08rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
         h3 { color: #fff7ed; margin-bottom: .35rem; }
         div[data-testid="stHeading"] { margin-bottom: .25rem; }
@@ -654,11 +685,10 @@ def _render_main_app():
             overflow-wrap: anywhere;
         }
         .native-info {
-            min-height: 3.55rem;
+            min-height: var(--control-h);
             display: flex;
             align-items: center;
             gap: .42rem;
-            padding-top: 1.42rem;
             white-space: nowrap;
         }
         .native-info-label {
@@ -674,6 +704,12 @@ def _render_main_app():
             line-height: var(--control-h);
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+        .order-info-row {
+            margin-bottom: .28rem;
+        }
+        .order-action-row {
+            margin-bottom: .36rem;
         }
         .trans-select-cell {
             border: 1px solid var(--erp-border);
@@ -880,36 +916,39 @@ def _render_main_app():
     else:
         df_pending_for_run = _build_pending_run_frame_from_state(df_pending, editable_count, rate)
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
+    required_id_warnings = _required_id_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_cols = st.columns([1.05, 1.18, .58, .68, .5, .38, .5, 1.0, 1.02, 1.05], gap="small", vertical_alignment="center")
-    with toolbar_cols[0]:
+    toolbar_info_cols = st.columns([1.08, 1.28, .62, .72, 4.0], gap="small", vertical_alignment="center")
+    with toolbar_info_cols[0]:
         st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
-    with toolbar_cols[1]:
+    with toolbar_info_cols[1]:
         st.markdown(f'<div class="toolbar-text">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
-    with toolbar_cols[2]:
+    with toolbar_info_cols[2]:
         st.markdown(
             f'<div class="toolbar-text toolbar-count"><span>待製單</span><strong>{pending_count}</strong></div>',
             unsafe_allow_html=True,
         )
-    with toolbar_cols[3]:
+    with toolbar_info_cols[3]:
         st.markdown(
             f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
             unsafe_allow_html=True,
         )
-    with toolbar_cols[4]:
+    st.markdown('<div style="height:.18rem"></div>', unsafe_allow_html=True)
+    toolbar_action_cols = st.columns([.62, .38, .62, 1.0, 1.02, 1.05, 3.2], gap="small", vertical_alignment="center")
+    with toolbar_action_cols[0]:
         st.markdown('<div class="toolbar-text"><span>最大處理</span></div>', unsafe_allow_html=True)
-    with toolbar_cols[5]:
+    with toolbar_action_cols[1]:
         max_rows_input = st.number_input(
             "最大處理筆數（0=全部）",
             min_value=0, max_value=500, value=20, step=1,
             disabled=is_running,
             label_visibility="collapsed",
         )
-    with toolbar_cols[6]:
+    with toolbar_action_cols[2]:
         st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
     max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-    with toolbar_cols[7]:
+    with toolbar_action_cols[3]:
         if is_running:
             if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                 st.rerun()
@@ -917,10 +956,10 @@ def _render_main_app():
             st.session_state.pop("last_pending_df", None)
             st.session_state.pop("last_pending_logs", None)
             st.rerun()
-    with toolbar_cols[8]:
+    with toolbar_action_cols[4]:
         btn_label = "執行中…" if is_running else ("🚀 開始自動製單" if pending_count > 0 else "✅ 無待處理訂單")
         if st.button(btn_label, type="primary",
-                     disabled=(is_running or pending_count == 0 or bool(zero_value_warnings)), width="stretch"):
+                     disabled=(is_running or pending_count == 0 or bool(zero_value_warnings) or bool(required_id_warnings)), width="stretch"):
             if df_pending.empty:
                 st.warning("沒有符合條件的待打單資料")
             else:
@@ -934,7 +973,7 @@ def _render_main_app():
                     st.error("同一批製單已在執行中，已阻止重複啟動。")
                 else:
                     st.error("任務執行中，請稍候")
-    with toolbar_cols[9]:
+    with toolbar_action_cols[5]:
         reset_all_requested = st.button(
             "恢復全部預設",
             width="stretch",
@@ -949,6 +988,8 @@ def _render_main_app():
         st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
     if zero_value_warnings:
         st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
+    if required_id_warnings:
+        st.error("；".join(required_id_warnings[:5]))
 
     if not df_pending.empty:
         if is_running:
@@ -960,8 +1001,9 @@ def _render_main_app():
             for position in range(editable_count):
                 row = df_pending.iloc[position]
                 order_id = str(row.get("注文番号(貼上原始資料)", "")).strip() or f"row-{position + 1}"
-                name = str(row.get("Shipping Name", "")).strip()
                 country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+                kind = country_kind(country)
+                parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
                 default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
                 reset_version = _reset_version(order_id)
                 item_frame = build_pending_item_frame(row)
@@ -969,11 +1011,16 @@ def _render_main_app():
                 summary_item_frame = _apply_data_editor_state(item_frame, item_key)
                 trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
                 name_key = _name_key_for(position, order_id, reset_version)
+                prc_id_key = _prc_id_key_for(position, order_id, reset_version)
+                pccc_key = _pccc_key_for(position, order_id, reset_version)
                 pending_trans = st.session_state.get(trans_key, default_trans_type)
-                pending_name = st.session_state.get(name_key, name)
+                pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
+                pending_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
+                pending_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
+                composed_name_preview = compose_shipping_name(pending_name, country, pending_prc_id, pending_pccc)
                 summary_preview = {
                     "Order No.": order_id,
-                    "Name": pending_name,
+                    "Name": composed_name_preview,
                     "Country": country,
                     "TransType": pending_trans,
                     "TotalValue(USD)": "",
@@ -989,38 +1036,56 @@ def _render_main_app():
 
                 with st.container(border=True):
                     st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    row_cols = st.columns([1.0, 1.45, 1.08, 1.18, .68, .68, .86], gap="small", vertical_alignment="center")
-                    with row_cols[0]:
+                    st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
+                    info_cols = st.columns([1.65, 1.22, .72, .72, 4.0], gap="small", vertical_alignment="center")
+                    with info_cols[0]:
                         st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
-                    with row_cols[1]:
+                    with info_cols[1]:
+                        st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
+                    with info_cols[2]:
+                        st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                    with info_cols[3]:
+                        st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+
+                    st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
+                    if kind in {"china", "korea"}:
+                        action_cols = st.columns([1.42, 1.2, 1.35, .9, 2.0], gap="small", vertical_alignment="center")
+                    else:
+                        action_cols = st.columns([1.42, 1.2, .9, 3.35], gap="small", vertical_alignment="center")
+                    with action_cols[0]:
                         edited_name = st.text_input(
                             "Name",
                             value=pending_name,
                             key=name_key,
                         )
-                    with row_cols[2]:
-                        st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
-                    with row_cols[3]:
+                    with action_cols[1]:
                         trans_type = st.selectbox(
                             "TransType",
                             options=SHIPPING_OPTIONS,
                             index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
                             key=trans_key,
                         )
-                    with row_cols[4]:
-                        st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                    with row_cols[5]:
-                        st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
-                    with row_cols[6]:
-                        st.markdown('<div class="native-info-label">&nbsp;</div>', unsafe_allow_html=True)
+                    id_col_offset = 0
+                    edited_prc_id = pending_prc_id
+                    edited_pccc = pending_pccc
+                    if kind == "china":
+                        with action_cols[2]:
+                            edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
+                        id_col_offset = 1
+                    elif kind == "korea":
+                        with action_cols[2]:
+                            edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
+                        id_col_offset = 1
+                    with action_cols[2 + id_col_offset]:
                         if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
                             _reset_order_editor(order_id)
                             st.rerun()
+                    composed_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
 
                     edited_summary_rows.append(
                         {
                             "Order No.": order_id,
-                            "Name": edited_name,
+                            "Name": composed_name,
                             "Country": country,
                             "TransType": trans_type,
                             "TotalValue(USD)": "",
@@ -1041,11 +1106,11 @@ def _render_main_app():
                         num_rows="fixed",
                         disabled=["Content"],
                         column_config={
-                            "Content": st.column_config.TextColumn("Content", width="small"),
+                            "Content": st.column_config.TextColumn("Content", width=70),
                             "Description": st.column_config.TextColumn("Description", width="large"),
-                            "HSCode": st.column_config.TextColumn("HSCode", width="small"),
-                            "Value": st.column_config.TextColumn("Value", width="small"),
-                            "Quantity": st.column_config.TextColumn("Quantity", width="small"),
+                            "HSCode": st.column_config.TextColumn("HSCode", width=120),
+                            "Value": st.column_config.TextColumn("Value", width=100),
+                            "Quantity": st.column_config.TextColumn("Quantity", width=90),
                         },
                         key=item_key,
                     )
@@ -1054,7 +1119,10 @@ def _render_main_app():
                         hs_text = str(sent_order.get("hs_codes", "")).strip()
                         st.markdown(
                             '<div class="sent-compact">'
-                            f'已製單｜Name {html.escape(edited_name)}｜TransType {html.escape(trans_type)}'
+                            f'已製單｜Name {html.escape(edited_name)}'
+                            + (f'｜PRC ID {html.escape(edited_prc_id)}' if kind == "china" and edited_prc_id else '')
+                            + (f'｜PCCC {html.escape(edited_pccc)}' if kind == "korea" and edited_pccc else '')
+                            + f'｜TransType {html.escape(trans_type)}'
                             f'｜HS {html.escape(hs_text)}｜USD {html.escape(str(summary_row["TotalValue(USD)"]))}'
                             f'｜JPY {html.escape(str(summary_row["TotalValue(JPY)"]))}'
                             '</div>',
@@ -1116,11 +1184,20 @@ def _render_main_app():
             order_id = str(result.get("order_id", "")).strip()
             order_state = order_lookup.get(order_id, {})
             hs_text = str(order_state.get("hs_codes", "")).strip()
+            result_name = str(result.get("name", ""))
+            parsed_result_name = parse_shipping_name(result_name)
+            result_country = str(order_state.get("country", ""))
+            result_kind = country_kind(result_country)
             st.markdown(
                 '<div class="sent-compact">'
-                f'已製單｜Name {html.escape(str(result.get("name", "")))}'
-                f'｜Tracking {html.escape(str(result.get("tracking", "")))}'
+                f'已製單｜Name {html.escape(parsed_result_name["clean_name"] or result_name)}'
+                + (f'｜PRC ID {html.escape(parsed_result_name["prc_id"])}' if result_kind == "china" and parsed_result_name["prc_id"] else '')
+                + (f'｜PCCC {html.escape(parsed_result_name["pccc"])}' if result_kind == "korea" and parsed_result_name["pccc"] else '')
+                + (f'｜TransType {html.escape(str(order_state.get("trans_type", "")))}' if order_state.get("trans_type") else '')
+                + f'｜Tracking {html.escape(str(result.get("tracking", "")))}'
                 + (f'｜HS {html.escape(hs_text)}' if hs_text else '')
+                + (f'｜USD {html.escape(str(order_state.get("total_usd", "")))}' if order_state.get("total_usd") else '')
+                + (f'｜JPY {html.escape(str(order_state.get("total_jpy", "")))}' if order_state.get("total_jpy") else '')
                 + '</div>',
                 unsafe_allow_html=True,
             )

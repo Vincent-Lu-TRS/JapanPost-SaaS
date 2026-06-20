@@ -51,6 +51,36 @@ def sanitize_hscode(value) -> str:
     return re.sub(r"\D", "", _str_value(value))
 
 
+def parse_shipping_name(value) -> dict[str, str]:
+    text = _str_value(value)
+    prc_match = re.search(r"\(\s*PRC\s*ID\s*[:：]\s*([^)]+?)\s*\)", text, flags=re.IGNORECASE)
+    pccc_match = re.search(r"\(\s*PCCC\s*[:：]\s*([^)]+?)\s*\)", text, flags=re.IGNORECASE)
+    prc_id = _str_value(prc_match.group(1)) if prc_match else ""
+    pccc = _str_value(pccc_match.group(1)) if pccc_match else ""
+    clean_name = re.sub(r"\s*\(\s*(?:PRC\s*ID|PCCC)\s*[:：]\s*[^)]*?\s*\)\s*", " ", text, flags=re.IGNORECASE)
+    clean_name = re.sub(r"\s+", " ", clean_name).strip()
+    return {"clean_name": clean_name, "prc_id": prc_id, "pccc": pccc}
+
+
+def country_kind(value) -> str:
+    text = display_country(value).upper()
+    if "CHINA" in text or "中國" in text or "中国" in text:
+        return "china"
+    if "KOREA" in text or "韓國" in text or "韩国" in text:
+        return "korea"
+    return ""
+
+
+def compose_shipping_name(clean_name: str, country: str, prc_id: str = "", pccc: str = "") -> str:
+    name = _str_value(clean_name)
+    kind = country_kind(country)
+    if kind == "china" and _str_value(prc_id):
+        return f"{name} (PRC ID:{_str_value(prc_id)})"
+    if kind == "korea" and _str_value(pccc):
+        return f"{name} (PCCC:{_str_value(pccc)})"
+    return name
+
+
 def _money_to_float(value) -> float:
     text = _str_value(value).replace(",", "")
     if not text:
