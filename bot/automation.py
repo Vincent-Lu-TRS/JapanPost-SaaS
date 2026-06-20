@@ -71,12 +71,14 @@ def _row_val(row, keys: list[str]) -> str:
 
 def _build_result_record(row, order_id: str, tracking: str) -> dict:
     country_raw = _row_val(row, ["收件人國家", "Country"])
+    trans_type = _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"])
     return {
         "name": _row_val(row, ["Shipping Name", "Shipping Name_1"]),
         "order_id": order_id,
         "tracking": tracking,
         "country": country_raw,
         "country_raw": country_raw,
+        "trans_type": trans_type,
         "date": time.strftime("%Y-%m-%d"),
     }
 
@@ -2342,11 +2344,14 @@ def run_automation(
                     _log(f"⚠️ Step 9 點擊 Completed 失敗（略過）：{e}")
 
                 # ── 收集結果 ────────────────────────────
+                country_raw = _get_excel_val(row, ["收件人國家", "Country"])
                 results.append({
                     "name": _get_excel_val(row, ["Shipping Name", "Shipping Name_1"]),
                     "order_id": order_id,
                     "tracking": tracking,
-                    "country": _get_excel_val(row, ["收件人國家", "Country"]),
+                    "country": country_raw,
+                    "country_raw": country_raw,
+                    "trans_type": _get_excel_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]),
                     "date": time.strftime("%Y-%m-%d"),
                 })
                 _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")

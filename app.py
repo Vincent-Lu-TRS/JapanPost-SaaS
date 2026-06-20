@@ -29,6 +29,7 @@ from pending_editor import (
     build_pending_summary_frame,
     compose_shipping_name,
     country_kind,
+    expand_pending_orders_for_trans_types,
     has_zero_value_items,
     parse_shipping_name,
     sanitize_hscode,
@@ -147,6 +148,14 @@ def _pccc_key_for(position: int, order_id: str, reset_version: int) -> str:
     return f"pending_pccc_{position}_{order_id}_{reset_version}"
 
 
+def _selected_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_selected_{position}_{order_id}_{reset_version}"
+
+
+def _extra_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_extra_trans_{position}_{order_id}_{reset_version}"
+
+
 def _sync_recipient_id_session_fields(name_key: str, prc_id_key: str, pccc_key: str) -> None:
     current_name = st.session_state.get(name_key)
     if not isinstance(current_name, str):
@@ -255,6 +264,46 @@ def _build_pending_run_frame_from_state(
         edited_items_by_position,
         usd_jpy_rate=usd_jpy_rate,
     )
+
+
+def _selected_source_indices_from_state(df_pending: pd.DataFrame, editable_count: int) -> list[object]:
+    selected_indices: list[object] = []
+    for position, source_index in enumerate(df_pending.index[:editable_count]):
+        row = df_pending.iloc[position]
+        order_id = str(row.get("瘜冽??芸(鞎潔???鞈?)", "")).strip() or f"row-{position + 1}"
+        reset_version = _reset_version(order_id)
+        selected_key = _selected_key_for(position, order_id, reset_version)
+        if bool(st.session_state.get(selected_key, True)):
+            selected_indices.append(source_index)
+    selected_indices.extend(list(df_pending.index[editable_count:]))
+    return selected_indices
+
+
+def _extra_trans_types_by_index_from_state(df_pending: pd.DataFrame, editable_count: int) -> dict[object, list[str]]:
+    extra_trans_types: dict[object, list[str]] = {}
+    for position, source_index in enumerate(df_pending.index[:editable_count]):
+        row = df_pending.iloc[position]
+        order_id = str(row.get("瘜冽??芸(鞎潔???鞈?)", "")).strip() or f"row-{position + 1}"
+        reset_version = _reset_version(order_id)
+        extra_key = _extra_trans_key_for(position, order_id, reset_version)
+        selected = st.session_state.get(extra_key, [])
+        if isinstance(selected, (list, tuple)):
+            extra_trans_types[source_index] = [str(value) for value in selected]
+    return extra_trans_types
+
+
+def _prepare_pending_run_frame_from_state(
+    df_pending: pd.DataFrame,
+    editable_count: int,
+    usd_jpy_rate: float | None,
+) -> pd.DataFrame:
+    edited = _build_pending_run_frame_from_state(df_pending, editable_count, usd_jpy_rate)
+    selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
+    if not selected_indices:
+        return edited.iloc[0:0].copy()
+    selected = edited.loc[selected_indices].copy()
+    extra_trans_types = _extra_trans_types_by_index_from_state(df_pending, editable_count)
+    return expand_pending_orders_for_trans_types(selected, extra_trans_types)
 
 
 def _summary_cell(label: str, value: str) -> str:
@@ -1077,13 +1126,15 @@ def _render_main_app():
     editable_count = min(len(df_pending), 20)
     if is_running or df_pending.empty:
         df_pending_for_run = df_pending
+        selected_count = pending_count
     else:
-        df_pending_for_run = _build_pending_run_frame_from_state(df_pending, editable_count, rate)
+        selected_count = len(_selected_source_indices_from_state(df_pending, editable_count))
+        df_pending_for_run = _prepare_pending_run_frame_from_state(df_pending, editable_count, rate)
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     required_id_warnings = _required_id_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_info_cols = st.columns([1.75, 1.45, .9, 1.02, 1.2], gap="small", vertical_alignment="center")
+    toolbar_info_cols = st.columns([1.75, 1.45, .9, .95, 1.02], gap="small", vertical_alignment="center")
     with toolbar_info_cols[0]:
         st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
     with toolbar_info_cols[1]:
@@ -1094,6 +1145,11 @@ def _render_main_app():
             unsafe_allow_html=True,
         )
     with toolbar_info_cols[3]:
+        st.markdown(
+            f'<div class="toolbar-text toolbar-count"><span>已選取</span><strong>{selected_count}</strong></div>',
+            unsafe_allow_html=True,
+        )
+    with toolbar_info_cols[4]:
         st.markdown(
             f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
             unsafe_allow_html=True,
@@ -1120,9 +1176,11 @@ def _render_main_app():
     with toolbar_action_cols[3]:
         btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
         if st.button(btn_label, type="primary",
-                     disabled=(is_running or pending_count == 0 or bool(zero_value_warnings) or bool(required_id_warnings)), width="stretch"):
+                     disabled=(is_running or pending_count == 0 or selected_count == 0 or bool(zero_value_warnings) or bool(required_id_warnings)), width="stretch"):
             if df_pending.empty:
                 st.warning("沒有符合條件的待打單資料")
+            elif df_pending_for_run.empty:
+                st.warning("目前未選取任何訂單")
             else:
                 ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
                 if ok:
@@ -1174,6 +1232,8 @@ def _render_main_app():
                 name_key = _name_key_for(position, order_id, reset_version)
                 prc_id_key = _prc_id_key_for(position, order_id, reset_version)
                 pccc_key = _pccc_key_for(position, order_id, reset_version)
+                selected_key = _selected_key_for(position, order_id, reset_version)
+                extra_trans_key = _extra_trans_key_for(position, order_id, reset_version)
                 _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
                 pending_trans = st.session_state.get(trans_key, default_trans_type)
                 pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
@@ -1211,29 +1271,42 @@ def _render_main_app():
 
                     st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
                     if kind in {"china", "korea"}:
-                        action_cols = st.columns([1.42, 1.2, 1.35, 2.0, .9], gap="small", vertical_alignment="center")
+                        action_cols = st.columns([.55, 1.42, 1.2, 1.35, 1.45, .9], gap="small", vertical_alignment="center")
                     else:
-                        action_cols = st.columns([1.42, 1.2, 3.35, .9], gap="small", vertical_alignment="center")
+                        action_cols = st.columns([.55, 1.42, 1.2, 1.45, 1.9, .9], gap="small", vertical_alignment="center")
                     with action_cols[0]:
+                        st.checkbox(
+                            "製單",
+                            value=bool(st.session_state.get(selected_key, True)),
+                            key=selected_key,
+                        )
+                    with action_cols[1]:
                         edited_name = st.text_input(
                             "Name",
                             value=pending_name,
                             key=name_key,
                         )
-                    with action_cols[1]:
+                    with action_cols[2]:
                         trans_type = st.selectbox(
                             "TransType",
                             options=SHIPPING_OPTIONS,
                             index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
                             key=trans_key,
                         )
+                    with action_cols[3 if kind not in {"china", "korea"} else 4]:
+                        st.multiselect(
+                            "追加",
+                            options=SHIPPING_OPTIONS,
+                            default=st.session_state.get(extra_trans_key, []),
+                            key=extra_trans_key,
+                        )
                     edited_prc_id = pending_prc_id
                     edited_pccc = pending_pccc
                     if kind == "china":
-                        with action_cols[2]:
+                        with action_cols[3]:
                             edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
                     elif kind == "korea":
-                        with action_cols[2]:
+                        with action_cols[3]:
                             edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
                     with action_cols[-1]:
                         if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
@@ -1288,12 +1361,20 @@ def _render_main_app():
                             unsafe_allow_html=True,
                         )
 
-            df_pending_for_run = apply_pending_order_editor_values(
+            edited_df = apply_pending_order_editor_values(
                 df_pending,
                 pd.DataFrame(edited_summary_rows),
                 edited_items_by_position,
                 usd_jpy_rate=rate,
             )
+            selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
+            if selected_indices:
+                df_pending_for_run = expand_pending_orders_for_trans_types(
+                    edited_df.loc[selected_indices].copy(),
+                    _extra_trans_types_by_index_from_state(df_pending, editable_count),
+                )
+            else:
+                df_pending_for_run = edited_df.iloc[0:0].copy()
             if len(df_pending) > editable_count:
                 st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
         if pending_logs:

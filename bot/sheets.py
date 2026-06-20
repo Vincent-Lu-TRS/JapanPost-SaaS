@@ -368,7 +368,8 @@ def backfill_results(results: list[dict], log_cb=None):
         batch = []
         for i, r in enumerate(results):
             row_n = start_row + i
-            country_code = COUNTRY_CODE_MAP.get(r.get("country_raw", ""), r.get("country_raw", ""))
+            country_raw = r.get("country_raw", "")
+            country_code = resolve_country_code(country_raw, COUNTRY_CODE_MAP) or country_raw
             batch.append({
                 "range": f"B{row_n}:D{row_n}",
                 "values": [[r.get("name", ""), r.get("order_id", ""), r.get("tracking", "")]],

@@ -253,6 +253,28 @@ def apply_pending_order_editor_values(
     return applied
 
 
+def expand_pending_orders_for_trans_types(
+    df: pd.DataFrame,
+    extra_trans_types_by_index: dict[object, list[str]],
+) -> pd.DataFrame:
+    rows: list[pd.Series] = []
+    for source_index, row in df.iterrows():
+        primary_trans_type = _str_value(row.get(SHIPPING_COL, ""))
+        rows.append(row.copy())
+        seen = {primary_trans_type}
+        for trans_type in extra_trans_types_by_index.get(source_index, []):
+            trans_type = _str_value(trans_type)
+            if not trans_type or trans_type in seen:
+                continue
+            duplicate = row.copy()
+            duplicate[SHIPPING_COL] = trans_type
+            rows.append(duplicate)
+            seen.add(trans_type)
+    if not rows:
+        return df.copy()
+    return pd.DataFrame(rows, columns=df.columns).reset_index(drop=True)
+
+
 def build_pending_editor_frame(df: pd.DataFrame) -> pd.DataFrame:
     frame = pd.DataFrame()
     for column in EDITABLE_PENDING_COLUMNS:

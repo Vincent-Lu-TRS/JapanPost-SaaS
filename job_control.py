@@ -73,6 +73,7 @@ def build_batch_fingerprint(df: pd.DataFrame, max_rows: int | None) -> str:
             "order_id": state["order_id"],
             "recipient": state["recipient"],
             "country": state["country"],
+            "trans_type": state["trans_type"],
         }
         for state in states
     ]
@@ -179,6 +180,7 @@ def mark_results_completed(job: dict[str, Any], results: list[dict[str, Any]]) -
     for result in results:
         order_id = str(result.get("order_id") or "").strip()
         tracking = str(result.get("tracking") or "").strip()
+        trans_type = str(result.get("trans_type") or result.get("TransType") or "").strip()
         if order_id:
             _mark_order(
                 orders,
@@ -189,6 +191,7 @@ def mark_results_completed(job: dict[str, Any], results: list[dict[str, Any]]) -
                     "tracking_no": tracking,
                     "message": "",
                 },
+                trans_type=trans_type,
             )
 
 
@@ -198,8 +201,15 @@ def mark_unfinished_orders(job: dict[str, Any], status: str, stage: str, message
             order.update({"status": status, "stage": stage, "message": message})
 
 
-def _mark_order(orders: list[dict[str, Any]], order_id: str, updates: dict[str, Any]) -> None:
+def _mark_order(
+    orders: list[dict[str, Any]],
+    order_id: str,
+    updates: dict[str, Any],
+    trans_type: str = "",
+) -> None:
     for order in orders:
-        if order.get("order_id") == order_id:
+        if order.get("order_id") == order_id and (
+            not trans_type or str(order.get("trans_type") or "").strip() == trans_type
+        ):
             order.update(updates)
             return

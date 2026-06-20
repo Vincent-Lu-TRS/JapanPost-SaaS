@@ -9,6 +9,7 @@ from job_control import (
     build_batch_fingerprint,
     create_order_states,
     filter_key_log_lines,
+    mark_results_completed,
     update_order_status_from_log,
 )
 
@@ -45,6 +46,18 @@ class JobControlTests(unittest.TestCase):
         two_orders = build_batch_fingerprint(df, max_rows=2)
 
         self.assertNotEqual(one_order, two_orders)
+
+    def test_batch_fingerprint_changes_when_trans_type_changes(self):
+        first = pd.DataFrame(
+            [{"order_id": "WhoWht-Test1", "name": "Fabian", "country": "GERMANY", "TransType": "EMS"}]
+        )
+        second = first.copy()
+        second.loc[0, "TransType"] = "ePacket"
+
+        self.assertNotEqual(
+            build_batch_fingerprint(first, max_rows=None),
+            build_batch_fingerprint(second, max_rows=None),
+        )
 
     def test_registry_rejects_second_start_for_same_running_user(self):
         registry = BatchJobRegistry()
@@ -96,6 +109,23 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(states[0]["order_id"], "WhoWhy-Test5")
         self.assertEqual(states[0]["status"], "queued")
         self.assertEqual(states[0]["stage"], "待機中")
+
+    def test_mark_results_completed_matches_duplicate_order_by_trans_type(self):
+        job = {
+            "orders": [
+                {"order_id": "WhoWht-Test1", "trans_type": "EMS", "status": "queued", "tracking_no": ""},
+                {"order_id": "WhoWht-Test1", "trans_type": "ePacket", "status": "queued", "tracking_no": ""},
+            ]
+        }
+
+        mark_results_completed(
+            job,
+            [{"order_id": "WhoWht-Test1", "trans_type": "ePacket", "tracking": "LX323090458JP"}],
+        )
+
+        self.assertEqual(job["orders"][0]["status"], "queued")
+        self.assertEqual(job["orders"][1]["status"], "success")
+        self.assertEqual(job["orders"][1]["tracking_no"], "LX323090458JP")
 
     def test_update_order_status_from_log_marks_running_and_stopped(self):
         job = {"orders": create_order_states(self._pending_df(), None)}

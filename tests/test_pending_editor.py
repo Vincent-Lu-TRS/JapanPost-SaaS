@@ -5,6 +5,7 @@ import pandas as pd
 from pending_editor import (
     EDITABLE_PENDING_COLUMNS,
     PENDING_SUMMARY_COLUMNS,
+    SHIPPING_COL,
     SHIPPING_OPTIONS,
     apply_pending_editor_values,
     apply_pending_order_editor_values,
@@ -15,6 +16,7 @@ from pending_editor import (
     compose_shipping_name,
     country_kind,
     display_country,
+    expand_pending_orders_for_trans_types,
     has_zero_value_items,
     parse_shipping_name,
     sanitize_hscode,
@@ -281,6 +283,28 @@ class PendingEditorTests(unittest.TestCase):
         self.assertEqual(applied.loc[0, "內容物1"], "Pillow")
         self.assertEqual(applied.loc[0, "申告金額1"], "2.55")
         self.assertEqual(applied.loc[0, "Address"], "Keep me")
+
+
+    def test_expand_pending_orders_for_trans_types_duplicates_order_with_extra_shipping_types(self):
+        original = pd.DataFrame(
+            [
+                {
+                    "瘜冽??芸(鞎潔???鞈?)": "WhoWht-Test1",
+                    "Shipping Name": "Fabian Kohlhaas",
+                    SHIPPING_COL: "EMS",
+                }
+            ],
+            index=[10],
+        )
+
+        expanded = expand_pending_orders_for_trans_types(original, {10: ["ePacket", "EMS", "國際小包"]})
+
+        self.assertEqual(len(expanded), 3)
+        self.assertEqual(
+            list(expanded[SHIPPING_COL]),
+            ["EMS", "ePacket", "國際小包"],
+        )
+        self.assertEqual(list(expanded["瘜冽??芸(鞎潔???鞈?)"]), ["WhoWht-Test1"] * 3)
 
 
 if __name__ == "__main__":

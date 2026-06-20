@@ -10,17 +10,67 @@ sys.modules.setdefault(
 )
 sys.modules.setdefault("streamlit", types.SimpleNamespace(secrets={}))
 
+import bot.sheets as sheets_module
+
 from bot.sheets import (
     COUNTRY_CODE_MAP,
     _filter_pending_orders_dataframe,
     _get_worksheet_by_gid,
     _prefer_shipping_method_rows,
     _shipping_priority,
+    backfill_results,
     resolve_country_code,
 )
 
 
 class SheetsHelperTests(unittest.TestCase):
+    def test_backfill_results_writes_eu_for_formula_dictionary_europe_country(self):
+        class FakeWorksheet:
+            id = int(sheets_module.TARGET_GID)
+
+            def __init__(self):
+                self.updated = []
+
+            def col_values(self, _column):
+                return ["receiver"]
+
+            def batch_update(self, batch, value_input_option=None):
+                self.updated = batch
+                self.value_input_option = value_input_option
+
+        class FakeSpreadsheet:
+            def __init__(self, worksheet):
+                self.worksheet = worksheet
+
+            def worksheets(self):
+                return [self.worksheet]
+
+        class FakeClient:
+            def __init__(self, worksheet):
+                self.worksheet = worksheet
+
+            def open_by_key(self, _key):
+                return FakeSpreadsheet(self.worksheet)
+
+        worksheet = FakeWorksheet()
+        original_get_client = sheets_module._get_gspread_client
+        sheets_module._get_gspread_client = lambda: FakeClient(worksheet)
+        try:
+            backfill_results(
+                [
+                    {
+                        "name": "Julie Rouleau",
+                        "order_id": "WhoWht-Test5",
+                        "tracking": "LX323090458JP",
+                        "country_raw": "PORTUGAL（ポルトガル）",
+                    }
+                ]
+            )
+        finally:
+            sheets_module._get_gspread_client = original_get_client
+
+        self.assertIn({"range": "J2:J2", "values": [["EU"]]}, worksheet.updated)
+
     def test_get_worksheet_by_gid_uses_direct_lookup(self):
         class FakeSpreadsheet:
             title = "Fake Sheet"
