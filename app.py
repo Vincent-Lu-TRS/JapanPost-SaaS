@@ -1279,7 +1279,7 @@ def _render_main_app():
                 except Exception as e:
                     st.warning(f"無法讀取 Google Sheets：{e}")
 
-    rate, rate_date, rate_source = _load_usd_jpy_rate() if not df_pending.empty else (None, "", "")
+    rate, rate_date, rate_source = _load_usd_jpy_rate()
     editable_count = min(len(df_pending), 20)
     if not is_running and not df_pending.empty:
         _sync_visible_order_selection_from_widgets(df_pending, editable_count)
@@ -1301,391 +1301,417 @@ def _render_main_app():
     required_id_warnings = _required_id_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    toolbar_info_cols = st.columns([1.75, 1.45, .9, .95, 1.02], gap="small", vertical_alignment="center")
-    with toolbar_info_cols[0]:
-        st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
-    with toolbar_info_cols[1]:
-        st.markdown(f'<div class="toolbar-text">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
-    with toolbar_info_cols[2]:
-        st.markdown(
-            f'<div class="toolbar-text toolbar-count"><span>待製單</span><strong>{pending_count}</strong></div>',
-            unsafe_allow_html=True,
-        )
-    with toolbar_info_cols[3]:
-        st.markdown(
-            f'<div class="toolbar-text toolbar-count"><span>已選取</span><strong>{selected_count}</strong></div>',
-            unsafe_allow_html=True,
-        )
-    with toolbar_info_cols[4]:
-        st.markdown(
-            f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
-            unsafe_allow_html=True,
-        )
-    st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
-    toolbar_action_cols = st.columns([.88, .45, 1.0, 1.0, 1.5, 1.12], gap="small", vertical_alignment="center")
-    with toolbar_action_cols[0]:
-        max_rows_input = st.number_input(
-            "最大處理",
-            min_value=0, max_value=500, value=20, step=1,
-            disabled=is_running,
-        )
-    with toolbar_action_cols[1]:
-        st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
-    max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-    with toolbar_action_cols[2]:
-        if is_running:
-            if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
-                st.rerun()
-        elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
-            st.session_state.pop("last_pending_df", None)
-            st.session_state.pop("last_pending_logs", None)
-            st.session_state.pop("pending_refresh_notice", None)
-            st.session_state.pop("pending_selected_by_order", None)
-            st.rerun()
-    with toolbar_action_cols[3]:
-        btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
-        if st.button(btn_label, type="primary",
-                     disabled=(is_running or pending_count == 0 or selected_count == 0), width="stretch"):
-            if df_pending.empty:
-                st.warning("沒有符合條件的待打單資料")
-            elif df_pending_for_run.empty:
-                st.warning("目前未選取任何訂單")
-            else:
-                st.session_state["pending_start_requested"] = True
-                if hasattr(st, "toast"):
-                    st.toast("請確認本次製單")
-                st.rerun()
-    with toolbar_action_cols[5]:
-        reset_all_requested = st.button(
-            "恢復全部預設",
-            width="stretch",
-            key="reset_all_pending",
-            disabled=is_running or df_pending.empty,
-        )
+    preview_tab, guide_tab, diagnostics_tab = st.tabs(["待打單預覽", "使用說明", "讀取診斷"])
 
-    if reset_all_requested and not df_pending.empty:
-        st.session_state.pop("pending_selected_by_order", None)
-        _reset_all_order_editors(df_pending.head(editable_count))
-        st.rerun()
-    if not rate and not df_pending.empty:
-        st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
-    if is_running and zero_value_warnings:
-        st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
-    if is_running and required_id_warnings:
-        st.error("；".join(required_id_warnings[:5]))
-    if st.session_state.get("pending_refresh_notice") and not is_running:
-        st.info("製單已完成。為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。")
-    if is_running and job:
-        _render_running_progress(job)
-        _render_blocking_running_guard(job)
-
-    if not df_pending.empty:
-        if is_running:
-            running_orders = pd.DataFrame((job or {}).get("orders") or [])
-            if not running_orders.empty:
-                run_cols = ["position", "order_id", "recipient", "country", "trans_type", "total_usd", "total_jpy"]
-                run_cols = [column for column in run_cols if column in running_orders.columns]
-                running_preview = running_orders[run_cols].rename(columns={
-                    "position": "#",
-                    "order_id": "注文番号",
-                    "recipient": "收件人",
-                    "country": "國家",
-                    "trans_type": "TransType",
-                    "total_usd": "USD",
-                    "total_jpy": "JPY",
-                })
-                st.caption("本次送出製單")
-                st.dataframe(running_preview, hide_index=True, width="stretch")
-        else:
-            edited_summary_rows: list[dict[str, str]] = []
-            edited_items_by_position: dict[int, pd.DataFrame] = {}
-            job_order_by_id = {str(order.get("order_id", "")): order for order in (job or {}).get("orders", [])}
-            for position in range(editable_count):
-                row = df_pending.iloc[position]
-                order_id = _order_id_for_position(row, position)
-                country = str(row.get("收件人國家", row.get("Country", ""))).strip()
-                kind = country_kind(country)
-                parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
-                default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
-                reset_version = _reset_version(order_id)
-                item_frame = build_pending_item_frame(row)
-                item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-                summary_item_frame = _apply_data_editor_state(item_frame, item_key)
-                trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
-                name_key = _name_key_for(position, order_id, reset_version)
-                prc_id_key = _prc_id_key_for(position, order_id, reset_version)
-                pccc_key = _pccc_key_for(position, order_id, reset_version)
-                selected_key = _selected_key_for(position, order_id, reset_version)
-                extra_trans_key = _extra_trans_key_for(position, order_id, reset_version)
-                _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
-                pending_trans = st.session_state.get(trans_key, default_trans_type)
-                pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
-                pending_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
-                pending_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
-                composed_name_preview = compose_shipping_name(pending_name, country, pending_prc_id, pending_pccc)
-                summary_preview = {
-                    "Order No.": order_id,
-                    "Name": composed_name_preview,
-                    "Country": country,
-                    "TransType": pending_trans,
-                    "TotalValue(USD)": "",
-                    "TotalValue(JPY)": "",
-                }
-                preview_df = apply_pending_order_editor_values(
-                    df_pending.iloc[[position]],
-                    pd.DataFrame([summary_preview]),
-                    {0: summary_item_frame},
-                    usd_jpy_rate=rate,
-                )
-                summary_row = build_pending_summary_frame(preview_df).iloc[0]
-
-                with st.container(border=True):
-                    st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                    st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
-                    info_cols = st.columns([.58, 2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
-                    with info_cols[0]:
-                        _initialize_order_selected_widget(order_id, selected_key)
-                        st.checkbox(
-                            "製單",
-                            key=selected_key,
-                            on_change=_sync_order_selected_from_widget,
-                            args=(order_id, selected_key),
-                        )
-                    with info_cols[1]:
-                        st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
-                    with info_cols[2]:
-                        st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
-                    with info_cols[3]:
-                        st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                    with info_cols[4]:
-                        st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
-
-                    st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
-                    if kind in {"china", "korea"}:
-                        action_cols = st.columns([1.42, 1.2, 1.2, 1.35, 1.65, .9], gap="small", vertical_alignment="center")
-                    else:
-                        action_cols = st.columns([1.42, 1.2, 1.2, 2.45, .9], gap="small", vertical_alignment="center")
-                    with action_cols[0]:
-                        edited_name = st.text_input(
-                            "Name",
-                            value=pending_name,
-                            key=name_key,
-                        )
-                    with action_cols[1]:
-                        trans_type = st.selectbox(
-                            "TransType",
-                            options=SHIPPING_OPTIONS,
-                            index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                            key=trans_key,
-                        )
-                    extra_options = ["無"] + SHIPPING_OPTIONS
-                    if st.session_state.get(extra_trans_key, "無") not in extra_options:
-                        st.session_state[extra_trans_key] = "無"
-                    if extra_trans_key not in st.session_state:
-                        st.session_state[extra_trans_key] = "無"
-                    with action_cols[2]:
-                        st.selectbox(
-                            "追加",
-                            options=extra_options,
-                            key=extra_trans_key,
-                        )
-                    edited_prc_id = pending_prc_id
-                    edited_pccc = pending_pccc
-                    if kind == "china":
-                        with action_cols[3]:
-                            edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
-                    elif kind == "korea":
-                        with action_cols[3]:
-                            edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
-                    with action_cols[-1]:
-                        if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
-                            _reset_order_editor(order_id)
-                            st.rerun()
-                    composed_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
-
-                    edited_summary_rows.append(
-                        {
-                            "Order No.": order_id,
-                            "Name": composed_name,
-                            "Country": country,
-                            "TransType": trans_type,
-                            "TotalValue(USD)": "",
-                            "TotalValue(JPY)": "",
-                        }
-                    )
-                    zero_items = has_zero_value_items(row)
-                    if zero_items:
-                        st.error(
-                            "Value is 0 for "
-                            + ", ".join(f"Content{i}" for i in zero_items)
-                            + ". Please edit before starting."
-                        )
-                    edited_items_by_position[position] = st.data_editor(
-                        item_frame,
-                        hide_index=True,
-                        width="stretch",
-                        num_rows="fixed",
-                        disabled=["Content"],
-                        column_config={
-                            "Content": st.column_config.TextColumn("Content", width=70),
-                            "Description": st.column_config.TextColumn("Description", width="large"),
-                            "HSCode": st.column_config.TextColumn("HSCode", width=120),
-                            "Value": st.column_config.TextColumn("Value", width=100),
-                            "Quantity": st.column_config.TextColumn("Quantity", width=90),
-                        },
-                        key=item_key,
-                    )
-                    sent_order = job_order_by_id.get(order_id)
-                    if sent_order and sent_order.get("status") == "success":
-                        hs_text = str(sent_order.get("hs_codes", "")).strip()
-                        st.markdown(
-                            '<div class="sent-compact">'
-                            f'已製單｜Name {html.escape(edited_name)}'
-                            + (f'｜PRC ID {html.escape(edited_prc_id)}' if kind == "china" and edited_prc_id else '')
-                            + (f'｜PCCC {html.escape(edited_pccc)}' if kind == "korea" and edited_pccc else '')
-                            + f'｜TransType {html.escape(trans_type)}'
-                            f'｜HS {html.escape(hs_text)}｜USD {html.escape(str(summary_row["TotalValue(USD)"]))}'
-                            f'｜JPY {html.escape(str(summary_row["TotalValue(JPY)"]))}'
-                            '</div>',
-                            unsafe_allow_html=True,
-                        )
-
-            edited_df = apply_pending_order_editor_values(
-                df_pending,
-                pd.DataFrame(edited_summary_rows),
-                edited_items_by_position,
-                usd_jpy_rate=rate,
-            )
-            selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
-            if selected_indices:
-                df_pending_for_run = expand_pending_orders_for_trans_types(
-                    edited_df.loc[selected_indices].copy(),
-                    _extra_trans_types_by_index_from_state(df_pending, editable_count),
-                )
-            else:
-                df_pending_for_run = edited_df.iloc[0:0].copy()
-            final_zero_warnings = _zero_value_warning_lines(df_pending_for_run)
-            final_required_warnings = _required_id_warning_lines(df_pending_for_run)
-            if final_zero_warnings:
-                st.error("有品項 Value 為 0，請先修正：" + "；".join(final_zero_warnings[:5]))
-            if final_required_warnings:
-                st.error("；".join(final_required_warnings[:5]))
-            if st.session_state.get("pending_start_requested"):
-                st.markdown(
-                    '<div class="running-panel">'
-                    f'<div class="running-title">確認本次製單｜{len(df_pending_for_run)} 筆</div>'
-                    '<div class="running-detail">請確認上方勾選與欄位內容正確後再啟動。</div>'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-                confirm_cols = st.columns([1.0, 1.0, 4.0], gap="small")
-                with confirm_cols[0]:
-                    if st.button(
-                        "🚀 確認開始製單",
-                        type="primary",
-                        width="stretch",
-                        disabled=df_pending_for_run.empty or bool(final_zero_warnings) or bool(final_required_warnings),
-                        key="confirm_start_job",
-                    ):
-                        ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
-                        if ok:
-                            st.session_state.pop("pending_start_requested", None)
-                            if hasattr(st, "toast"):
-                                st.toast("✅ 已啟動自動製單")
-                            st.rerun()
-                        elif reason == "batch_running":
-                            st.error("同一批製單已在執行中，已阻止重複啟動。")
-                        else:
-                            st.error("任務執行中，請稍候")
-                with confirm_cols[1]:
-                    if st.button("取消", width="stretch", key="cancel_start_job"):
-                        st.session_state.pop("pending_start_requested", None)
-                        st.rerun()
-            if len(df_pending) > editable_count:
-                st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
-        if pending_logs:
-            with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=False):
-                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                st.code("\n".join(pending_logs), language="text")
-    elif pending_logs:
-        st.info("目前沒有待製單資料。")
-        with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=False):
-            st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-            st.code("\n".join(pending_logs), language="text")
-    else:
-        st.info("目前沒有待製單資料。")
-
-    if job and job.get("orders"):
-        st.subheader("🧾 製單狀態")
-        status_label = {
-            "queued": "待機中",
-            "running": "製單中",
-            "success": "完成",
-            "failed": "需排查",
-            "skipped": "略過",
-        }
-        df_status = pd.DataFrame(job["orders"])
-        df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
-        df_status = df_status.rename(columns={
-            "position": "#",
-            "order_id": "注文番号",
-            "recipient": "收件人",
-            "country": "國家",
-            "trans_type": "TransType",
-            "status": "狀態",
-            "stage": "階段",
-            "tracking_no": "貨運單號",
-            "hs_codes": "HSCode",
-            "message": "訊息",
-        })
-        if "HSCode" not in df_status.columns:
-            df_status["HSCode"] = ""
-        show_cols = ["#", "注文番号", "收件人", "國家", "TransType", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
-        st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
-
-    if job and job.get("results"):
-        st.divider()
-        st.subheader("✅ 本次製單結果")
-        order_lookup = {str(order.get("order_id", "")): order for order in job.get("orders", [])}
-        for result in job["results"]:
-            order_id = str(result.get("order_id", "")).strip()
-            order_state = order_lookup.get(order_id, {})
-            hs_text = str(order_state.get("hs_codes", "")).strip()
-            result_name = str(result.get("name", ""))
-            parsed_result_name = parse_shipping_name(result_name)
-            result_country = str(order_state.get("country", ""))
-            result_kind = country_kind(result_country)
+    with preview_tab:
+        toolbar_info_cols = st.columns([1.75, 1.45, .9, .95, 1.02], gap="small", vertical_alignment="center")
+        with toolbar_info_cols[0]:
+            st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
+        with toolbar_info_cols[1]:
+            st.markdown(f'<div class="toolbar-text">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
+        with toolbar_info_cols[2]:
             st.markdown(
-                '<div class="sent-compact">'
-                f'已製單｜Name {html.escape(parsed_result_name["clean_name"] or result_name)}'
-                + (f'｜PRC ID {html.escape(parsed_result_name["prc_id"])}' if result_kind == "china" and parsed_result_name["prc_id"] else '')
-                + (f'｜PCCC {html.escape(parsed_result_name["pccc"])}' if result_kind == "korea" and parsed_result_name["pccc"] else '')
-                + (f'｜TransType {html.escape(str(order_state.get("trans_type", "")))}' if order_state.get("trans_type") else '')
-                + f'｜Tracking {html.escape(str(result.get("tracking", "")))}'
-                + (f'｜HS {html.escape(hs_text)}' if hs_text else '')
-                + (f'｜USD {html.escape(str(order_state.get("total_usd", "")))}' if order_state.get("total_usd") else '')
-                + (f'｜JPY {html.escape(str(order_state.get("total_jpy", "")))}' if order_state.get("total_jpy") else '')
-                + '</div>',
+                f'<div class="toolbar-text toolbar-count"><span>待製單</span><strong>{pending_count}</strong></div>',
                 unsafe_allow_html=True,
             )
+        with toolbar_info_cols[3]:
+            st.markdown(
+                f'<div class="toolbar-text toolbar-count"><span>已選取</span><strong>{selected_count}</strong></div>',
+                unsafe_allow_html=True,
+            )
+        with toolbar_info_cols[4]:
+            st.markdown(
+                f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
+        toolbar_action_cols = st.columns([.88, .45, 1.0, 1.0, 1.5, 1.12], gap="small", vertical_alignment="center")
+        with toolbar_action_cols[0]:
+            max_rows_input = st.number_input(
+                "最大處理",
+                min_value=0, max_value=500, value=20, step=1,
+                disabled=is_running,
+            )
+        with toolbar_action_cols[1]:
+            st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
+        max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+        with toolbar_action_cols[2]:
+            if is_running:
+                if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
+                    st.rerun()
+            elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
+                st.session_state.pop("last_pending_df", None)
+                st.session_state.pop("last_pending_logs", None)
+                st.session_state.pop("pending_refresh_notice", None)
+                st.session_state.pop("pending_selected_by_order", None)
+                st.rerun()
+        with toolbar_action_cols[3]:
+            btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
+            if st.button(btn_label, type="primary",
+                         disabled=(is_running or pending_count == 0 or selected_count == 0), width="stretch"):
+                if df_pending.empty:
+                    st.warning("沒有符合條件的待打單資料")
+                elif df_pending_for_run.empty:
+                    st.warning("目前未選取任何訂單")
+                else:
+                    st.session_state["pending_start_requested"] = True
+                    if hasattr(st, "toast"):
+                        st.toast("請確認本次製單")
+                    st.rerun()
+        with toolbar_action_cols[5]:
+            reset_all_requested = st.button(
+                "恢復全部預設",
+                width="stretch",
+                key="reset_all_pending",
+                disabled=is_running or df_pending.empty,
+            )
 
-    if job and job.get("logs"):
-        st.divider()
-        st.subheader("📄 執行日誌")
-        log_lines = job["logs"]
-        key_lines = filter_key_log_lines(log_lines)
-        log_text = "\n".join(key_lines) if key_lines else "\n".join(log_lines[-20:])
-        st.text_area(
-            "執行日誌內容",
-            value=log_text,
-            height=220,
-            disabled=True,
-            key="log_area",
-            label_visibility="hidden",
+        if reset_all_requested and not df_pending.empty:
+            st.session_state.pop("pending_selected_by_order", None)
+            _reset_all_order_editors(df_pending.head(editable_count))
+            st.rerun()
+        if not rate and not df_pending.empty:
+            st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
+        if is_running and zero_value_warnings:
+            st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
+        if is_running and required_id_warnings:
+            st.error("；".join(required_id_warnings[:5]))
+        if st.session_state.get("pending_refresh_notice") and not is_running:
+            st.info("製單已完成。為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。")
+        if is_running and job:
+            _render_running_progress(job)
+            _render_blocking_running_guard(job)
+
+        if not df_pending.empty:
+            if is_running:
+                running_orders = pd.DataFrame((job or {}).get("orders") or [])
+                if not running_orders.empty:
+                    run_cols = ["position", "order_id", "recipient", "country", "trans_type", "total_usd", "total_jpy"]
+                    run_cols = [column for column in run_cols if column in running_orders.columns]
+                    running_preview = running_orders[run_cols].rename(columns={
+                        "position": "#",
+                        "order_id": "注文番号",
+                        "recipient": "收件人",
+                        "country": "國家",
+                        "trans_type": "TransType",
+                        "total_usd": "USD",
+                        "total_jpy": "JPY",
+                    })
+                    st.caption("本次送出製單")
+                    st.dataframe(running_preview, hide_index=True, width="stretch")
+            else:
+                edited_summary_rows: list[dict[str, str]] = []
+                edited_items_by_position: dict[int, pd.DataFrame] = {}
+                job_order_by_id = {str(order.get("order_id", "")): order for order in (job or {}).get("orders", [])}
+                for position in range(editable_count):
+                    row = df_pending.iloc[position]
+                    order_id = _order_id_for_position(row, position)
+                    country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+                    kind = country_kind(country)
+                    parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
+                    default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
+                    reset_version = _reset_version(order_id)
+                    item_frame = build_pending_item_frame(row)
+                    item_key = f"pending_items_{position}_{order_id}_{reset_version}"
+                    summary_item_frame = _apply_data_editor_state(item_frame, item_key)
+                    trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
+                    name_key = _name_key_for(position, order_id, reset_version)
+                    prc_id_key = _prc_id_key_for(position, order_id, reset_version)
+                    pccc_key = _pccc_key_for(position, order_id, reset_version)
+                    selected_key = _selected_key_for(position, order_id, reset_version)
+                    extra_trans_key = _extra_trans_key_for(position, order_id, reset_version)
+                    _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
+                    pending_trans = st.session_state.get(trans_key, default_trans_type)
+                    pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
+                    pending_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
+                    pending_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
+                    composed_name_preview = compose_shipping_name(pending_name, country, pending_prc_id, pending_pccc)
+                    summary_preview = {
+                        "Order No.": order_id,
+                        "Name": composed_name_preview,
+                        "Country": country,
+                        "TransType": pending_trans,
+                        "TotalValue(USD)": "",
+                        "TotalValue(JPY)": "",
+                    }
+                    preview_df = apply_pending_order_editor_values(
+                        df_pending.iloc[[position]],
+                        pd.DataFrame([summary_preview]),
+                        {0: summary_item_frame},
+                        usd_jpy_rate=rate,
+                    )
+                    summary_row = build_pending_summary_frame(preview_df).iloc[0]
+
+                    with st.container(border=True):
+                        st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
+                        st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
+                        info_cols = st.columns([.58, 2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
+                        with info_cols[0]:
+                            _initialize_order_selected_widget(order_id, selected_key)
+                            st.checkbox(
+                                "製單",
+                                key=selected_key,
+                                on_change=_sync_order_selected_from_widget,
+                                args=(order_id, selected_key),
+                            )
+                        with info_cols[1]:
+                            st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
+                        with info_cols[2]:
+                            st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
+                        with info_cols[3]:
+                            st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                        with info_cols[4]:
+                            st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+
+                        st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
+                        if kind in {"china", "korea"}:
+                            action_cols = st.columns([1.42, 1.2, 1.2, 1.35, 1.65, .9], gap="small", vertical_alignment="center")
+                        else:
+                            action_cols = st.columns([1.42, 1.2, 1.2, 2.45, .9], gap="small", vertical_alignment="center")
+                        with action_cols[0]:
+                            edited_name = st.text_input(
+                                "Name",
+                                value=pending_name,
+                                key=name_key,
+                            )
+                        with action_cols[1]:
+                            trans_type = st.selectbox(
+                                "TransType",
+                                options=SHIPPING_OPTIONS,
+                                index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
+                                key=trans_key,
+                            )
+                        extra_options = ["無"] + SHIPPING_OPTIONS
+                        if st.session_state.get(extra_trans_key, "無") not in extra_options:
+                            st.session_state[extra_trans_key] = "無"
+                        if extra_trans_key not in st.session_state:
+                            st.session_state[extra_trans_key] = "無"
+                        with action_cols[2]:
+                            st.selectbox(
+                                "追加",
+                                options=extra_options,
+                                key=extra_trans_key,
+                            )
+                        edited_prc_id = pending_prc_id
+                        edited_pccc = pending_pccc
+                        if kind == "china":
+                            with action_cols[3]:
+                                edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
+                        elif kind == "korea":
+                            with action_cols[3]:
+                                edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
+                        with action_cols[-1]:
+                            if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
+                                _reset_order_editor(order_id)
+                                st.rerun()
+                        composed_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
+
+                        edited_summary_rows.append(
+                            {
+                                "Order No.": order_id,
+                                "Name": composed_name,
+                                "Country": country,
+                                "TransType": trans_type,
+                                "TotalValue(USD)": "",
+                                "TotalValue(JPY)": "",
+                            }
+                        )
+                        zero_items = has_zero_value_items(row)
+                        if zero_items:
+                            st.error(
+                                "Value is 0 for "
+                                + ", ".join(f"Content{i}" for i in zero_items)
+                                + ". Please edit before starting."
+                            )
+                        edited_items_by_position[position] = st.data_editor(
+                            item_frame,
+                            hide_index=True,
+                            width="stretch",
+                            num_rows="fixed",
+                            disabled=["Content"],
+                            column_config={
+                                "Content": st.column_config.TextColumn("Content", width=70),
+                                "Description": st.column_config.TextColumn("Description", width="large"),
+                                "HSCode": st.column_config.TextColumn("HSCode", width=120),
+                                "Value": st.column_config.TextColumn("Value", width=100),
+                                "Quantity": st.column_config.TextColumn("Quantity", width=90),
+                            },
+                            key=item_key,
+                        )
+                        sent_order = job_order_by_id.get(order_id)
+                        if sent_order and sent_order.get("status") == "success":
+                            hs_text = str(sent_order.get("hs_codes", "")).strip()
+                            st.markdown(
+                                '<div class="sent-compact">'
+                                f'已製單｜Name {html.escape(edited_name)}'
+                                + (f'｜PRC ID {html.escape(edited_prc_id)}' if kind == "china" and edited_prc_id else '')
+                                + (f'｜PCCC {html.escape(edited_pccc)}' if kind == "korea" and edited_pccc else '')
+                                + f'｜TransType {html.escape(trans_type)}'
+                                f'｜HS {html.escape(hs_text)}｜USD {html.escape(str(summary_row["TotalValue(USD)"]))}'
+                                f'｜JPY {html.escape(str(summary_row["TotalValue(JPY)"]))}'
+                                '</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                edited_df = apply_pending_order_editor_values(
+                    df_pending,
+                    pd.DataFrame(edited_summary_rows),
+                    edited_items_by_position,
+                    usd_jpy_rate=rate,
+                )
+                selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
+                if selected_indices:
+                    df_pending_for_run = expand_pending_orders_for_trans_types(
+                        edited_df.loc[selected_indices].copy(),
+                        _extra_trans_types_by_index_from_state(df_pending, editable_count),
+                    )
+                else:
+                    df_pending_for_run = edited_df.iloc[0:0].copy()
+                final_zero_warnings = _zero_value_warning_lines(df_pending_for_run)
+                final_required_warnings = _required_id_warning_lines(df_pending_for_run)
+                if final_zero_warnings:
+                    st.error("有品項 Value 為 0，請先修正：" + "；".join(final_zero_warnings[:5]))
+                if final_required_warnings:
+                    st.error("；".join(final_required_warnings[:5]))
+                if st.session_state.get("pending_start_requested"):
+                    st.markdown(
+                        '<div class="running-panel">'
+                        f'<div class="running-title">確認本次製單｜{len(df_pending_for_run)} 筆</div>'
+                        '<div class="running-detail">請確認上方勾選與欄位內容正確後再啟動。</div>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                    confirm_cols = st.columns([1.0, 1.0, 4.0], gap="small")
+                    with confirm_cols[0]:
+                        if st.button(
+                            "🚀 確認開始製單",
+                            type="primary",
+                            width="stretch",
+                            disabled=df_pending_for_run.empty or bool(final_zero_warnings) or bool(final_required_warnings),
+                            key="confirm_start_job",
+                        ):
+                            ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
+                            if ok:
+                                st.session_state.pop("pending_start_requested", None)
+                                if hasattr(st, "toast"):
+                                    st.toast("✅ 已啟動自動製單")
+                                st.rerun()
+                            elif reason == "batch_running":
+                                st.error("同一批製單已在執行中，已阻止重複啟動。")
+                            else:
+                                st.error("任務執行中，請稍候")
+                    with confirm_cols[1]:
+                        if st.button("取消", width="stretch", key="cancel_start_job"):
+                            st.session_state.pop("pending_start_requested", None)
+                            st.rerun()
+                if len(df_pending) > editable_count:
+                    st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
+        else:
+            st.info("目前沒有待製單資料。")
+
+        if job and job.get("orders"):
+            st.subheader("🧾 製單狀態")
+            status_label = {
+                "queued": "待機中",
+                "running": "製單中",
+                "success": "完成",
+                "failed": "需排查",
+                "skipped": "略過",
+            }
+            df_status = pd.DataFrame(job["orders"])
+            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
+            df_status = df_status.rename(columns={
+                "position": "#",
+                "order_id": "注文番号",
+                "recipient": "收件人",
+                "country": "國家",
+                "trans_type": "TransType",
+                "status": "狀態",
+                "stage": "階段",
+                "tracking_no": "貨運單號",
+                "hs_codes": "HSCode",
+                "message": "訊息",
+            })
+            if "HSCode" not in df_status.columns:
+                df_status["HSCode"] = ""
+            show_cols = ["#", "注文番号", "收件人", "國家", "TransType", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
+            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
+
+        if job and job.get("results"):
+            st.divider()
+            st.subheader("✅ 本次製單結果")
+            order_lookup = {str(order.get("order_id", "")): order for order in job.get("orders", [])}
+            for result in job["results"]:
+                order_id = str(result.get("order_id", "")).strip()
+                order_state = order_lookup.get(order_id, {})
+                hs_text = str(order_state.get("hs_codes", "")).strip()
+                result_name = str(result.get("name", ""))
+                parsed_result_name = parse_shipping_name(result_name)
+                result_country = str(order_state.get("country", ""))
+                result_kind = country_kind(result_country)
+                st.markdown(
+                    '<div class="sent-compact">'
+                    f'已製單｜Name {html.escape(parsed_result_name["clean_name"] or result_name)}'
+                    + (f'｜PRC ID {html.escape(parsed_result_name["prc_id"])}' if result_kind == "china" and parsed_result_name["prc_id"] else '')
+                    + (f'｜PCCC {html.escape(parsed_result_name["pccc"])}' if result_kind == "korea" and parsed_result_name["pccc"] else '')
+                    + (f'｜TransType {html.escape(str(order_state.get("trans_type", "")))}' if order_state.get("trans_type") else '')
+                    + f'｜Tracking {html.escape(str(result.get("tracking", "")))}'
+                    + (f'｜HS {html.escape(hs_text)}' if hs_text else '')
+                    + (f'｜USD {html.escape(str(order_state.get("total_usd", "")))}' if order_state.get("total_usd") else '')
+                    + (f'｜JPY {html.escape(str(order_state.get("total_jpy", "")))}' if order_state.get("total_jpy") else '')
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
+
+        if job and job.get("logs"):
+            st.divider()
+            st.subheader("📄 執行日誌")
+            log_lines = job["logs"]
+            key_lines = filter_key_log_lines(log_lines)
+            log_text = "\n".join(key_lines) if key_lines else "\n".join(log_lines[-20:])
+            st.text_area(
+                "執行日誌內容",
+                value=log_text,
+                height=220,
+                disabled=True,
+                key="log_area",
+                label_visibility="hidden",
+            )
+            if len(key_lines) != len(log_lines):
+                with st.expander("🔧 詳細除錯日誌"):
+                    st.code("\n".join(log_lines[-200:]), language="text")
+    with guide_tab:
+        st.subheader("目前系統功能")
+        st.markdown(
+            """
+1. **待打單預覽**：讀取目前可製單訂單，顯示 Order No、Country、USD、JPY 與商品明細表格。
+2. **批次選取製單**：可勾選要製單的訂單、設定最大處理筆數，並執行開始製單。
+3. **收件人名稱調整**：Name 可在前台編輯，製單時使用目前前台顯示值。
+4. **TransType 調整**：可選擇國際小包、ePacket 等出貨類型。
+5. **中國 / 韓國特殊欄位**：CHINA 顯示 PRC ID，KOREA 顯示 PCCC，製單時與 Name 組回 ShippingName 格式。
+6. **HS Code**：可手動輸入；`9404.90`、`9404-90`、`HS:940490` 會整理為 `940490`。
+7. **恢復預設**：支援單筆恢復預設與恢復全部預設。
+8. **製單結果**：製單後顯示實際送出的 payload / response 結果，不重新從原始資料猜測。
+            """
         )
-        if len(key_lines) != len(log_lines):
-            with st.expander("🔧 詳細除錯日誌"):
-                st.code("\n".join(log_lines[-200:]), language="text")
+        st.subheader("目前已知待修正項目")
+        st.markdown(
+            """
+1. 點擊「開始製單」後，畫面沒有特別明顯的即時反應。
+2. 點擊製單後，畫面可能跳回原預設狀態。
+3. 雖然畫面可能看似回到預設狀態，但實際製單會依最後設定結果送出執行。
+4. 之後仍需進一步優化：st.form 批次提交模式、active_batch_order_nos frozen snapshot、running 畫面只顯示本次送出的訂單、toast 顯示啟動狀態、PRC ID / PCCC 驗證只檢查本次選取訂單。
+            """
+        )
+
+    with diagnostics_tab:
+        if pending_logs:
+            with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=True):
+                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
+                st.code("\n".join(pending_logs), language="text")
+        else:
+            st.info("目前沒有待製單讀取診斷資料。")
+
 
     if is_running:
         time.sleep(2)
