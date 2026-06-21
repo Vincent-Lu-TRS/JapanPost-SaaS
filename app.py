@@ -100,6 +100,15 @@ def _load_pending_orders() -> tuple[pd.DataFrame, list[str]]:
     return df_pending, pending_logs
 
 
+def _visible_pending_logs(logs: list[str]) -> list[str]:
+    return [
+        line
+        for line in logs
+        if "關注訂單診斷（WhoWhy/WhoWht）" not in line
+        and "關注訂單診斷(WhoWhy/WhoWht)" not in line
+    ]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_usd_jpy_rate() -> tuple[float | None, str, str]:
     rate, rate_date, source = fetch_usd_jpy_rate()
@@ -687,13 +696,14 @@ def _render_main_app():
             display: flex;
             align-items: center;
             color: var(--erp-text);
-            font-size: .9rem;
+            font-size: 1.22rem;
             font-weight: 700;
             white-space: nowrap;
         }
         .toolbar-text span {
             color: var(--erp-accent);
-            font-size: .78rem;
+            font-size: 1.05rem;
+            font-weight: 800;
             margin-right: .22rem;
         }
         .toolbar-muted {
@@ -708,9 +718,33 @@ def _render_main_app():
         }
         .toolbar-count strong {
             color: var(--erp-text);
-            font-size: 1.52rem;
+            font-size: 2.1rem;
             font-weight: 900;
             line-height: 1;
+        }
+        .toolbar-rate {
+            display: inline-flex;
+            align-items: baseline;
+            gap: .36rem;
+        }
+        .toolbar-rate strong {
+            color: var(--erp-text);
+            font-size: 1.28rem;
+            font-weight: 850;
+            line-height: 1;
+        }
+        .guide-note {
+            border-left: 3px solid var(--erp-accent);
+            background: rgba(245, 158, 11, 0.08);
+            color: #fde68a;
+            padding: .72rem .9rem;
+            margin: .8rem 0 1.1rem;
+            border-radius: 0 8px 8px 0;
+            font-weight: 700;
+        }
+        .guide-subtle {
+            color: #cbd5e1;
+            font-size: .95rem;
         }
         .brand-title,
         .brand-title * {
@@ -1144,7 +1178,7 @@ def _render_main_app():
                 font-size: 1.42rem;
             }
             .toolbar-count strong {
-                font-size: 1.42rem;
+                font-size: 1.86rem;
             }
             .native-info-value {
                 font-size: 1.04rem;
@@ -1204,7 +1238,7 @@ def _render_main_app():
                 min-height: 1.65rem;
             }
             .toolbar-count strong {
-                font-size: 1.36rem;
+                font-size: 1.58rem;
             }
             button {
                 min-height: 44px;
@@ -1304,22 +1338,23 @@ def _render_main_app():
     preview_tab, guide_tab, diagnostics_tab = st.tabs(["待打單預覽", "使用說明", "讀取診斷"])
 
     with preview_tab:
-        toolbar_info_cols = st.columns([1.75, 1.45, .9, .95, 1.02], gap="small", vertical_alignment="center")
+        toolbar_info_cols = st.columns([1.65, .95, 1.05, 1.08, 2.0], gap="small", vertical_alignment="center")
         with toolbar_info_cols[0]:
-            st.markdown('<div class="toolbar-title">待打單預覽</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="toolbar-text toolbar-rate"><span>匯率</span><strong>{html.escape(_format_short_rate(rate, rate_date))}</strong></div>',
+                unsafe_allow_html=True,
+            )
         with toolbar_info_cols[1]:
-            st.markdown(f'<div class="toolbar-text">{html.escape(_format_short_rate(rate, rate_date))}</div>', unsafe_allow_html=True)
-        with toolbar_info_cols[2]:
             st.markdown(
                 f'<div class="toolbar-text toolbar-count"><span>待製單</span><strong>{pending_count}</strong></div>',
                 unsafe_allow_html=True,
             )
-        with toolbar_info_cols[3]:
+        with toolbar_info_cols[2]:
             st.markdown(
                 f'<div class="toolbar-text toolbar-count"><span>已選取</span><strong>{selected_count}</strong></div>',
                 unsafe_allow_html=True,
             )
-        with toolbar_info_cols[4]:
+        with toolbar_info_cols[3]:
             st.markdown(
                 f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
                 unsafe_allow_html=True,
@@ -1681,34 +1716,344 @@ def _render_main_app():
                 with st.expander("🔧 詳細除錯日誌"):
                     st.code("\n".join(log_lines[-200:]), language="text")
     with guide_tab:
-        st.subheader("目前系統功能")
+        st.markdown("# JP Post 製單系統使用說明")
         st.markdown(
             """
-1. **待打單預覽**：讀取目前可製單訂單，顯示 Order No、Country、USD、JPY 與商品明細表格。
-2. **批次選取製單**：可勾選要製單的訂單、設定最大處理筆數，並執行開始製單。
-3. **收件人名稱調整**：Name 可在前台編輯，製單時使用目前前台顯示值。
-4. **TransType 調整**：可選擇國際小包、ePacket 等出貨類型。
-5. **中國 / 韓國特殊欄位**：CHINA 顯示 PRC ID，KOREA 顯示 PCCC，製單時與 Name 組回 ShippingName 格式。
-6. **HS Code**：可手動輸入；`9404.90`、`9404-90`、`HS:940490` 會整理為 `940490`。
-7. **恢復預設**：支援單筆恢復預設與恢復全部預設。
-8. **製單結果**：製單後顯示實際送出的 payload / response 結果，不重新從原始資料猜測。
+本系統是公司內部使用的日本郵政製單工具。
+
+使用者登入後，可以在瀏覽器中讀取待製單資料、調整必要欄位、選擇本批要製作的訂單，並由系統自動完成日本郵政製單、下載 PDF、上傳至指定 Google Drive 資料夾，最後將製單結果回填至指定 Google Sheets。
             """
         )
-        st.subheader("目前已知待修正項目")
+        st.markdown(
+            '<div class="guide-note">重點：開始製單時，系統會使用目前畫面上顯示並確認送出的內容。</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown(
             """
-1. 點擊「開始製單」後，畫面沒有特別明顯的即時反應。
-2. 點擊製單後，畫面可能跳回原預設狀態。
-3. 雖然畫面可能看似回到預設狀態，但實際製單會依最後設定結果送出執行。
-4. 之後仍需進一步優化：st.form 批次提交模式、active_batch_order_nos frozen snapshot、running 畫面只顯示本次送出的訂單、toast 顯示啟動狀態、PRC ID / PCCC 驗證只檢查本次選取訂單。
+## 一、登入與權限
+
+本系統使用 Google 帳號登入。
+
+原則上僅限公司網域 `@tkrjm.co.jp` 或已授權白名單人員使用。
+
+登入後，系統會保留一段時間的登入狀態，避免每次操作都需要重新登入。如需切換帳號，可使用右上角「登出」。
+
+## 二、主要操作流程
+
+基本操作流程如下：
+
+1. 進入系統後，打開「待打單預覽」頁籤
+2. 檢查目前待製單訂單
+3. 視需要調整 **Name、TransType、PRC ID、PCCC、HS Code、Value、Quantity** 等欄位
+4. 勾選本批要製單的訂單
+5. 設定最大處理筆數
+6. 點擊「開始製單」
+7. 系統自動製作日本郵政單據
+8. 系統下載 PDF 並上傳至指定 Google Drive
+9. 系統將 tracking number 與相關結果回填至指定 Google Sheets
+
+## 三、待打單預覽
+
+「待打單預覽」頁籤會顯示目前可製單的訂單。
+
+每筆訂單會顯示以下資訊：
+
+1. **Order No.**：訂單編號
+2. **Country**：目的地國家
+3. **USD**：訂單申告金額（美元）
+4. **JPY**：依目前匯率換算後的日圓金額
+5. **Name**：收件人姓名
+6. **TransType**：運送類別，例如 EMS、國際小包、ePacket
+7. **Content**：內容物項次
+8. **Description**：內容物描述
+9. **HS Code**：商品分類代碼
+10. **Value**：內容物單價（USD）
+11. **Quantity**：內容物數量
+
+若目前沒有可製單資料，畫面會顯示「目前沒有待製單資料」。
+
+## 四、待製單資料篩選規則
+
+系統會從指定來源表讀取訂單資料，並自動篩選出目前可製單的訂單。
+
+目前主要篩選條件包含：
+
+1. 訂單狀態必須是「未打單」
+2. 郵局申告金額不可空白
+3. 製單檢核不可為 TRUE
+4. Shipping Name 不可空白
+5. 若同一注文番号在來源表中重複，系統會依運送方式優先度保留一筆
+6. 已經完成回填的訂單會被排除，避免重複製單
+
+如需確認某些訂單為什麼沒有出現在待製單清單中，可查看「讀取診斷」頁籤。
+
+## 五、匯率與金額
+
+Toolbar 會顯示目前 USD/JPY 匯率與日期，例如：
+
+`USD/JPY 161.20｜26/06/20`
+
+系統會依目前匯率換算 JPY 金額。
+
+當商品 Value 或 Quantity 被修改時，系統會依目前資料重新計算：
+
+1. TotalValue（USD）
+2. TotalValue（JPY）
+
+若匯率暫時無法取得，畫面會顯示 `USD/JPY N/A`。此時系統會盡量保留來源資料中既有的 JPY 金額。
+
+## 六、批次選取與最大處理
+
+每筆訂單左側都有「製單」勾選框，可選擇本批是否製作該訂單。
+
+Toolbar 會顯示：
+
+1. **待製單**：目前可製單訂單數量
+2. **已選取**：目前已勾選訂單數量
+3. **本次完成**：本次已完成製單數量
+
+「最大處理」可限制本批最多處理幾筆訂單。
+
+設定規則：
+
+1. 預設值為 20
+2. 設為 0 代表全部處理
+3. 未勾選的訂單不會進入本次製單
+
+## 七、可編輯欄位
+
+目前可在前台調整的欄位包含：
+
+1. Name
+2. TransType
+3. 追加 TransType
+4. PRC ID
+5. PCCC
+6. 商品 Description
+7. HS Code
+8. Value
+9. Quantity
+
+開始製單時，系統會使用目前畫面上顯示的內容送出製單。
+
+## 八、Name、PRC ID、PCCC
+
+部分國家的訂單需要額外證號。
+
+### 中國訂單
+
+來源資料可能會顯示為：
+
+`zhuxiaomu (PRC ID:110108198309121213)`
+
+前台會拆成：
+
+`Name zhuxiaomu`
+
+`PRC ID 110108198309121213`
+
+製單送出時，系統會再組回：
+
+`zhuxiaomu (PRC ID:110108198309121213)`
+
+### 韓國訂單
+
+來源資料可能會顯示為：
+
+`Eunseo Ha (PCCC:P18026936191)`
+
+前台會拆成：
+
+`Name Eunseo Ha`
+
+`PCCC P18026936191`
+
+製單送出時，系統會再組回：
+
+`Eunseo Ha (PCCC:P18026936191)`
+
+### 顯示規則
+
+1. 只有 CHINA 訂單會顯示 PRC ID 欄位
+2. 只有 KOREA 訂單會顯示 PCCC 欄位
+3. 其他國家不會顯示 PRC ID 或 PCCC 欄位
+
+## 九、PRC ID / PCCC 必填規則
+
+開始製單前，系統會檢查必要證號。
+
+目前規則：
+
+1. **CHINA 訂單若缺少 PRC ID，不可製單**
+2. **KOREA 訂單若缺少 PCCC，不可製單**
+
+缺少必要證號時，系統會提示：
+
+`中國訂單需填入 PRC ID 才能製單`
+
+或：
+
+`韓國訂單需填入 PCCC 才能製單`
+
+## 十、TransType 與追加製單
+
+每筆訂單可選擇主要 TransType。
+
+目前支援：
+
+1. EMS
+2. 國際小包
+3. ePacket
+
+每筆訂單也有「追加」欄位，預設為「無」。
+
+若選擇追加 TransType，系統會在同一批次中將同一筆訂單展開為多筆製單資料。
+
+例如：
+
+1. 國際小包 + ePacket
+2. EMS + ePacket
+
+系統會避免同一筆訂單重複加入相同 TransType。
+
+## 十一、HS Code
+
+商品表格可手動輸入 HS Code。
+
+系統會自動清理 HS Code，只保留數字。
+
+例如：
+
+1. `9404.90` 會轉為 `940490`
+2. `9404-90` 會轉為 `940490`
+3. `HS:940490` 會轉為 `940490`
+
+製單前，系統也會檢查本批訂單的 HS Code。對需要 HS Code 的國家或地區，系統會嘗試使用既有資料或系統推測結果補值。
+
+## 十二、國家代碼與 EU 回填
+
+系統會依目的地國家判斷回填用的國家代碼。
+
+例如：
+
+1. CHINA → CN
+2. KOREA → KR
+3. TAIWAN → TW
+4. UNITED STATES → US
+5. CANADA → CA
+6. AUSTRALIA → AU
+
+歐洲區域國家在回填至目標表時，會統一回填為 `EU`。
+
+例如：
+
+1. GERMANY → EU
+2. FRANCE → EU
+3. PORTUGAL → EU
+4. BELGIUM → EU
+5. GREECE → EU
+6. CZECH → EU
+7. ROMANIA → EU
+8. CYPRUS → EU
+
+## 十三、自動製單流程
+
+點擊「開始製單」後，系統會開始處理本批訂單。
+
+系統會自動執行：
+
+1. 檢查本批訂單資料
+2. 補齊必要 HS Code
+3. 登入日本郵政製單系統
+4. 依訂單資料填寫製單表單
+5. 套用 TransType
+6. 套用收件人、國家、商品、金額與 HS Code
+7. 處理日本郵政頁面提示
+8. 完成 shipment 登錄
+9. 下載 PDF
+10. 上傳 PDF 至指定 Google Drive
+11. 回填 tracking number 與國家代碼至目標 Google Sheets
+
+## 十四、PDF 上傳至 Google Drive
+
+製單完成後，系統會下載日本郵政產生的 PDF。
+
+PDF 會上傳至指定 Google Drive 資料夾。
+
+系統會整理 PDF 檔名，避免檔名包含不可使用字元。
+
+## 十五、製單結果回填
+
+製單成功後，系統會將結果回填至目標 Google Sheets。
+
+目前主要回填內容包含：
+
+1. 收件人
+2. 注文番号
+3. tracking number
+4. 運送國家代碼
+
+歐洲國家會統一回填為 `EU`。
+
+## 十六、重新讀取與資料暫存
+
+為了降低 Google Sheets 讀取次數，系統會暫時保留已讀取的待製單清單與讀取診斷。
+
+點擊「重新讀取」會重新讀取 Google Sheets 資料。
+
+製單完成後，系統可能會暫時沿用既有清單，避免短時間內反覆讀取造成讀取限制。
+
+## 十七、恢復預設
+
+系統提供兩種恢復方式：
+
+1. 單筆「恢復預設」
+2. Toolbar 的「恢復全部預設」
+
+恢復預設會將可編輯欄位恢復為來源資料解析出的原始值。
+
+## 十八、讀取診斷
+
+「讀取診斷」頁籤會顯示待製單資料的讀取與篩選結果。
+
+內容包含：
+
+1. 來源表名稱
+2. 來源表讀取列數與耗時
+3. 來源原始筆數
+4. 來源末端注文番号
+5. 目標表已完成單號讀取結果
+6. 基礎篩選排除筆數
+7. 排除原因
+8. 同注文番号去重結果
+9. 最終可打單筆數
+
+此頁主要用於排查為什麼某些訂單沒有出現在待製單清單中。
+
+## 十九、目前注意事項與後續改善項目
+
+目前系統仍有以下注意事項：
+
+1. 點擊「開始製單」後，畫面即時反應仍不夠明顯
+2. 點擊製單後，畫面可能短暫看似回到原預設狀態
+3. 雖然畫面可能看似回到預設狀態，但實際製單會依最後確認送出的內容執行
+4. PRC ID / PCCC 的檢查邏輯仍會持續確認與優化
+5. 執行中畫面未來可進一步固定顯示本次送出的訂單
+6. 可進一步優化製單啟動提示、進度顯示與防止重複點擊
+7. Google Sheets 讀取次數仍需注意，避免短時間內反覆重新讀取
             """
+        )
+        st.markdown(
+            '<div class="guide-note">如遇到訂單未出現、製單結果異常或無法判斷原因，請先查看「讀取診斷」頁籤，再回報系統管理人員。</div>',
+            unsafe_allow_html=True,
         )
 
     with diagnostics_tab:
-        if pending_logs:
+        visible_pending_logs = _visible_pending_logs(pending_logs)
+        if visible_pending_logs:
             with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=True):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                st.code("\n".join(pending_logs), language="text")
+                st.code("\n".join(visible_pending_logs), language="text")
         else:
             st.info("目前沒有待製單讀取診斷資料。")
 
