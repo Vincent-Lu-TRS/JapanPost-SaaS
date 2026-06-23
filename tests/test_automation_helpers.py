@@ -37,6 +37,7 @@ from bot.automation import (
     _parse_forms,
     _pick_form,
     _select_option_value,
+    _shipping_profile,
     _summarize_error_text,
     _summarize_forms,
     _summarize_m060800_item_state,
@@ -528,6 +529,48 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendType"], "parcel")
         self.assertEqual(payload["shippingBean.transType"], "air")
         self.assertEqual(payload["shippingBean.pkgType"], "gift")
+
+    def test_shipping_profile_detects_ems_goods(self):
+        row = {"郵局運送方式(複數商品請自行確認是否走小包)": "EMS"}
+
+        self.assertEqual(_shipping_profile(row), "ems_goods")
+
+    def test_build_m060800_item_payload_selects_ems_goods_not_business_papers(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="0">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <button type="button" id="ID_SENDTYPE_BTN_DOC" onclick="chgSendTypeBtn(0);">
+            <img src="images/mypage_en/sendType/DOC_W.PNG" alt="EMS(Business Papers)">
+          </button>
+          <button type="button" id="ID_SENDTYPE_BTN_PKG" onclick="chgSendTypeBtn(1);">
+            <img src="images/mypage_en/sendType/PKG.PNG" alt="EMS(Goods)">
+          </button>
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "EMS",
+            "內容物1": "Skin Care Device(without lithium battery) TRSN7068",
+            "申告金額1": "23.21",
+            "數量1": "1",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060505.do",
+            row,
+            is_eu=False,
+        )
+
+        self.assertEqual(payload["shippingBean.sendType"], "1")
+        self.assertEqual(payload["itemBean.pkg"], "Skin Care Device(without lithium battery) TRSN7068")
 
     def test_build_m060800_item_payload_reads_assignments_from_image_anchor_controls(self):
         html = """

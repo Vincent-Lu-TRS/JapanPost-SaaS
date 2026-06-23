@@ -247,6 +247,8 @@ def _html_context_for_labels(html: str, labels: list[str], max_chars: int = 700)
 def _shipping_profile(row) -> str:
     shipping = _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)"])
     normalized = shipping.lower()
+    if "ems" in normalized:
+        return "ems_goods"
     if "epacket" in normalized or "eパケット" in normalized:
         return "epacket_light"
     if (
@@ -829,7 +831,24 @@ def _build_m060800_item_payload(
         ),
     })
     profile = _shipping_profile(row)
-    if profile == "postal_parcel_air":
+    if profile == "ems_goods":
+        ems_assignments = _set_value_assignments_for_labels(
+            html,
+            ["EMS(Goods)", "EMS (Goods)", "EMS goods"],
+        )
+        if "shippingBean.sendType" in ems_assignments:
+            payload["shippingBean.sendType"] = ems_assignments["shippingBean.sendType"]
+        if "shippingBean.pkgType" in ems_assignments:
+            payload["shippingBean.pkgType"] = ems_assignments["shippingBean.pkgType"]
+        if payload.get("shippingBean.sendType", "") == "0":
+            raise RuntimeError(
+                "Unable to resolve EMS(Goods) payload from M060800 HTML; "
+                f"sendType={payload.get('shippingBean.sendType', '')}, "
+                f"transType={payload.get('shippingBean.transType', '')}, "
+                f"pkgType={payload.get('shippingBean.pkgType', '')}; "
+                f"context={_html_context_for_labels(html, ['EMS(Goods)', 'EMS (Goods)', 'EMS goods'])}"
+            )
+    elif profile == "postal_parcel_air":
         send_type_assignments = _set_value_assignments_for_labels(html, ["Postal Parcel", "POSTAL PARCEL"])
         if "shippingBean.sendType" in send_type_assignments:
             payload["shippingBean.sendType"] = send_type_assignments["shippingBean.sendType"]
