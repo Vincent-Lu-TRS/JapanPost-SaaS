@@ -143,20 +143,25 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
         st.error("部分訂單已不符合可製作條件，請重新讀取後再試。")
         return
 
+    def _mark_done_after_revalidation(_rows: list[int]) -> list[int]:
+        resolved_rows = resolve_picking_done_row_numbers(
+            load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name()),
+            fresh_selected,
+        )
+        batch_mark_picking_done(
+            _picking_source_spreadsheet_id(),
+            _picking_source_sheet_name(),
+            resolved_rows,
+        )
+        return resolved_rows
+
     try:
         result = generate_picking_labels_transaction(
             orders=fresh_selected,
             output_dir=tempfile.gettempdir(),
             list_files=lambda prefix: list_drive_files(_picking_output_drive_folder_id(), prefix),
             upload_file=lambda path: upload_file_to_drive(path, _picking_output_drive_folder_id(), "application/pdf"),
-            mark_done=lambda _rows: batch_mark_picking_done(
-                _picking_source_spreadsheet_id(),
-                _picking_source_sheet_name(),
-                resolve_picking_done_row_numbers(
-                    load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name()),
-                    fresh_selected,
-                ),
-            ),
+            mark_done=_mark_done_after_revalidation,
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
     except Exception as exc:
@@ -211,7 +216,7 @@ def render_picking_label_tab() -> None:
         <style>
         .picking-status-row {
             display: grid;
-            grid-template-columns: minmax(180px, 0.55fr) minmax(220px, 1fr);
+            grid-template-columns: minmax(180px, 0.45fr) minmax(260px, 1fr);
             gap: 12px;
             margin: 0.2rem 0 0.75rem;
         }
@@ -237,10 +242,15 @@ def render_picking_label_tab() -> None:
         .picking-loaded-panel {
             min-height: 58px;
             display: flex;
-            flex-direction: column;
-            justify-content: center;
+            align-items: center;
+            gap: 0.5rem;
             color: #cbd5e1;
             font-size: 0.82rem;
+        }
+        .picking-loaded-label {
+            color: #f59e0b;
+            font-size: 0.82rem;
+            font-weight: 800;
         }
         .picking-loaded-panel strong {
             color: #f8fafc;
@@ -259,7 +269,7 @@ def render_picking_label_tab() -> None:
                 <div class="picking-count-value">{summary["order_count"]}</div>
             </div>
             <div class="picking-loaded-panel">
-                <span>最後讀取</span>
+                <span class="picking-loaded-label">最後讀取</span>
                 <strong>{st.session_state.get("picking_loaded_at", "-")}</strong>
             </div>
         </div>
@@ -267,7 +277,8 @@ def render_picking_label_tab() -> None:
         unsafe_allow_html=True,
     )
 
-    actions = st.columns(3)
+    has_selection = bool(selected_orders)
+    actions = st.columns([1, 1, 1, 1.35], vertical_alignment="bottom")
     if actions[0].button("重新讀取", use_container_width=True):
         try:
             _load_orders()
@@ -280,6 +291,15 @@ def render_picking_label_tab() -> None:
     if actions[2].button("取消全選", use_container_width=True, disabled=not orders):
         st.session_state["picking_selected_rows"] = set()
         st.rerun()
+    generate_type = "primary" if has_selection else "secondary"
+    if actions[3].button(
+        "產生揀貨單",
+        type=generate_type,
+        use_container_width=True,
+        disabled=not has_selection,
+    ):
+        _generate_and_upload(selected_orders)
+    st.caption("成功上傳雲端資料夾後，才會勾選來源表製單檢核欄。")
 
     if not orders:
         st.info("目前沒有符合條件的待製單訂單。")
@@ -295,22 +315,6 @@ def render_picking_label_tab() -> None:
         )
         selected_orders = _selected_orders_from_editor(orders, edited_df)
 
-    pdf_actions = st.columns(2)
-    has_selection = bool(selected_orders)
-    if pdf_actions[0].button("預覽 PDF", use_container_width=True, disabled=not has_selection):
-        _preview_pdf(selected_orders)
-
-    with pdf_actions[1]:
-        st.caption("成功上傳 Drive 後，才會將來源表 L 欄改為 TRUE。")
-    generate_type = "primary" if has_selection else "secondary"
-    if pdf_actions[1].button(
-        "產生揀貨單並儲存到 Google Drive",
-        type=generate_type,
-        use_container_width=True,
-        disabled=not has_selection,
-    ):
-        _generate_and_upload(selected_orders)
-
 
 def render_picking_label_diagnostics_panel() -> None:
     st.markdown("### 跨境揀貨單")
@@ -325,13 +329,25 @@ def render_picking_label_diagnostics_panel() -> None:
         "shipping status sheet": diagnostics.get("shipping_status_sheet", ""),
         "detected K status column": diagnostics.get("status_column", ""),
         "detected L done column": diagnostics.get("done_column", ""),
+        "total source rows": diagnostics.get("total_source_rows", 0),
         "detected item groups": diagnostics.get("detected_item_groups", []),
         "max item group": diagnostics.get("max_item_group", 0),
         "candidate order count": diagnostics.get("candidate_order_count", 0),
         "excluded count": diagnostics.get("excluded_count", 0),
+        "excluded because K status != 可出貨": diagnostics.get("excluded_because_status", 0),
+        "excluded because L indicates done / 已製單": diagnostics.get("excluded_because_done", 0),
+        "excluded because 注文番号 missing": diagnostics.get("excluded_because_order_no_missing", 0),
+        "excluded because item data missing": diagnostics.get("excluded_because_item_data_missing", 0),
+        "parser / unknown exclusion count": diagnostics.get("parser_unknown_exclusion_count", 0),
+        "actual detected L raw values sample": diagnostics.get("done_raw_values_sample", []),
         "filter condition": diagnostics.get("filter_condition", ""),
     }
     st.json(meta_rows)
+
+    exclusions = diagnostics.get("near_candidate_exclusions", [])
+    if exclusions:
+        with st.expander("前 5 筆接近條件但被排除的來源列", expanded=False):
+            st.dataframe(pd.DataFrame(exclusions), hide_index=True, use_container_width=True)
 
     warnings = diagnostics.get("warnings", [])
     if warnings:

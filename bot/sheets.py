@@ -394,15 +394,20 @@ def load_sheet_values(spreadsheet_id: str, sheet_name: str) -> list[list[str]]:
     return ws.get_all_values()
 
 
-def batch_mark_picking_done(spreadsheet_id: str, sheet_name: str, row_numbers: list[int]) -> None:
-    """Set L column 製單後勾選 to TRUE for the given original sheet rows."""
+def build_picking_done_updates(row_numbers: list[int], checked_value: str = "已製單") -> list[dict]:
+    """Build L-column updates for picking-label completion checkboxes."""
+    return [
+        {"range": f"L{int(row_number)}:L{int(row_number)}", "values": [[checked_value]]}
+        for row_number in sorted(set(row_numbers))
+    ]
+
+
+def batch_mark_picking_done(spreadsheet_id: str, sheet_name: str, row_numbers: list[int], checked_value: str = "已製單") -> None:
+    """Set L column 製單後勾選 to the checked value for the given original sheet rows."""
     if not row_numbers:
         return
     client = _get_gspread_client()
     sh = client.open_by_key(spreadsheet_id)
     ws = sh.worksheet(sheet_name)
-    updates = [
-        {"range": f"L{int(row_number)}:L{int(row_number)}", "values": [["TRUE"]]}
-        for row_number in sorted(set(row_numbers))
-    ]
+    updates = build_picking_done_updates(row_numbers, checked_value=checked_value)
     ws.batch_update(updates, value_input_option="USER_ENTERED")

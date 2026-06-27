@@ -14,6 +14,7 @@ sys.modules.setdefault("google.oauth2.service_account", types.SimpleNamespace(Cr
 sys.modules.setdefault("googleapiclient", types.SimpleNamespace())
 sys.modules.setdefault("googleapiclient.discovery", types.SimpleNamespace(build=lambda *a, **k: None))
 sys.modules.setdefault("googleapiclient.http", types.SimpleNamespace(MediaIoBaseUpload=object))
+sys.modules.setdefault("gspread", types.SimpleNamespace(authorize=lambda *a, **k: None, Client=object))
 
 from bot.picking_labels import (
     PickingItem,
@@ -25,6 +26,7 @@ from bot.picking_labels import (
     format_shipping_deadline,
     generate_picking_labels_transaction,
     estimate_total_pages,
+    normalize_done_state,
     parse_picking_label_candidates,
     resolve_picking_done_row_numbers,
 )
@@ -39,6 +41,7 @@ from bot.picking_pdf import (
 )
 sys.modules.pop("bot.drive", None)
 from bot.drive import choose_safe_picking_filename, next_sequence_filename
+from bot.sheets import build_picking_done_updates
 
 
 def _header(max_items=2):
@@ -74,6 +77,35 @@ def _row(order_no="imy1", status="可出貨", done="", max_items=2, items=None):
 
 
 class PickingLabelParsingTests(unittest.TestCase):
+    def test_done_state_normalizes_custom_checkbox_values(self):
+        cases = [
+            ("未製單", "NOT_DONE"),
+            (False, "NOT_DONE"),
+            ("FALSE", "NOT_DONE"),
+            ("false", "NOT_DONE"),
+            ("", "NOT_DONE"),
+            (None, "NOT_DONE"),
+            ("已製單", "DONE"),
+            (True, "DONE"),
+            ("TRUE", "DONE"),
+            ("true", "DONE"),
+        ]
+
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_done_state(raw), expected)
+
+    def test_parse_includes_custom_unchecked_and_excludes_custom_checked_rows(self):
+        values = [
+            _header(),
+            _row(order_no="custom-unchecked", done="未製單"),
+            _row(order_no="custom-checked", done="已製單"),
+        ]
+
+        orders, _warnings = parse_picking_label_candidates(values)
+
+        self.assertEqual([order.order_no for order in orders], ["custom-unchecked"])
+
     def test_parse_includes_false_and_blank_done_rows(self):
         values = [
             _header(),
@@ -144,6 +176,29 @@ class PickingLabelParsingTests(unittest.TestCase):
         self.assertEqual(diagnostics["max_item_group"], 10)
         self.assertEqual(diagnostics["missing_item_headers"], [])
         self.assertEqual(warnings, [])
+
+    def test_diagnostics_reports_exclusion_reasons_and_l_value_sample(self):
+        values = [
+            _header(max_items=1),
+            _row(order_no="ok", status="可出貨", done="未製單", max_items=1),
+            _row(order_no="done", status="可出貨", done="已製單", max_items=1),
+            _row(order_no="status", status="缺貨", done="未製單", max_items=1),
+            _row(order_no="", status="可出貨", done="未製單", max_items=1),
+            _row(order_no="no-items", status="可出貨", done="未製單", max_items=1, items=[]),
+        ]
+
+        orders, warnings = parse_picking_label_candidates(values)
+        diagnostics = build_picking_source_diagnostics(values, orders, warnings)
+
+        self.assertEqual(diagnostics["total_source_rows"], 5)
+        self.assertEqual(diagnostics["candidate_order_count"], 1)
+        self.assertEqual(diagnostics["excluded_because_done"], 1)
+        self.assertEqual(diagnostics["excluded_because_status"], 1)
+        self.assertEqual(diagnostics["excluded_because_order_no_missing"], 1)
+        self.assertEqual(diagnostics["excluded_because_item_data_missing"], 1)
+        self.assertIn("未製單", diagnostics["done_raw_values_sample"])
+        self.assertIn("已製單", diagnostics["done_raw_values_sample"])
+        self.assertEqual(diagnostics["near_candidate_exclusions"][0]["normalized_l_state"], "DONE")
 
     def test_parse_falls_back_to_k_l_columns_when_headers_are_missing(self):
         header = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "", "", "注文日", "訂單來源", "注文番号", "國際物流方式", "商品SKU1", "商品名1", "JAN-1", "數量1", "入荷進捗1"]
@@ -343,6 +398,30 @@ class PickingLabelTransactionTests(unittest.TestCase):
 
         self.assertEqual(resolve_picking_done_row_numbers(values, [order]), [3])
 
+    def test_done_writeback_updates_use_custom_checked_value(self):
+        self.assertEqual(
+            build_picking_done_updates([22, 35]),
+            [
+                {"range": "L22:L22", "values": [["已製單"]]},
+                {"range": "L35:L35", "values": [["已製單"]]},
+            ],
+        )
+
+    def test_transaction_uses_mark_done_returned_rows_when_writeback_resolves_fallback(self):
+        order = PickingOrder(22, "6/27/2026", "imy Shop", "imy1", "郵便局", [PickingItem("SKU", "商品", "", "1", "")])
+
+        result = generate_picking_labels_transaction(
+            orders=[order],
+            output_dir=str(ROOT / "tmp"),
+            list_files=lambda prefix: [],
+            upload_file=lambda path: {"id": "file-id", "name": Path(path).name},
+            mark_done=lambda rows: [35],
+            now="2026-06-27 14:59:01",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.marked_rows, [35])
+
     def test_summary_reports_filter_counts_pages_and_qr_content(self):
         orders = [
             PickingOrder(22, "6/27/2026", "imy Shop", "imy1", "郵便局", [PickingItem("SKU1", "商品", "", "1", "")], qr_content="QR1"),
@@ -352,7 +431,7 @@ class PickingLabelTransactionTests(unittest.TestCase):
         summary = build_picking_label_summary(orders)
 
         self.assertEqual(summary["source_sheet"], "南巽出貨Label")
-        self.assertEqual(summary["filter_condition"], "K 訂單狀態 = 可出貨，且 L 製單後勾選 = FALSE")
+        self.assertEqual(summary["filter_condition"], "K 訂單狀態 = 可出貨，且 L 製單後勾選 = 未製單")
         self.assertEqual(summary["order_count"], 2)
         self.assertEqual(summary["item_count"], 2)
         self.assertEqual(summary["estimated_pdf_pages"], 2)

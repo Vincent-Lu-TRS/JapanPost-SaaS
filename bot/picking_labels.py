@@ -76,11 +76,33 @@ def _cell(row: list[Any], index: int | None) -> str:
     return str(value).strip()
 
 
-def _is_unchecked(value: Any) -> bool:
+def _normalize_cell_value(value: Any) -> str:
+    text = "" if value is None else str(value)
+    for token in ["　", " ", "\n", "\r", "\t"]:
+        text = text.replace(token, "")
+    return text.strip()
+
+
+def normalize_status_value(value: Any) -> str:
+    return _normalize_cell_value(value)
+
+
+def normalize_done_state(value: Any) -> str:
     if value is False:
-        return True
-    text = "" if value is None else str(value).strip()
-    return text == "" or text.upper() in {"FALSE", "0", "NO", "N"}
+        return "NOT_DONE"
+    if value is True:
+        return "DONE"
+    text = _normalize_cell_value(value)
+    upper_text = text.upper()
+    if text in {"", "未製單"} or upper_text in {"FALSE", "0", "NO", "N"}:
+        return "NOT_DONE"
+    if text == "已製單" or upper_text in {"TRUE", "1", "YES", "Y"}:
+        return "DONE"
+    return "UNKNOWN"
+
+
+def _is_unchecked(value: Any) -> bool:
+    return normalize_done_state(value) == "NOT_DONE"
 
 
 def _normalize_header_name(value: Any) -> str:
@@ -131,6 +153,22 @@ def _find_item_groups(header: list[Any]) -> dict[int, dict[str, int]]:
     return groups
 
 
+def _items_from_row(row: list[Any], item_groups: dict[int, dict[str, int]]) -> list[PickingItem]:
+    items: list[PickingItem] = []
+    for item_index in sorted(item_groups):
+        group = item_groups[item_index]
+        item = PickingItem(
+            sku=_cell(row, group.get("sku")),
+            name=_cell(row, group.get("name")),
+            jan=_cell(row, group.get("jan")),
+            quantity=_cell(row, group.get("quantity")),
+            progress=_cell(row, group.get("progress")),
+        )
+        if any([item.sku, item.name, item.jan, item.quantity, item.progress]):
+            items.append(item)
+    return items
+
+
 def parse_picking_label_candidates(
     values: list[list[Any]],
     shipping_deadlines: dict[str, str] | None = None,
@@ -157,25 +195,18 @@ def parse_picking_label_candidates(
 
     orders: list[PickingOrder] = []
     for source_row_number, row in enumerate(values[1:], start=2):
-        if _cell(row, status_idx) != "可出貨":
+        if normalize_status_value(_cell(row, status_idx)) != "可出貨":
             continue
-        if not _is_unchecked(row[done_idx] if done_idx < len(row) else ""):
+        if normalize_done_state(row[done_idx] if done_idx < len(row) else "") != "NOT_DONE":
             continue
-
-        items: list[PickingItem] = []
-        for item_index in sorted(item_groups):
-            group = item_groups[item_index]
-            item = PickingItem(
-                sku=_cell(row, group.get("sku")),
-                name=_cell(row, group.get("name")),
-                jan=_cell(row, group.get("jan")),
-                quantity=_cell(row, group.get("quantity")),
-                progress=_cell(row, group.get("progress")),
-            )
-            if any([item.sku, item.name, item.jan, item.quantity, item.progress]):
-                items.append(item)
-
         order_no = _cell(row, order_no_idx)
+        if not order_no:
+            continue
+
+        items = _items_from_row(row, item_groups)
+        if not items:
+            continue
+
         qr_content = _cell(row, qr_idx) or order_no
         orders.append(
             PickingOrder(
@@ -276,6 +307,9 @@ def build_picking_source_diagnostics(
     header = values[0] if values else []
     headers = _header_map(header)
     item_groups = _find_item_groups(header)
+    status_idx = headers.get("訂單狀態", 10)
+    done_idx = headers.get("製單後勾選", 11)
+    order_no_idx = headers.get("注文番号", 14)
     max_item_group = max(item_groups.keys(), default=0)
     missing_headers: list[str] = []
     fields = [
@@ -292,16 +326,74 @@ def build_picking_source_diagnostics(
                 missing_headers.append(template.format(idx=idx))
 
     data_row_count = max(len(values) - 1, 0)
+    excluded_because_status = 0
+    excluded_because_done = 0
+    excluded_because_order_no_missing = 0
+    excluded_because_item_data_missing = 0
+    parser_unknown_exclusion_count = 0
+    near_candidate_exclusions: list[dict[str, Any]] = []
+    done_samples: list[str] = []
+
+    for source_row_number, row in enumerate(values[1:], start=2):
+        raw_status = _cell(row, status_idx)
+        normalized_status = normalize_status_value(raw_status)
+        raw_done_value = row[done_idx] if done_idx < len(row) else ""
+        raw_done = _cell(row, done_idx)
+        done_state = normalize_done_state(raw_done_value)
+        order_no = _cell(row, order_no_idx)
+        item_count = len(_items_from_row(row, item_groups))
+        if raw_done not in done_samples:
+            done_samples.append(raw_done)
+
+        reason = ""
+        if normalized_status != "可出貨":
+            excluded_because_status += 1
+            reason = "K status != 可出貨"
+        elif done_state == "DONE":
+            excluded_because_done += 1
+            reason = "L indicates done"
+        elif done_state != "NOT_DONE":
+            parser_unknown_exclusion_count += 1
+            reason = "L state unknown"
+        elif not order_no:
+            excluded_because_order_no_missing += 1
+            reason = "注文番号 missing"
+        elif item_count == 0:
+            excluded_because_item_data_missing += 1
+            reason = "item data missing"
+
+        if reason and len(near_candidate_exclusions) < 5:
+            near_candidate_exclusions.append(
+                {
+                    "source_row_number": source_row_number,
+                    "raw_k_value": raw_status,
+                    "normalized_k_value": normalized_status,
+                    "raw_l_value": raw_done,
+                    "normalized_l_state": done_state,
+                    "order_no": order_no,
+                    "detected_item_count": item_count,
+                    "exclusion_reason": reason,
+                }
+            )
+
     return {
         "source_sheet": PICKING_SOURCE_SHEET_NAME,
-        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = FALSE",
+        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = 未製單",
         "status_column": "訂單狀態" if "訂單狀態" in headers else "K",
         "done_column": "製單後勾選" if "製單後勾選" in headers else "L",
+        "total_source_rows": data_row_count,
         "detected_item_groups": sorted(item_groups.keys()),
         "max_item_group": max_item_group,
         "missing_item_headers": missing_headers if max_item_group < ITEMS_PER_PAGE else [],
         "candidate_order_count": len(orders),
         "excluded_count": max(data_row_count - len(orders), 0),
+        "excluded_because_status": excluded_because_status,
+        "excluded_because_done": excluded_because_done,
+        "excluded_because_order_no_missing": excluded_because_order_no_missing,
+        "excluded_because_item_data_missing": excluded_because_item_data_missing,
+        "parser_unknown_exclusion_count": parser_unknown_exclusion_count,
+        "done_raw_values_sample": done_samples[:12],
+        "near_candidate_exclusions": near_candidate_exclusions,
         "actual_detected_headers": [_normalize_header_name(value) for value in header if _normalize_header_name(value)],
         "warnings": warnings or [],
         "qr_contents": [order.qr_content or order.order_no for order in orders],
@@ -311,7 +403,7 @@ def build_picking_source_diagnostics(
 def build_picking_label_summary(orders: list[PickingOrder]) -> dict[str, Any]:
     return {
         "source_sheet": PICKING_SOURCE_SHEET_NAME,
-        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = FALSE",
+        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = 未製單",
         "order_count": len(orders),
         "item_count": sum(len(order.items) for order in orders),
         "estimated_pdf_pages": estimate_total_pages(orders),
@@ -389,7 +481,7 @@ def generate_picking_labels_transaction(
 
     rows = [order.source_row_number for order in orders]
     try:
-        mark_done(rows)
+        marked_rows = mark_done(rows)
     except Exception as exc:
         return PickingTransactionResult(
             success=False,
@@ -403,6 +495,6 @@ def generate_picking_labels_transaction(
         success=True,
         local_path=str(output_path),
         filename=candidate,
-        marked_rows=rows,
+        marked_rows=marked_rows if isinstance(marked_rows, list) else rows,
         drive_file=drive_file,
     )
