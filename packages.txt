@@ -19,3 +19,4 @@ libxext6
 libxi6
 libxrender1
 libxtst6
+fonts-noto-cjk

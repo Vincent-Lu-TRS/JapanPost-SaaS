@@ -31,72 +31,130 @@ FONT_BOLD = FONT_NAME
 LATIN_BOLD = "Helvetica-Bold"
 CJK_NORMAL_SOURCE = ""
 CJK_BOLD_SOURCE = ""
+CJK_FONT_INFO: dict[str, str | bool] = {}
+
+
+NORMAL_FONT_CANDIDATES = [
+    {"path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
+    {"path": "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf", "source_type": "system-noto-cjk", "subfont_index": 0},
+    {"path": "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
+    {"path": "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf", "source_type": "system-noto-jp", "subfont_index": 0},
+    {"path": "/usr/share/fonts/truetype/noto/NotoSansTC-Regular.ttf", "source_type": "system-noto-tc", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/NotoSansTC-Regular.ttf", "source_type": "windows-noto-tc", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/NotoSansCJK-Regular.ttc", "source_type": "windows-noto-cjk", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/meiryo.ttc", "source_type": "windows-meiryo", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/YuGothM.ttc", "source_type": "windows-yugothic", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/YuGothR.ttc", "source_type": "windows-yugothic", "subfont_index": 0},
+]
+
+BOLD_FONT_CANDIDATES = [
+    {"path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
+    {"path": "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf", "source_type": "system-noto-cjk", "subfont_index": 0},
+    {"path": "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
+    {"path": "/usr/share/fonts/truetype/noto/NotoSansJP-Bold.ttf", "source_type": "system-noto-jp", "subfont_index": 0},
+    {"path": "/usr/share/fonts/truetype/noto/NotoSansTC-Bold.ttf", "source_type": "system-noto-tc", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/NotoSansTC-Bold.ttf", "source_type": "windows-noto-tc", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/NotoSansCJK-Bold.ttc", "source_type": "windows-noto-cjk", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/meiryob.ttc", "source_type": "windows-meiryo", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/YuGothB.ttc", "source_type": "windows-yugothic", "subfont_index": 0},
+]
+
+
+def select_cjk_font_candidate(candidates: list[dict], exists=None) -> dict[str, str | int | bool]:
+    exists = exists or (lambda path: Path(str(path)).exists())
+    for candidate in candidates:
+        path = str(candidate.get("path", ""))
+        if path and exists(path):
+            return {
+                "path": path,
+                "source_type": str(candidate.get("source_type", "file")),
+                "subfont_index": int(candidate.get("subfont_index", 0)),
+                "embedded": True,
+                "fallback_reason": "",
+            }
+    return {
+        "path": FALLBACK_FONT,
+        "source_type": "reportlab-cid",
+        "subfont_index": 0,
+        "embedded": False,
+        "fallback_reason": "No preferred CJK TrueType/OpenType font was available; using ReportLab CID fallback.",
+    }
+
+
+def _register_ttfont(font_name: str, candidate: dict) -> bool:
+    try:
+        pdfmetrics.registerFont(
+            TTFont(
+                font_name,
+                str(candidate["path"]),
+                subfontIndex=int(candidate.get("subfont_index", 0)),
+            )
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _register_font_from_candidates(font_name: str, candidates: list[dict]) -> dict[str, str | int | bool]:
+    remaining = list(candidates)
+    failures: list[str] = []
+    while remaining:
+        selected = select_cjk_font_candidate(remaining)
+        if not selected["embedded"]:
+            break
+        if _register_ttfont(font_name, selected):
+            return selected
+        failures.append(str(selected["path"]))
+        remaining = [candidate for candidate in remaining if str(candidate.get("path", "")) != selected["path"]]
+    selected = select_cjk_font_candidate([])
+    if failures:
+        selected["fallback_reason"] = (
+            "Preferred CJK font files were found but ReportLab could not register them: "
+            + ", ".join(failures)
+            + "; using ReportLab CID fallback."
+        )
+    return selected
 
 
 def _register_fonts() -> None:
-    global FONT_NAME, FONT_BOLD, CJK_NORMAL_SOURCE, CJK_BOLD_SOURCE
+    global FONT_NAME, FONT_BOLD, CJK_NORMAL_SOURCE, CJK_BOLD_SOURCE, CJK_FONT_INFO
     if FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return
-    normal_candidates = [
-        "C:/Windows/Fonts/NotoSansTC-Regular.ttf",
-        "C:/Windows/Fonts/NotoSansCJK-Regular.ttc",
-        "C:/Windows/Fonts/meiryo.ttc",
-        "C:/Windows/Fonts/YuGothM.ttc",
-        "C:/Windows/Fonts/YuGothR.ttc",
-        "C:/Windows/Fonts/NotoSansTC-VF.ttf",
-        "C:/Windows/Fonts/NotoSansJP-VF.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansTC-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf",
-    ]
-    bold_candidates = [
-        "C:/Windows/Fonts/NotoSansTC-Bold.ttf",
-        "C:/Windows/Fonts/NotoSansCJK-Bold.ttc",
-        "C:/Windows/Fonts/meiryob.ttc",
-        "C:/Windows/Fonts/YuGothB.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansTC-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansJP-Bold.ttf",
-    ]
-    for font_path in normal_candidates:
-        if Path(font_path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont(FONT_NAME, font_path))
-                CJK_NORMAL_SOURCE = font_path
-                break
-            except Exception:
-                continue
+    normal = _register_font_from_candidates(FONT_NAME, NORMAL_FONT_CANDIDATES)
+    if normal["embedded"]:
+        CJK_NORMAL_SOURCE = str(normal["path"])
     else:
         pdfmetrics.registerFont(UnicodeCIDFont(FALLBACK_FONT))
         FONT_NAME = FALLBACK_FONT
         CJK_NORMAL_SOURCE = FALLBACK_FONT
 
-    bold_registered = False
-    for font_path in bold_candidates:
-        if Path(font_path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont("PickingLabelCJKBold", font_path))
-                FONT_BOLD = "PickingLabelCJKBold"
-                CJK_BOLD_SOURCE = font_path
-                bold_registered = True
-                return
-            except Exception:
-                continue
-    if not bold_registered:
+    bold = _register_font_from_candidates("PickingLabelCJKBold", BOLD_FONT_CANDIDATES)
+    if bold["embedded"]:
+        FONT_BOLD = "PickingLabelCJKBold"
+        CJK_BOLD_SOURCE = str(bold["path"])
+    else:
         FONT_BOLD = FONT_NAME
         CJK_BOLD_SOURCE = f"faux-bold:{CJK_NORMAL_SOURCE}"
-
-
-def get_registered_cjk_font_info() -> dict[str, str]:
-    _register_fonts()
-    return {
+    fallback_reason = "; ".join(
+        reason for reason in [str(normal.get("fallback_reason", "")), str(bold.get("fallback_reason", ""))] if reason
+    )
+    CJK_FONT_INFO = {
         "normal_font": FONT_NAME,
         "bold_font": FONT_BOLD,
         "normal_source": CJK_NORMAL_SOURCE,
         "bold_source": CJK_BOLD_SOURCE,
+        "normal_source_type": str(normal.get("source_type", "reportlab-cid")),
+        "bold_source_type": str(bold.get("source_type", "faux-bold" if not bold.get("embedded") else "file")),
+        "normal_embedded": bool(normal.get("embedded", False)),
+        "bold_embedded": bool(bold.get("embedded", False)),
+        "embedded": bool(normal.get("embedded", False)),
+        "fallback_reason": fallback_reason,
     }
+
+
+def get_registered_cjk_font_info() -> dict[str, str]:
+    _register_fonts()
+    return {key: str(value) if not isinstance(value, bool) else value for key, value in CJK_FONT_INFO.items()}
 
 
 def _qr_image(value: str) -> ImageReader:

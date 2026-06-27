@@ -25,7 +25,7 @@ from bot.picking_labels import (
     parse_picking_label_candidates,
     resolve_picking_done_row_numbers,
 )
-from bot.picking_pdf import render_picking_labels_pdf
+from bot.picking_pdf import get_registered_cjk_font_info, render_picking_labels_pdf
 from bot.sheets import batch_mark_picking_done, load_sheet_values
 
 
@@ -69,6 +69,7 @@ def _load_orders() -> None:
     diagnostics["source_sheet"] = _picking_source_sheet_name()
     diagnostics["shipping_status_spreadsheet_id"] = _shipping_status_spreadsheet_id()
     diagnostics["shipping_status_sheet"] = _shipping_status_sheet_name()
+    diagnostics["pdf_cjk_font"] = get_registered_cjk_font_info()
     st.session_state["picking_diagnostics"] = diagnostics
     st.session_state["picking_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
@@ -347,6 +348,11 @@ def render_picking_label_diagnostics_panel() -> None:
         "filter condition": diagnostics.get("filter_condition", ""),
     }
     st.json(meta_rows)
+
+    font_info = diagnostics.get("pdf_cjk_font", {})
+    if font_info:
+        with st.expander("PDF CJK 字型診斷", expanded=False):
+            st.json(font_info)
 
     duplicate_headers = diagnostics.get("duplicate_header_diagnostics", [])
     if duplicate_headers:

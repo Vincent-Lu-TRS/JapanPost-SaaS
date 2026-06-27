@@ -31,8 +31,10 @@ from bot.picking_labels import (
     resolve_picking_done_row_numbers,
 )
 from bot.picking_pdf import (
+    FALLBACK_FONT,
     can_fit_items_on_page,
     get_registered_cjk_font_info,
+    select_cjk_font_candidate,
     plan_logistics_header_text,
     plan_item_text_layout,
     plan_page_grid,
@@ -721,6 +723,63 @@ class PickingLabelPdfTests(unittest.TestCase):
         self.assertNotIn("thin", info["bold_source"].lower())
         self.assertTrue(info["normal_font"])
         self.assertTrue(info["bold_font"])
+        self.assertIn("embedded", info)
+        self.assertIn("fallback_reason", info)
+        self.assertIn("normal_source_type", info)
+
+    def test_font_preference_uses_noto_before_heisei_when_available(self):
+        selected = select_cjk_font_candidate(
+            [
+                {"path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "source_type": "system-noto"},
+                {"path": FALLBACK_FONT, "source_type": "reportlab-cid"},
+            ],
+            exists=lambda path: path.endswith("NotoSansCJK-Regular.ttc"),
+        )
+
+        self.assertEqual(selected["path"], "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
+        self.assertNotEqual(selected["path"], FALLBACK_FONT)
+        self.assertTrue(selected["embedded"])
+        self.assertEqual(selected["fallback_reason"], "")
+
+    def test_font_selection_reports_heisei_fallback_when_no_preferred_font_exists(self):
+        selected = select_cjk_font_candidate(
+            [{"path": "/missing/NotoSansCJK-Regular.ttc", "source_type": "system-noto"}],
+            exists=lambda _path: False,
+        )
+
+        self.assertEqual(selected["path"], FALLBACK_FONT)
+        self.assertFalse(selected["embedded"])
+        self.assertIn("No preferred CJK TrueType/OpenType font", selected["fallback_reason"])
+
+    def test_streamlit_cloud_packages_include_noto_cjk_fonts(self):
+        packages = (ROOT / "packages.txt").read_text(encoding="utf-8")
+
+        self.assertIn("fonts-noto-cjk", packages)
+
+    def test_rendered_pdf_cjk_font_resource_is_not_thin(self):
+        output_path = ROOT / "tmp" / "test-picking-font-resource.pdf"
+        output_path.parent.mkdir(exist_ok=True)
+        order = PickingOrder(
+            2,
+            "2026/06/27",
+            "Official website - imy Shop",
+            "imy2035810",
+            "郵便局",
+            [PickingItem("TRSN8688", "テスト商品 日本語", "4901234567890", "1", "本日着予定")],
+        )
+
+        render_picking_labels_pdf([order], str(output_path))
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(output_path))
+        font_names: list[str] = []
+        for page in reader.pages:
+            for font_ref in page.get("/Resources", {}).get("/Font", {}).values():
+                font_names.append(str(font_ref.get_object().get("/BaseFont", "")))
+
+        self.assertTrue(any("Meiryo" in name or "NotoSans" in name for name in font_names), font_names)
+        self.assertFalse(any("Thin" in name for name in font_names), font_names)
 
     def test_dense_long_name_layout_keeps_readable_minimum_sizes(self):
         layout = plan_item_text_layout(
