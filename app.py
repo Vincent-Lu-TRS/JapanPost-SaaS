@@ -1376,16 +1376,6 @@ def _render_main_app():
             st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
         max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
         with toolbar_action_cols[2]:
-            if is_running:
-                if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
-                    st.rerun()
-            elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
-                st.session_state.pop("last_pending_df", None)
-                st.session_state.pop("last_pending_logs", None)
-                st.session_state.pop("pending_refresh_notice", None)
-                st.session_state.pop("pending_selected_by_order", None)
-                st.rerun()
-        with toolbar_action_cols[3]:
             btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
             if st.button(btn_label, type="primary",
                          disabled=(is_running or pending_count == 0 or selected_count == 0), width="stretch"):
@@ -1398,6 +1388,16 @@ def _render_main_app():
                     if hasattr(st, "toast"):
                         st.toast("請確認本次製單")
                     st.rerun()
+        with toolbar_action_cols[3]:
+            if is_running:
+                if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
+                    st.rerun()
+            elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
+                st.session_state.pop("last_pending_df", None)
+                st.session_state.pop("last_pending_logs", None)
+                st.session_state.pop("pending_refresh_notice", None)
+                st.session_state.pop("pending_selected_by_order", None)
+                st.rerun()
         with toolbar_action_cols[5]:
             reset_all_requested = st.button(
                 "恢復全部預設",

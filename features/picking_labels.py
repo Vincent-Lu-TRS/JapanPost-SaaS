@@ -20,7 +20,6 @@ from bot.picking_labels import (
     build_shipping_deadline_lookup,
     build_picking_label_summary,
     build_picking_source_diagnostics,
-    estimate_total_pages,
     filter_orders_by_rows,
     generate_picking_labels_transaction,
     parse_picking_label_candidates,
@@ -72,7 +71,7 @@ def _load_orders() -> None:
     diagnostics["shipping_status_sheet"] = _shipping_status_sheet_name()
     st.session_state["picking_diagnostics"] = diagnostics
     st.session_state["picking_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
+    st.session_state["picking_selected_rows"] = set()
 
 
 def _orders_to_dataframe(orders: list[PickingOrder], selected_rows: set[int]) -> pd.DataFrame:
@@ -84,11 +83,7 @@ def _orders_to_dataframe(orders: list[PickingOrder], selected_rows: set[int]) ->
                 "注文日": order.order_date,
                 "訂單來源": order.order_source,
                 "國際物流方式": order.logistics_method,
-                "商品數": len(order.items),
-                "PDF 頁數": estimate_total_pages([order]),
-                "提醒": "無商品資料" if not order.items else "",
-                "QR內容": order.qr_content or order.order_no,
-                "來源列號": order.source_row_number,
+                "発送期限": order.shipping_deadline or "-",
             }
             for order in orders
         ]
@@ -99,9 +94,9 @@ def _selected_orders_from_editor(orders: list[PickingOrder], edited_df: pd.DataF
     if edited_df.empty:
         return []
     selected_rows = {
-        int(row["來源列號"])
-        for _, row in edited_df.iterrows()
-        if bool(row.get("選取"))
+        orders[position].source_row_number
+        for position, (_, row) in enumerate(edited_df.iterrows())
+        if position < len(orders) and bool(row.get("選取"))
     }
     st.session_state["picking_selected_rows"] = selected_rows
     return filter_orders_by_rows(orders, selected_rows)
@@ -278,27 +273,27 @@ def render_picking_label_tab() -> None:
     )
 
     has_selection = bool(selected_orders)
-    actions = st.columns([1, 1, 1, 1.35], vertical_alignment="bottom")
-    if actions[0].button("重新讀取", use_container_width=True):
-        try:
-            _load_orders()
-            st.rerun()
-        except Exception as exc:
-            st.error(f"重新讀取失敗：{exc}")
-    if actions[1].button("全選", use_container_width=True, disabled=not orders):
-        st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
-        st.rerun()
-    if actions[2].button("取消全選", use_container_width=True, disabled=not orders):
-        st.session_state["picking_selected_rows"] = set()
-        st.rerun()
+    actions = st.columns([1.35, 1, 1, 1], vertical_alignment="bottom")
     generate_type = "primary" if has_selection else "secondary"
-    if actions[3].button(
+    if actions[0].button(
         "產生揀貨單",
         type=generate_type,
         use_container_width=True,
         disabled=not has_selection,
     ):
         _generate_and_upload(selected_orders)
+    if actions[1].button("重新讀取", use_container_width=True):
+        try:
+            _load_orders()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"重新讀取失敗：{exc}")
+    if actions[2].button("全選", use_container_width=True, disabled=not orders):
+        st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
+        st.rerun()
+    if actions[3].button("取消全選", use_container_width=True, disabled=not orders):
+        st.session_state["picking_selected_rows"] = set()
+        st.rerun()
     st.caption("成功上傳雲端資料夾後，才會勾選來源表製單檢核欄。")
 
     if not orders:
@@ -329,6 +324,11 @@ def render_picking_label_diagnostics_panel() -> None:
         "shipping status sheet": diagnostics.get("shipping_status_sheet", ""),
         "detected K status column": diagnostics.get("status_column", ""),
         "detected L done column": diagnostics.get("done_column", ""),
+        "used M 注文日 column": diagnostics.get("order_date_column", ""),
+        "used N 訂單來源 column": diagnostics.get("order_source_column", ""),
+        "used O 注文番号 column": diagnostics.get("order_no_column", ""),
+        "used P 國際物流方式 column": diagnostics.get("logistics_column", ""),
+        "anchored picking schema": diagnostics.get("anchored_schema", False),
         "total source rows": diagnostics.get("total_source_rows", 0),
         "detected item groups": diagnostics.get("detected_item_groups", []),
         "max item group": diagnostics.get("max_item_group", 0),
@@ -343,6 +343,16 @@ def render_picking_label_diagnostics_panel() -> None:
         "filter condition": diagnostics.get("filter_condition", ""),
     }
     st.json(meta_rows)
+
+    duplicate_headers = diagnostics.get("duplicate_header_diagnostics", [])
+    if duplicate_headers:
+        with st.expander("重複欄名錨定狀態", expanded=False):
+            st.dataframe(pd.DataFrame(duplicate_headers), hide_index=True, use_container_width=True)
+
+    included = diagnostics.get("included_candidate_samples", [])
+    if included:
+        with st.expander("前 20 筆已納入候選訂單（M:P / K:L）", expanded=False):
+            st.dataframe(pd.DataFrame(included), hide_index=True, use_container_width=True)
 
     exclusions = diagnostics.get("near_candidate_exclusions", [])
     if exclusions:

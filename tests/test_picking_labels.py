@@ -76,6 +76,65 @@ def _row(order_no="imy1", status="可出貨", done="", max_items=2, items=None):
     return values
 
 
+def _anchored_duplicate_header(max_items=2):
+    header = [
+        "注文日",
+        "訂單來源",
+        "注文番号",
+        "出貨\n倉庫",
+        "國際物流方式",
+        "商品SKU",
+        "商品名",
+        "數量",
+        "入荷進捗",
+        "出現次數",
+        "訂單狀態",
+        "製單後勾選",
+        "注文日",
+        "訂單來源",
+        "注文番号",
+        "國際物流方式",
+    ]
+    for idx in range(1, max_items + 1):
+        header.extend([f"商品SKU{idx}", f"商品名{idx}", f"JAN-{idx}", f"數量{idx}", f"入荷進捗{idx}"])
+    return header
+
+
+def _anchored_duplicate_row(
+    old_order_no="old-c-column",
+    order_no="new-o-column",
+    status="可出貨",
+    done="未製單",
+    max_items=2,
+    items=None,
+):
+    row = [
+        "2025/01/01",
+        "Old source",
+        old_order_no,
+        "南巽",
+        "Old logistics",
+        "OLD-SKU",
+        "Old item",
+        "1",
+        "old progress",
+        "1",
+        status,
+        done,
+        "2026/06/27",
+        "Official website - imy Shop",
+        order_no,
+        "郵便局",
+    ]
+    items = items if items is not None else [("TRSN8688", "商品一", "4901234567890", "2", "本日着予定")]
+    for idx in range(max_items):
+        if idx < len(items):
+            row.extend(items[idx])
+        else:
+            row.extend(["", "", "", "", ""])
+    return row
+
+
 class PickingLabelParsingTests(unittest.TestCase):
     def test_done_state_normalizes_custom_checkbox_values(self):
         cases = [
@@ -246,6 +305,57 @@ class PickingLabelParsingTests(unittest.TestCase):
 
         self.assertEqual(orders[0].shipping_deadline, "2026/07/03")
 
+    def test_parse_uses_anchored_m_to_p_columns_when_headers_are_duplicated(self):
+        values = [
+            _anchored_duplicate_header(max_items=1),
+            _anchored_duplicate_row(
+                old_order_no="old-2025-order",
+                order_no="imy2035810",
+                max_items=1,
+            ),
+        ]
+
+        orders, _warnings = parse_picking_label_candidates(values)
+
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0].order_date, "2026/06/27")
+        self.assertEqual(orders[0].order_source, "Official website - imy Shop")
+        self.assertEqual(orders[0].order_no, "imy2035810")
+        self.assertEqual(orders[0].logistics_method, "郵便局")
+        self.assertEqual(orders[0].qr_content, "imy2035810")
+        self.assertEqual(orders[0].items[0].sku, "TRSN8688")
+
+    def test_resolve_done_rows_revalidates_against_o_column_not_c_column(self):
+        values = [
+            _anchored_duplicate_header(max_items=1),
+            _anchored_duplicate_row(old_order_no="imy-selected", order_no="wrong-o", max_items=1),
+            _anchored_duplicate_row(old_order_no="old-c", order_no="imy-selected", max_items=1),
+        ]
+        order = PickingOrder(2, "2026/06/27", "imy Shop", "imy-selected", "郵便局", [PickingItem("SKU", "商品", "", "1", "")])
+
+        self.assertEqual(resolve_picking_done_row_numbers(values, [order]), [3])
+
+    def test_diagnostics_reports_ignored_and_used_duplicate_header_columns(self):
+        values = [
+            _anchored_duplicate_header(max_items=1),
+            _anchored_duplicate_row(old_order_no="old-2025-order", order_no="imy2035810", max_items=1),
+        ]
+        orders, warnings = parse_picking_label_candidates(values)
+
+        diagnostics = build_picking_source_diagnostics(values, orders, warnings)
+
+        duplicates = diagnostics["duplicate_header_diagnostics"]
+        self.assertIn({"header": "注文日", "ignored_columns": ["A"], "used_column": "M"}, duplicates)
+        self.assertIn({"header": "訂單來源", "ignored_columns": ["B"], "used_column": "N"}, duplicates)
+        self.assertIn({"header": "注文番号", "ignored_columns": ["C"], "used_column": "O"}, duplicates)
+        self.assertIn({"header": "國際物流方式", "ignored_columns": ["E"], "used_column": "P"}, duplicates)
+        included = diagnostics["included_candidate_samples"][0]
+        self.assertEqual(included["source_row_number"], 2)
+        self.assertEqual(included["m_order_date"], "2026/06/27")
+        self.assertEqual(included["o_order_no"], "imy2035810")
+        self.assertEqual(included["raw_k_value"], "可出貨")
+        self.assertEqual(included["normalized_l_state"], "NOT_DONE")
+
 
 class PickingLabelPaginationTests(unittest.TestCase):
     def test_build_pages_splits_after_ten_items(self):
@@ -331,6 +441,53 @@ class PickingLabelDriveTests(unittest.TestCase):
         )
 
         self.assertEqual(filename, "260627-145901揀貨標籤.pdf")
+
+
+class PickingLabelUiTests(unittest.TestCase):
+    def test_visible_operation_table_omits_internal_and_debug_columns(self):
+        from features.picking_labels import _orders_to_dataframe
+
+        order = PickingOrder(
+            22,
+            "2026/06/27",
+            "Official website - imy Shop",
+            "imy2035810",
+            "郵便局",
+            [PickingItem("TRSN8688", "商品", "", "1", "")],
+            qr_content="imy2035810",
+            shipping_deadline="2026/07/03",
+        )
+
+        df = _orders_to_dataframe([order], set())
+
+        self.assertEqual(
+            list(df.columns),
+            ["選取", "注文番号", "注文日", "訂單來源", "國際物流方式", "発送期限"],
+        )
+
+    def test_load_orders_does_not_auto_select_all_rows(self):
+        import features.picking_labels as picking_ui
+
+        source_values = [
+            _anchored_duplicate_header(max_items=1),
+            _anchored_duplicate_row(order_no="imy2035810", max_items=1),
+        ]
+        status_values = [["A", "B", "訂單編號", "D", "E", "F", "G", "H", "I", "J", "発送期限"]]
+        original_load = picking_ui.load_sheet_values
+        original_session = picking_ui.st.session_state
+        try:
+            picking_ui.st.session_state = {}
+            picking_ui.load_sheet_values = lambda spreadsheet_id, sheet_name: (
+                status_values if sheet_name == "南巽出貨狀態一覽" else source_values
+            )
+
+            picking_ui._load_orders()
+
+            self.assertEqual(len(picking_ui.st.session_state["picking_orders"]), 1)
+            self.assertEqual(picking_ui.st.session_state["picking_selected_rows"], set())
+        finally:
+            picking_ui.load_sheet_values = original_load
+            picking_ui.st.session_state = original_session
 
 
 class PickingLabelTransactionTests(unittest.TestCase):
@@ -431,7 +588,7 @@ class PickingLabelTransactionTests(unittest.TestCase):
         summary = build_picking_label_summary(orders)
 
         self.assertEqual(summary["source_sheet"], "南巽出貨Label")
-        self.assertEqual(summary["filter_condition"], "K 訂單狀態 = 可出貨，且 L 製單後勾選 = 未製單")
+        self.assertEqual(summary["filter_condition"], "K 訂單狀態 = 可出貨，且 L 製單後勾選 != TRUE")
         self.assertEqual(summary["order_count"], 2)
         self.assertEqual(summary["item_count"], 2)
         self.assertEqual(summary["estimated_pdf_pages"], 2)

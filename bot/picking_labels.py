@@ -14,6 +14,14 @@ PICKING_OUTPUT_DRIVE_FOLDER_ID = "1_JYIwmtpKQ7FjWY2zplofLGe0GHaEMvw"
 SHIPPING_STATUS_SPREADSHEET_ID = "1QJFFW7aWGpYX3W5nPW_HgUnVWk9AtggFvYow14BRW8U"
 SHIPPING_STATUS_SHEET_NAME = "南巽出貨狀態一覽"
 ITEMS_PER_PAGE = 10
+STATUS_COL = 10
+DONE_COL = 11
+ORDER_DATE_COL = 12
+ORDER_SOURCE_COL = 13
+ORDER_NO_COL = 14
+LOGISTICS_COL = 15
+ITEM_START_COL = 16
+ITEM_GROUP_WIDTH = 5
 
 
 @dataclass
@@ -65,6 +73,18 @@ class PickingTransactionResult:
     marked_rows: list[int]
     drive_file: dict | None = None
     error: str = ""
+
+
+@dataclass(frozen=True)
+class PickingSourceSchema:
+    status_idx: int
+    done_idx: int
+    order_date_idx: int
+    order_source_idx: int
+    order_no_idx: int
+    logistics_idx: int
+    item_groups: dict[int, dict[str, int]]
+    anchored: bool
 
 
 def _cell(row: list[Any], index: int | None) -> str:
@@ -133,6 +153,26 @@ def _header_map(header: list[Any]) -> dict[str, int]:
     return mapping
 
 
+def _header_positions(header: list[Any]) -> dict[str, list[int]]:
+    positions: dict[str, list[int]] = {}
+    for idx, value in enumerate(header):
+        name = _normalize_header_name(value)
+        if name:
+            positions.setdefault(name, []).append(idx)
+    return positions
+
+
+def _column_letter(index: int | None) -> str:
+    if index is None or index < 0:
+        return ""
+    result = ""
+    number = index + 1
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
 def _find_item_groups(header: list[Any]) -> dict[int, dict[str, int]]:
     patterns = {
         "sku": re.compile(r"^商品SKU(\d+)$"),
@@ -151,6 +191,90 @@ def _find_item_groups(header: list[Any]) -> dict[int, dict[str, int]]:
                 groups.setdefault(item_index, {})[field] = idx
                 break
     return groups
+
+
+def _has_anchored_picking_schema(header: list[Any]) -> bool:
+    expected = {
+        STATUS_COL: "訂單狀態",
+        DONE_COL: "製單後勾選",
+        ORDER_DATE_COL: "注文日",
+        ORDER_SOURCE_COL: "訂單來源",
+        ORDER_NO_COL: "注文番号",
+        LOGISTICS_COL: "國際物流方式",
+    }
+    for idx, name in expected.items():
+        if idx >= len(header) or _normalize_header_name(header[idx]) != name:
+            return False
+    return len(header) > ITEM_START_COL and _normalize_header_name(header[ITEM_START_COL]) == "商品SKU1"
+
+
+def _anchored_item_groups(header: list[Any]) -> dict[int, dict[str, int]]:
+    fields = [
+        ("sku", "商品SKU{idx}"),
+        ("name", "商品名{idx}"),
+        ("jan", "JAN-{idx}"),
+        ("quantity", "數量{idx}"),
+        ("progress", "入荷進捗{idx}"),
+    ]
+    groups: dict[int, dict[str, int]] = {}
+    for item_index in range(1, ITEMS_PER_PAGE + 1):
+        start = ITEM_START_COL + (item_index - 1) * ITEM_GROUP_WIDTH
+        group: dict[str, int] = {}
+        for offset, (field, template) in enumerate(fields):
+            idx = start + offset
+            if idx < len(header) and _normalize_header_name(header[idx]) == template.format(idx=item_index):
+                group[field] = idx
+        if group:
+            groups[item_index] = group
+    return groups
+
+
+def _build_picking_source_schema(header: list[Any]) -> PickingSourceSchema:
+    headers = _header_map(header)
+    if _has_anchored_picking_schema(header):
+        return PickingSourceSchema(
+            status_idx=STATUS_COL,
+            done_idx=DONE_COL,
+            order_date_idx=ORDER_DATE_COL,
+            order_source_idx=ORDER_SOURCE_COL,
+            order_no_idx=ORDER_NO_COL,
+            logistics_idx=LOGISTICS_COL,
+            item_groups=_anchored_item_groups(header),
+            anchored=True,
+        )
+    return PickingSourceSchema(
+        status_idx=headers.get("訂單狀態", STATUS_COL),
+        done_idx=headers.get("製單後勾選", DONE_COL),
+        order_date_idx=headers.get("注文日", ORDER_DATE_COL),
+        order_source_idx=headers.get("訂單來源", ORDER_SOURCE_COL),
+        order_no_idx=headers.get("注文番号", ORDER_NO_COL),
+        logistics_idx=headers.get("國際物流方式", LOGISTICS_COL),
+        item_groups=_find_item_groups(header),
+        anchored=False,
+    )
+
+
+def _duplicate_header_diagnostics(header: list[Any], schema: PickingSourceSchema) -> list[dict[str, Any]]:
+    positions = _header_positions(header)
+    used_by_header = {
+        "注文日": schema.order_date_idx,
+        "訂單來源": schema.order_source_idx,
+        "注文番号": schema.order_no_idx,
+        "國際物流方式": schema.logistics_idx,
+    }
+    diagnostics: list[dict[str, Any]] = []
+    for name, used_idx in used_by_header.items():
+        all_positions = positions.get(name, [])
+        ignored = [idx for idx in all_positions if idx != used_idx]
+        if ignored or len(all_positions) > 1:
+            diagnostics.append(
+                {
+                    "header": name,
+                    "ignored_columns": [_column_letter(idx) for idx in ignored],
+                    "used_column": _column_letter(used_idx),
+                }
+            )
+    return diagnostics
 
 
 def _items_from_row(row: list[Any], item_groups: dict[int, dict[str, int]]) -> list[PickingItem]:
@@ -178,28 +302,23 @@ def parse_picking_label_candidates(
         return [], []
 
     header = values[0]
+    schema = _build_picking_source_schema(header)
     headers = _header_map(header)
-    status_idx = headers.get("訂單狀態", 10)
-    done_idx = headers.get("製單後勾選", 11)
-    order_date_idx = headers.get("注文日", 12)
-    order_source_idx = headers.get("訂單來源", 13)
-    order_no_idx = headers.get("注文番号", 14)
-    logistics_idx = headers.get("國際物流方式", 15)
     qr_idx = (
         headers.get("QR內容")
         or headers.get("QR Code")
         or headers.get("QR")
         or headers.get("QRCode")
     )
-    item_groups = _find_item_groups(header)
+    item_groups = schema.item_groups
 
     orders: list[PickingOrder] = []
     for source_row_number, row in enumerate(values[1:], start=2):
-        if normalize_status_value(_cell(row, status_idx)) != "可出貨":
+        if normalize_status_value(_cell(row, schema.status_idx)) != "可出貨":
             continue
-        if normalize_done_state(row[done_idx] if done_idx < len(row) else "") != "NOT_DONE":
+        if normalize_done_state(row[schema.done_idx] if schema.done_idx < len(row) else "") != "NOT_DONE":
             continue
-        order_no = _cell(row, order_no_idx)
+        order_no = _cell(row, schema.order_no_idx)
         if not order_no:
             continue
 
@@ -211,10 +330,10 @@ def parse_picking_label_candidates(
         orders.append(
             PickingOrder(
                 source_row_number=source_row_number,
-                order_date=_cell(row, order_date_idx),
-                order_source=_cell(row, order_source_idx),
+                order_date=_cell(row, schema.order_date_idx),
+                order_source=_cell(row, schema.order_source_idx),
                 order_no=order_no,
-                logistics_method=_cell(row, logistics_idx),
+                logistics_method=_cell(row, schema.logistics_idx),
                 items=items,
                 qr_content=qr_content,
                 shipping_deadline=(shipping_deadlines or {}).get(order_no, ""),
@@ -270,8 +389,8 @@ def resolve_picking_done_row_numbers(values: list[list[Any]], orders: list[Picki
     if len(values) < 2:
         raise ValueError("來源表沒有可供回寫的資料列。")
 
-    headers = _header_map(values[0])
-    order_no_idx = headers.get("注文番号", 14)
+    schema = _build_picking_source_schema(values[0])
+    order_no_idx = schema.order_no_idx
     row_by_order_no: dict[str, int] = {}
     for row_number, row in enumerate(values[1:], start=2):
         order_no = _cell(row, order_no_idx)
@@ -305,11 +424,11 @@ def build_picking_source_diagnostics(
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     header = values[0] if values else []
-    headers = _header_map(header)
-    item_groups = _find_item_groups(header)
-    status_idx = headers.get("訂單狀態", 10)
-    done_idx = headers.get("製單後勾選", 11)
-    order_no_idx = headers.get("注文番号", 14)
+    schema = _build_picking_source_schema(header)
+    item_groups = schema.item_groups
+    status_idx = schema.status_idx
+    done_idx = schema.done_idx
+    order_no_idx = schema.order_no_idx
     max_item_group = max(item_groups.keys(), default=0)
     missing_headers: list[str] = []
     fields = [
@@ -333,6 +452,7 @@ def build_picking_source_diagnostics(
     parser_unknown_exclusion_count = 0
     near_candidate_exclusions: list[dict[str, Any]] = []
     done_samples: list[str] = []
+    included_candidate_samples: list[dict[str, Any]] = []
 
     for source_row_number, row in enumerate(values[1:], start=2):
         raw_status = _cell(row, status_idx)
@@ -361,6 +481,21 @@ def build_picking_source_diagnostics(
         elif item_count == 0:
             excluded_because_item_data_missing += 1
             reason = "item data missing"
+        elif len(included_candidate_samples) < 20:
+            included_candidate_samples.append(
+                {
+                    "source_row_number": source_row_number,
+                    "m_order_date": _cell(row, schema.order_date_idx),
+                    "n_order_source": _cell(row, schema.order_source_idx),
+                    "o_order_no": order_no,
+                    "p_logistics_method": _cell(row, schema.logistics_idx),
+                    "raw_k_value": raw_status,
+                    "normalized_k_value": normalized_status,
+                    "raw_l_value": raw_done,
+                    "normalized_l_state": done_state,
+                    "item_count": item_count,
+                }
+            )
 
         if reason and len(near_candidate_exclusions) < 5:
             near_candidate_exclusions.append(
@@ -378,9 +513,16 @@ def build_picking_source_diagnostics(
 
     return {
         "source_sheet": PICKING_SOURCE_SHEET_NAME,
-        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = 未製單",
-        "status_column": "訂單狀態" if "訂單狀態" in headers else "K",
-        "done_column": "製單後勾選" if "製單後勾選" in headers else "L",
+        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 != TRUE",
+        "status_column": _column_letter(schema.status_idx),
+        "done_column": _column_letter(schema.done_idx),
+        "order_date_column": _column_letter(schema.order_date_idx),
+        "order_source_column": _column_letter(schema.order_source_idx),
+        "order_no_column": _column_letter(schema.order_no_idx),
+        "logistics_column": _column_letter(schema.logistics_idx),
+        "item_start_column": _column_letter(ITEM_START_COL) if schema.anchored else "",
+        "anchored_schema": schema.anchored,
+        "duplicate_header_diagnostics": _duplicate_header_diagnostics(header, schema),
         "total_source_rows": data_row_count,
         "detected_item_groups": sorted(item_groups.keys()),
         "max_item_group": max_item_group,
@@ -394,6 +536,7 @@ def build_picking_source_diagnostics(
         "parser_unknown_exclusion_count": parser_unknown_exclusion_count,
         "done_raw_values_sample": done_samples[:12],
         "near_candidate_exclusions": near_candidate_exclusions,
+        "included_candidate_samples": included_candidate_samples,
         "actual_detected_headers": [_normalize_header_name(value) for value in header if _normalize_header_name(value)],
         "warnings": warnings or [],
         "qr_contents": [order.qr_content or order.order_no for order in orders],
@@ -403,7 +546,7 @@ def build_picking_source_diagnostics(
 def build_picking_label_summary(orders: list[PickingOrder]) -> dict[str, Any]:
     return {
         "source_sheet": PICKING_SOURCE_SHEET_NAME,
-        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = 未製單",
+        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 != TRUE",
         "order_count": len(orders),
         "item_count": sum(len(order.items) for order in orders),
         "estimated_pdf_pages": estimate_total_pages(orders),
