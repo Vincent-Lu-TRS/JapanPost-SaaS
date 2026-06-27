@@ -41,7 +41,7 @@ from fx_rates import fetch_usd_jpy_rate
 # ★ set_page_config 必須在所有 st.* 呼叫之前
 # ══════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="JP Post 製單系統",
+    page_title="Cross-Border製單系統",
     page_icon="📮",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -520,8 +520,8 @@ def _render_login_page():
 
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
-        st.markdown('## 📮 <span class="brand-accent">JP Post</span> 製單系統', unsafe_allow_html=True)
-        st.markdown("**企業專屬 SaaS・免安裝・雲端全自動**")
+        st.markdown('## <span class="brand-accent">Cross-Border</span>製單系統', unsafe_allow_html=True)
+        st.markdown("**跨境出貨作業・揀貨單・製單輔助**")
         st.divider()
         st.markdown("請使用公司 Google 帳號登入（@tkrjm.co.jp）")
 
@@ -554,7 +554,7 @@ def _render_main_app():
 
     col1, col2, col3 = st.columns([5.7, 1.4, 0.65], vertical_alignment="center")
     with col1:
-        st.markdown('<div class="app-header-title">JP Post 製單系統</div>', unsafe_allow_html=True)
+        st.markdown('<div class="app-header-title">Cross-Border製單系統</div>', unsafe_allow_html=True)
     with col2:
         if picture:
             st.markdown(
@@ -1335,7 +1335,12 @@ def _render_main_app():
     required_id_warnings = _required_id_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    preview_tab, guide_tab, diagnostics_tab, picking_tab = st.tabs(["待打單預覽", "使用說明", "讀取診斷", "跨境揀貨單"])
+    picking_tab, preview_tab, guide_tab, diagnostics_tab = st.tabs(["跨境揀貨單", "郵局待打單", "使用說明", "讀取診斷"])
+
+    with picking_tab:
+        from features.picking_labels import render_picking_label_tab
+
+        render_picking_label_tab()
 
     with preview_tab:
         toolbar_info_cols = st.columns([1.65, .95, 1.05, 1.08, 2.0], gap="small", vertical_alignment="center")
@@ -1716,7 +1721,7 @@ def _render_main_app():
                 with st.expander("🔧 詳細除錯日誌"):
                     st.code("\n".join(log_lines[-200:]), language="text")
     with guide_tab:
-        st.markdown("# JP Post 製單系統使用說明")
+        st.markdown("# Cross-Border製單系統使用說明")
         st.markdown(
             """
 本系統是公司內部使用的日本郵政製單工具。
@@ -1742,7 +1747,7 @@ def _render_main_app():
 
 基本操作流程如下：
 
-1. 進入系統後，打開「待打單預覽」頁籤
+1. 進入系統後，打開「郵局待打單」頁籤
 2. 檢查目前待製單訂單
 3. 視需要調整 **Name、TransType、PRC ID、PCCC、HS Code、Value、Quantity** 等欄位
 4. 勾選本批要製單的訂單
@@ -1752,9 +1757,9 @@ def _render_main_app():
 8. 系統下載 PDF 並上傳至指定 Google Drive
 9. 系統將 tracking number 與相關結果回填至指定 Google Sheets
 
-## 三、待打單預覽
+## 三、郵局待打單
 
-「待打單預覽」頁籤會顯示目前可製單的訂單。
+「郵局待打單」頁籤會顯示目前可製單的訂單。
 
 每筆訂單會顯示以下資訊：
 
@@ -2056,12 +2061,6 @@ PDF 會上傳至指定 Google Drive 資料夾。
                 st.code("\n".join(visible_pending_logs), language="text")
         else:
             st.info("目前沒有待製單讀取診斷資料。")
-
-    with picking_tab:
-        from features.picking_labels import render_picking_label_tab
-
-        render_picking_label_tab()
-
 
     if is_running:
         time.sleep(2)

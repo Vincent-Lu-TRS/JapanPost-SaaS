@@ -76,9 +76,9 @@ def _orders_to_dataframe(orders: list[PickingOrder], selected_rows: set[int]) ->
                 "注文日": order.order_date,
                 "訂單來源": order.order_source,
                 "國際物流方式": order.logistics_method,
-                "item count": len(order.items),
-                "PDF page count": estimate_total_pages([order]),
-                "warnings": "無商品資料" if not order.items else "",
+                "商品數": len(order.items),
+                "PDF 頁數": estimate_total_pages([order]),
+                "提醒": "無商品資料" if not order.items else "",
                 "QR內容": order.qr_content or order.order_no,
                 "來源列號": order.source_row_number,
             }
@@ -178,7 +178,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
 def render_picking_label_tab() -> None:
     st.subheader("跨境揀貨單")
     st.caption("成功產生並上傳 Drive 後，會將來源表 L 欄「製單後勾選」改為 TRUE，避免下次重複製作。")
-    st.info("列印設定：PDF 尺寸為 100mm x 150mm。請用實際大小 / 100% 列印，不要選擇 fit-to-page。正式使用前請用手機掃描 QR code 確認可讀。")
+    st.info("列印設定：PDF 為 100mm × 150mm。請用實際大小 / 100% 列印，勿選 fit-to-page；正式使用前請掃描 QR code 確認可讀。")
 
     if "picking_orders" not in st.session_state:
         try:
@@ -194,18 +194,20 @@ def render_picking_label_tab() -> None:
 
     summary = build_picking_label_summary(orders)
     selected_summary = build_picking_label_summary(selected_orders)
-    metric_cols = st.columns(5)
-    metric_cols[0].metric("source sheet", summary["source_sheet"])
-    metric_cols[1].metric("order count", summary["order_count"])
-    metric_cols[2].metric("item count", summary["item_count"])
-    metric_cols[3].metric("estimated PDF pages", selected_summary["estimated_pdf_pages"])
-    metric_cols[4].metric("最後讀取", st.session_state.get("picking_loaded_at", "-"))
-    st.caption(f"filter condition: {summary['filter_condition']}")
-    with st.expander("QR內容 / debug summary"):
+    st.caption(f"來源表：{summary['source_sheet']}")
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("待製單訂單", summary["order_count"])
+    metric_cols[1].metric("商品總數", summary["item_count"])
+    metric_cols[2].metric("預估 PDF 頁數", selected_summary["estimated_pdf_pages"])
+    metric_cols[3].metric("最後讀取", st.session_state.get("picking_loaded_at", "-"))
+    st.caption("篩選條件：K 訂單狀態 = 可出貨，且 L 製單後勾選 != TRUE")
+    with st.expander("QR內容 / debug summary", expanded=False):
         st.json(selected_summary)
 
-    for warning in warnings:
-        st.warning(warning)
+    if warnings:
+        with st.expander("系統限制與來源欄位狀態", expanded=False):
+            for warning in warnings:
+                st.warning(warning)
 
     actions = st.columns(3)
     if actions[0].button("重新讀取", use_container_width=True):
@@ -214,27 +216,49 @@ def render_picking_label_tab() -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"重新讀取失敗：{exc}")
-    if actions[1].button("全選", use_container_width=True):
+    if actions[1].button("全選", use_container_width=True, disabled=not orders):
         st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
         st.rerun()
-    if actions[2].button("取消全選", use_container_width=True):
+    if actions[2].button("取消全選", use_container_width=True, disabled=not orders):
         st.session_state["picking_selected_rows"] = set()
         st.rerun()
 
-    df = _orders_to_dataframe(orders, selected_rows)
-    edited_df = st.data_editor(
-        df,
-        hide_index=True,
-        use_container_width=True,
-        disabled=[col for col in df.columns if col != "選取"],
-        column_config={"選取": st.column_config.CheckboxColumn("選取")},
-        key="picking_order_editor",
-    )
-    selected_orders = _selected_orders_from_editor(orders, edited_df)
+    if not orders:
+        st.info(
+            "目前沒有符合條件的待製單訂單。\n\n"
+            "條件：K 訂單狀態 = 可出貨，且 L 製單後勾選 != TRUE。"
+        )
+        with st.expander("可能原因", expanded=False):
+            st.markdown(
+                "- 來源表目前沒有可出貨訂單\n"
+                "- 已製單訂單已被 L 欄 TRUE 排除\n"
+                "- Streamlit secrets 指向錯誤來源表\n"
+                "- service account 權限不足"
+            )
+    else:
+        df = _orders_to_dataframe(orders, selected_rows)
+        edited_df = st.data_editor(
+            df,
+            hide_index=True,
+            use_container_width=True,
+            disabled=[col for col in df.columns if col != "選取"],
+            column_config={"選取": st.column_config.CheckboxColumn("選取")},
+            key="picking_order_editor",
+        )
+        selected_orders = _selected_orders_from_editor(orders, edited_df)
 
     pdf_actions = st.columns(2)
-    if pdf_actions[0].button("預覽 PDF", use_container_width=True):
+    has_selection = bool(selected_orders)
+    if pdf_actions[0].button("預覽 PDF", use_container_width=True, disabled=not has_selection):
         _preview_pdf(selected_orders)
 
-    if pdf_actions[1].button("產生揀貨單並儲存到 Google Drive", type="primary", use_container_width=True):
+    with pdf_actions[1]:
+        st.caption("成功上傳 Drive 後，才會將來源表 L 欄改為 TRUE。")
+    generate_type = "primary" if has_selection else "secondary"
+    if pdf_actions[1].button(
+        "產生揀貨單並儲存到 Google Drive",
+        type=generate_type,
+        use_container_width=True,
+        disabled=not has_selection,
+    ):
         _generate_and_upload(selected_orders)
