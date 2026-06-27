@@ -103,6 +103,7 @@ def _anchored_duplicate_header(max_items=2):
 def _anchored_duplicate_row(
     old_order_no="old-c-column",
     order_no="new-o-column",
+    logistics="郵便局",
     status="可出貨",
     done="未製單",
     max_items=2,
@@ -124,7 +125,7 @@ def _anchored_duplicate_row(
         "2026/06/27",
         "Official website - imy Shop",
         order_no,
-        "郵便局",
+        logistics,
     ]
     items = items if items is not None else [("TRSN8688", "商品一", "4901234567890", "2", "本日着予定")]
     for idx in range(max_items):
@@ -300,10 +301,43 @@ class PickingLabelParsingTests(unittest.TestCase):
     def test_parse_applies_shipping_deadline_lookup(self):
         orders, _warnings = parse_picking_label_candidates(
             [_header(max_items=1), _row(order_no="imy2035810", max_items=1)],
-            shipping_deadlines={"imy2035810": "2026/07/03"},
+            shipping_deadlines={"imy2035810": "2026/07/03 00:00"},
         )
 
-        self.assertEqual(orders[0].shipping_deadline, "2026/07/03")
+        self.assertEqual(orders[0].shipping_deadline, "2026/07/03 00:00")
+
+    def test_parse_filters_candidates_by_anchored_logistics_whitelist(self):
+        values = [_anchored_duplicate_header(max_items=1)]
+        cases = [
+            ("post", "郵便局"),
+            ("sagawa-spaced", "佐川 - SLS"),
+            ("sagawa-compact", "佐川-SLS"),
+            ("sls", "SLS"),
+            ("mls", "MLS"),
+            ("sagawa-ecms", "佐川 - ECMS"),
+            ("ecms-only", "ECMS直通"),
+            ("blank-logistics", ""),
+        ]
+        for order_no, logistics in cases:
+            values.append(_anchored_duplicate_row(order_no=order_no, logistics=logistics, max_items=1))
+
+        orders, _warnings = parse_picking_label_candidates(values)
+
+        self.assertEqual(
+            [order.order_no for order in orders],
+            ["post", "sagawa-spaced", "sagawa-compact", "sls", "mls", "sagawa-ecms"],
+        )
+
+    def test_logistics_filter_uses_p_column_not_earlier_duplicate_logistics(self):
+        values = [
+            _anchored_duplicate_header(max_items=1),
+            _anchored_duplicate_row(order_no="uses-p", logistics="ECMS直通", max_items=1),
+        ]
+        values[1][4] = "郵便局"
+
+        orders, _warnings = parse_picking_label_candidates(values)
+
+        self.assertEqual(orders, [])
 
     def test_parse_uses_anchored_m_to_p_columns_when_headers_are_duplicated(self):
         values = [
@@ -353,8 +387,31 @@ class PickingLabelParsingTests(unittest.TestCase):
         self.assertEqual(included["source_row_number"], 2)
         self.assertEqual(included["m_order_date"], "2026/06/27")
         self.assertEqual(included["o_order_no"], "imy2035810")
+        self.assertEqual(included["raw_p_logistics_method"], "郵便局")
+        self.assertEqual(included["normalized_p_logistics_method"], "郵便局")
         self.assertEqual(included["raw_k_value"], "可出貨")
         self.assertEqual(included["normalized_l_state"], "NOT_DONE")
+
+    def test_diagnostics_reports_logistics_filter_exclusions(self):
+        values = [
+            _anchored_duplicate_header(max_items=1),
+            _anchored_duplicate_row(order_no="allowed", logistics="郵便局", max_items=1),
+            _anchored_duplicate_row(order_no="ecms-only", logistics="ECMS直通", max_items=1),
+            _anchored_duplicate_row(order_no="blank-logistics", logistics="", max_items=1),
+        ]
+        orders, warnings = parse_picking_label_candidates(values)
+
+        diagnostics = build_picking_source_diagnostics(values, orders, warnings)
+
+        self.assertEqual([order.order_no for order in orders], ["allowed"])
+        self.assertEqual(diagnostics["excluded_because_logistics_not_allowed"], 2)
+        self.assertEqual(diagnostics["allowed_logistics_keywords"], ["郵便局", "佐川", "MLS", "SLS"])
+        self.assertEqual(
+            [row["o_order_no"] for row in diagnostics["logistics_filter_exclusions"]],
+            ["ecms-only", "blank-logistics"],
+        )
+        self.assertEqual(diagnostics["logistics_filter_exclusions"][0]["raw_p_logistics_method"], "ECMS直通")
+        self.assertEqual(diagnostics["logistics_filter_exclusions"][0]["normalized_p_logistics_method"], "ECMS直通")
 
 
 class PickingLabelPaginationTests(unittest.TestCase):
@@ -465,12 +522,13 @@ class PickingLabelUiTests(unittest.TestCase):
             ["選取", "注文番号", "注文日", "訂單來源", "國際物流方式", "発送期限"],
         )
 
-    def test_load_orders_does_not_auto_select_all_rows(self):
+    def test_load_orders_auto_selects_all_candidate_rows(self):
         import features.picking_labels as picking_ui
 
         source_values = [
             _anchored_duplicate_header(max_items=1),
             _anchored_duplicate_row(order_no="imy2035810", max_items=1),
+            _anchored_duplicate_row(order_no="imy2035811", logistics="佐川-SLS", max_items=1),
         ]
         status_values = [["A", "B", "訂單編號", "D", "E", "F", "G", "H", "I", "J", "発送期限"]]
         original_load = picking_ui.load_sheet_values
@@ -483,8 +541,12 @@ class PickingLabelUiTests(unittest.TestCase):
 
             picking_ui._load_orders()
 
-            self.assertEqual(len(picking_ui.st.session_state["picking_orders"]), 1)
-            self.assertEqual(picking_ui.st.session_state["picking_selected_rows"], set())
+            orders = picking_ui.st.session_state["picking_orders"]
+            self.assertEqual(len(orders), 2)
+            self.assertEqual(
+                picking_ui.st.session_state["picking_selected_rows"],
+                {order.source_row_number for order in orders},
+            )
         finally:
             picking_ui.load_sheet_values = original_load
             picking_ui.st.session_state = original_session
@@ -594,7 +656,7 @@ class PickingLabelTransactionTests(unittest.TestCase):
         self.assertEqual(summary["estimated_pdf_pages"], 2)
         self.assertEqual(summary["qr_contents"], ["QR1", "QR2"])
 
-    def test_shipping_deadline_lookup_uses_earliest_non_empty_date(self):
+    def test_shipping_deadline_lookup_uses_earliest_non_empty_datetime(self):
         values = [
             ["A", "B", "訂單編號", "D", "E", "F", "G", "H", "I", "J", "発送期限"],
             ["", "", "imy1", "", "", "", "", "", "", "", ""],
@@ -605,11 +667,12 @@ class PickingLabelTransactionTests(unittest.TestCase):
 
         lookup = build_shipping_deadline_lookup(values)
 
-        self.assertEqual(lookup["imy1"], "2026/07/03")
-        self.assertEqual(lookup["imy2"], "2026/07/05")
+        self.assertEqual(lookup["imy1"], "2026/07/03 00:00")
+        self.assertEqual(lookup["imy2"], "2026/07/05 00:00")
 
-    def test_format_shipping_deadline_strips_time_and_handles_blank(self):
-        self.assertEqual(format_shipping_deadline("2026/07/03 00:00:00"), "2026/07/03")
+    def test_format_shipping_deadline_keeps_minutes_and_handles_blank(self):
+        self.assertEqual(format_shipping_deadline("2026/07/03 00:00:00"), "2026/07/03 00:00")
+        self.assertEqual(format_shipping_deadline("2026/07/03"), "2026/07/03 00:00")
         self.assertEqual(format_shipping_deadline(""), "")
 
 

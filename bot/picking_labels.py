@@ -22,6 +22,7 @@ ORDER_NO_COL = 14
 LOGISTICS_COL = 15
 ITEM_START_COL = 16
 ITEM_GROUP_WIDTH = 5
+ALLOWED_LOGISTICS_KEYWORDS = ["郵便局", "佐川", "MLS", "SLS"]
 
 
 @dataclass
@@ -105,6 +106,21 @@ def _normalize_cell_value(value: Any) -> str:
 
 def normalize_status_value(value: Any) -> str:
     return _normalize_cell_value(value)
+
+
+def normalize_logistics_method(value: Any) -> str:
+    return _normalize_cell_value(value)
+
+
+def is_allowed_picking_logistics(value: Any) -> bool:
+    normalized = normalize_logistics_method(value)
+    if not normalized:
+        return False
+    upper_text = normalized.upper()
+    return any(
+        keyword in normalized or keyword in upper_text
+        for keyword in ALLOWED_LOGISTICS_KEYWORDS
+    )
 
 
 def normalize_done_state(value: Any) -> str:
@@ -318,6 +334,8 @@ def parse_picking_label_candidates(
             continue
         if normalize_done_state(row[schema.done_idx] if schema.done_idx < len(row) else "") != "NOT_DONE":
             continue
+        if not is_allowed_picking_logistics(_cell(row, schema.logistics_idx)):
+            continue
         order_no = _cell(row, schema.order_no_idx)
         if not order_no:
             continue
@@ -449,8 +467,10 @@ def build_picking_source_diagnostics(
     excluded_because_done = 0
     excluded_because_order_no_missing = 0
     excluded_because_item_data_missing = 0
+    excluded_because_logistics_not_allowed = 0
     parser_unknown_exclusion_count = 0
     near_candidate_exclusions: list[dict[str, Any]] = []
+    logistics_filter_exclusions: list[dict[str, Any]] = []
     done_samples: list[str] = []
     included_candidate_samples: list[dict[str, Any]] = []
 
@@ -461,6 +481,8 @@ def build_picking_source_diagnostics(
         raw_done = _cell(row, done_idx)
         done_state = normalize_done_state(raw_done_value)
         order_no = _cell(row, order_no_idx)
+        raw_logistics = _cell(row, schema.logistics_idx)
+        normalized_logistics = normalize_logistics_method(raw_logistics)
         item_count = len(_items_from_row(row, item_groups))
         if raw_done not in done_samples:
             done_samples.append(raw_done)
@@ -481,6 +503,23 @@ def build_picking_source_diagnostics(
         elif item_count == 0:
             excluded_because_item_data_missing += 1
             reason = "item data missing"
+        elif not is_allowed_picking_logistics(raw_logistics):
+            excluded_because_logistics_not_allowed += 1
+            reason = "P logistics not allowed"
+            if len(logistics_filter_exclusions) < 20:
+                logistics_filter_exclusions.append(
+                    {
+                        "source_row_number": source_row_number,
+                        "o_order_no": order_no,
+                        "m_order_date": _cell(row, schema.order_date_idx),
+                        "raw_p_logistics_method": raw_logistics,
+                        "normalized_p_logistics_method": normalized_logistics,
+                        "raw_k_value": raw_status,
+                        "normalized_k_value": normalized_status,
+                        "raw_l_value": raw_done,
+                        "normalized_l_state": done_state,
+                    }
+                )
         elif len(included_candidate_samples) < 20:
             included_candidate_samples.append(
                 {
@@ -488,7 +527,8 @@ def build_picking_source_diagnostics(
                     "m_order_date": _cell(row, schema.order_date_idx),
                     "n_order_source": _cell(row, schema.order_source_idx),
                     "o_order_no": order_no,
-                    "p_logistics_method": _cell(row, schema.logistics_idx),
+                    "raw_p_logistics_method": raw_logistics,
+                    "normalized_p_logistics_method": normalized_logistics,
                     "raw_k_value": raw_status,
                     "normalized_k_value": normalized_status,
                     "raw_l_value": raw_done,
@@ -533,9 +573,12 @@ def build_picking_source_diagnostics(
         "excluded_because_done": excluded_because_done,
         "excluded_because_order_no_missing": excluded_because_order_no_missing,
         "excluded_because_item_data_missing": excluded_because_item_data_missing,
+        "excluded_because_logistics_not_allowed": excluded_because_logistics_not_allowed,
+        "allowed_logistics_keywords": ALLOWED_LOGISTICS_KEYWORDS,
         "parser_unknown_exclusion_count": parser_unknown_exclusion_count,
         "done_raw_values_sample": done_samples[:12],
         "near_candidate_exclusions": near_candidate_exclusions,
+        "logistics_filter_exclusions": logistics_filter_exclusions,
         "included_candidate_samples": included_candidate_samples,
         "actual_detected_headers": [_normalize_header_name(value) for value in header if _normalize_header_name(value)],
         "warnings": warnings or [],
@@ -559,11 +602,13 @@ def format_shipping_deadline(value: Any) -> str:
     if not text:
         return ""
     text = text.replace("-", "/")
-    match = re.search(r"(\d{4}/\d{1,2}/\d{1,2})", text)
+    match = re.search(r"(\d{4}/\d{1,2}/\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?", text)
     if not match:
         return text.split()[0]
     year, month, day = match.group(1).split("/")
-    return f"{int(year):04d}/{int(month):02d}/{int(day):02d}"
+    hour = int(match.group(2) or 0)
+    minute = int(match.group(3) or 0)
+    return f"{int(year):04d}/{int(month):02d}/{int(day):02d} {hour:02d}:{minute:02d}"
 
 
 def build_shipping_deadline_lookup(values: list[list[Any]]) -> dict[str, str]:

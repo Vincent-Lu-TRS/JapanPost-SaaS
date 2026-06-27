@@ -71,7 +71,7 @@ def _load_orders() -> None:
     diagnostics["shipping_status_sheet"] = _shipping_status_sheet_name()
     st.session_state["picking_diagnostics"] = diagnostics
     st.session_state["picking_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state["picking_selected_rows"] = set()
+    st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
 
 
 def _orders_to_dataframe(orders: list[PickingOrder], selected_rows: set[int]) -> pd.DataFrame:
@@ -211,9 +211,10 @@ def render_picking_label_tab() -> None:
         <style>
         .picking-status-row {
             display: grid;
-            grid-template-columns: minmax(180px, 0.45fr) minmax(260px, 1fr);
+            grid-template-columns: minmax(180px, 0.35fr) minmax(260px, 1fr);
             gap: 12px;
-            margin: 0.2rem 0 0.75rem;
+            align-items: center;
+            margin: 0.1rem 0 0.6rem;
         }
         .picking-count-panel {
             border: 1px solid rgba(251, 146, 60, 0.32);
@@ -235,21 +236,22 @@ def render_picking_label_tab() -> None:
             margin-top: 0.2rem;
         }
         .picking-loaded-panel {
-            min-height: 58px;
             display: flex;
             align-items: center;
             gap: 0.5rem;
             color: #cbd5e1;
-            font-size: 0.82rem;
+            font-size: 0.9rem;
+            line-height: 1.2;
+            min-height: 28px;
         }
         .picking-loaded-label {
             color: #f59e0b;
-            font-size: 0.82rem;
+            font-size: 0.88rem;
             font-weight: 800;
         }
         .picking-loaded-panel strong {
             color: #f8fafc;
-            font-size: 1rem;
+            font-size: 0.94rem;
             font-weight: 700;
         }
         </style>
@@ -338,6 +340,8 @@ def render_picking_label_diagnostics_panel() -> None:
         "excluded because L indicates done / 已製單": diagnostics.get("excluded_because_done", 0),
         "excluded because 注文番号 missing": diagnostics.get("excluded_because_order_no_missing", 0),
         "excluded because item data missing": diagnostics.get("excluded_because_item_data_missing", 0),
+        "excluded because P logistics not allowed": diagnostics.get("excluded_because_logistics_not_allowed", 0),
+        "allowed logistics keywords": diagnostics.get("allowed_logistics_keywords", []),
         "parser / unknown exclusion count": diagnostics.get("parser_unknown_exclusion_count", 0),
         "actual detected L raw values sample": diagnostics.get("done_raw_values_sample", []),
         "filter condition": diagnostics.get("filter_condition", ""),
@@ -353,6 +357,11 @@ def render_picking_label_diagnostics_panel() -> None:
     if included:
         with st.expander("前 20 筆已納入候選訂單（M:P / K:L）", expanded=False):
             st.dataframe(pd.DataFrame(included), hide_index=True, use_container_width=True)
+
+    logistics_exclusions = diagnostics.get("logistics_filter_exclusions", [])
+    if logistics_exclusions:
+        with st.expander("前 20 筆因物流方式被排除的來源列", expanded=False):
+            st.dataframe(pd.DataFrame(logistics_exclusions), hide_index=True, use_container_width=True)
 
     exclusions = diagnostics.get("near_candidate_exclusions", [])
     if exclusions:
