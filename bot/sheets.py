@@ -384,3 +384,25 @@ def backfill_results(results: list[dict], log_cb=None):
 
     except Exception as e:
         _log(f"❌ 回填失敗: {e}")
+
+
+def load_sheet_values(spreadsheet_id: str, sheet_name: str) -> list[list[str]]:
+    """Load all values from a named worksheet."""
+    client = _get_gspread_client()
+    sh = client.open_by_key(spreadsheet_id)
+    ws = sh.worksheet(sheet_name)
+    return ws.get_all_values()
+
+
+def batch_mark_picking_done(spreadsheet_id: str, sheet_name: str, row_numbers: list[int]) -> None:
+    """Set L column 製單後勾選 to TRUE for the given original sheet rows."""
+    if not row_numbers:
+        return
+    client = _get_gspread_client()
+    sh = client.open_by_key(spreadsheet_id)
+    ws = sh.worksheet(sheet_name)
+    updates = [
+        {"range": f"L{int(row_number)}:L{int(row_number)}", "values": [["TRUE"]]}
+        for row_number in sorted(set(row_numbers))
+    ]
+    ws.batch_update(updates, value_input_option="USER_ENTERED")

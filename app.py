@@ -1335,7 +1335,7 @@ def _render_main_app():
     required_id_warnings = _required_id_warning_lines(df_pending_for_run)
     done = len(job["results"]) if job else 0
 
-    preview_tab, guide_tab, diagnostics_tab = st.tabs(["待打單預覽", "使用說明", "讀取診斷"])
+    preview_tab, guide_tab, diagnostics_tab, picking_tab = st.tabs(["待打單預覽", "使用說明", "讀取診斷", "跨境揀貨單"])
 
     with preview_tab:
         toolbar_info_cols = st.columns([1.65, .95, 1.05, 1.08, 2.0], gap="small", vertical_alignment="center")
@@ -2056,6 +2056,11 @@ PDF 會上傳至指定 Google Drive 資料夾。
                 st.code("\n".join(visible_pending_logs), language="text")
         else:
             st.info("目前沒有待製單讀取診斷資料。")
+
+    with picking_tab:
+        from features.picking_labels import render_picking_label_tab
+
+        render_picking_label_tab()
 
 
     if is_running:
