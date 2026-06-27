@@ -2061,6 +2061,9 @@ PDF 會上傳至指定 Google Drive 資料夾。
                 st.code("\n".join(visible_pending_logs), language="text")
         else:
             st.info("目前沒有待製單讀取診斷資料。")
+        from features.picking_labels import render_picking_label_diagnostics_panel
+
+        render_picking_label_diagnostics_panel()
 
     if is_running:
         time.sleep(2)

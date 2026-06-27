@@ -83,10 +83,29 @@ def _is_unchecked(value: Any) -> bool:
     return text == "" or text.upper() in {"FALSE", "0", "NO", "N"}
 
 
+def _normalize_header_name(value: Any) -> str:
+    text = "" if value is None else str(value)
+    replacements = {
+        "　": "",
+        " ": "",
+        "\n": "",
+        "\r": "",
+        "\t": "",
+        "－": "-",
+        "ー": "-",
+        "―": "-",
+        "‐": "-",
+        "–": "-",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text.strip()
+
+
 def _header_map(header: list[Any]) -> dict[str, int]:
     mapping: dict[str, int] = {}
     for idx, value in enumerate(header):
-        name = str(value).strip()
+        name = _normalize_header_name(value)
         if name and name not in mapping:
             mapping[name] = idx
     return mapping
@@ -102,7 +121,7 @@ def _find_item_groups(header: list[Any]) -> dict[int, dict[str, int]]:
     }
     groups: dict[int, dict[str, int]] = {}
     for idx, raw_name in enumerate(header):
-        name = str(raw_name).strip()
+        name = _normalize_header_name(raw_name)
         for field, pattern in patterns.items():
             match = pattern.match(name)
             if match:
@@ -213,10 +232,86 @@ def filter_orders_by_rows(orders: list[PickingOrder], row_numbers: set[int]) -> 
     return [order for order in orders if order.source_row_number in row_numbers]
 
 
+def resolve_picking_done_row_numbers(values: list[list[Any]], orders: list[PickingOrder]) -> list[int]:
+    """Resolve source rows for writeback, revalidating row numbers by order number."""
+    if not orders:
+        return []
+    if len(values) < 2:
+        raise ValueError("來源表沒有可供回寫的資料列。")
+
+    headers = _header_map(values[0])
+    order_no_idx = headers.get("注文番号", 14)
+    row_by_order_no: dict[str, int] = {}
+    for row_number, row in enumerate(values[1:], start=2):
+        order_no = _cell(row, order_no_idx)
+        if order_no and order_no not in row_by_order_no:
+            row_by_order_no[order_no] = row_number
+
+    resolved: list[int] = []
+    missing: list[str] = []
+    for order in orders:
+        fast_path_order_no = ""
+        fast_path_index = order.source_row_number - 1
+        if 0 < fast_path_index < len(values):
+            fast_path_order_no = _cell(values[fast_path_index], order_no_idx)
+        if fast_path_order_no == order.order_no:
+            resolved.append(order.source_row_number)
+            continue
+        fallback_row = row_by_order_no.get(order.order_no)
+        if fallback_row:
+            resolved.append(fallback_row)
+        else:
+            missing.append(order.order_no)
+
+    if missing:
+        raise ValueError(f"找不到以下注文番号的來源列，已中止 L 欄回寫：{', '.join(missing)}")
+    return sorted(set(resolved))
+
+
+def build_picking_source_diagnostics(
+    values: list[list[Any]],
+    orders: list[PickingOrder],
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    header = values[0] if values else []
+    headers = _header_map(header)
+    item_groups = _find_item_groups(header)
+    max_item_group = max(item_groups.keys(), default=0)
+    missing_headers: list[str] = []
+    fields = [
+        ("sku", "商品SKU{idx}"),
+        ("name", "商品名{idx}"),
+        ("jan", "JAN-{idx}"),
+        ("quantity", "數量{idx}"),
+        ("progress", "入荷進捗{idx}"),
+    ]
+    for idx in range(1, ITEMS_PER_PAGE + 1):
+        group = item_groups.get(idx, {})
+        for field, template in fields:
+            if field not in group:
+                missing_headers.append(template.format(idx=idx))
+
+    data_row_count = max(len(values) - 1, 0)
+    return {
+        "source_sheet": PICKING_SOURCE_SHEET_NAME,
+        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = FALSE",
+        "status_column": "訂單狀態" if "訂單狀態" in headers else "K",
+        "done_column": "製單後勾選" if "製單後勾選" in headers else "L",
+        "detected_item_groups": sorted(item_groups.keys()),
+        "max_item_group": max_item_group,
+        "missing_item_headers": missing_headers if max_item_group < ITEMS_PER_PAGE else [],
+        "candidate_order_count": len(orders),
+        "excluded_count": max(data_row_count - len(orders), 0),
+        "actual_detected_headers": [_normalize_header_name(value) for value in header if _normalize_header_name(value)],
+        "warnings": warnings or [],
+        "qr_contents": [order.qr_content or order.order_no for order in orders],
+    }
+
+
 def build_picking_label_summary(orders: list[PickingOrder]) -> dict[str, Any]:
     return {
         "source_sheet": PICKING_SOURCE_SHEET_NAME,
-        "filter_condition": "K 訂單狀態 = 可出貨; L 製單後勾選 != TRUE",
+        "filter_condition": "K 訂單狀態 = 可出貨，且 L 製單後勾選 = FALSE",
         "order_count": len(orders),
         "item_count": sum(len(order.items) for order in orders),
         "estimated_pdf_pages": estimate_total_pages(orders),

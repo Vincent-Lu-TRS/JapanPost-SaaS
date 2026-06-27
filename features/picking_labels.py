@@ -19,10 +19,12 @@ from bot.picking_labels import (
     PickingOrder,
     build_shipping_deadline_lookup,
     build_picking_label_summary,
+    build_picking_source_diagnostics,
     estimate_total_pages,
     filter_orders_by_rows,
     generate_picking_labels_transaction,
     parse_picking_label_candidates,
+    resolve_picking_done_row_numbers,
 )
 from bot.picking_pdf import render_picking_labels_pdf
 from bot.sheets import batch_mark_picking_done, load_sheet_values
@@ -63,6 +65,12 @@ def _load_orders() -> None:
     orders, warnings = parse_picking_label_candidates(values, shipping_deadlines=shipping_deadlines)
     st.session_state["picking_orders"] = orders
     st.session_state["picking_warnings"] = warnings
+    diagnostics = build_picking_source_diagnostics(values, orders, warnings)
+    diagnostics["source_spreadsheet_id"] = _picking_source_spreadsheet_id()
+    diagnostics["source_sheet"] = _picking_source_sheet_name()
+    diagnostics["shipping_status_spreadsheet_id"] = _shipping_status_spreadsheet_id()
+    diagnostics["shipping_status_sheet"] = _shipping_status_sheet_name()
+    st.session_state["picking_diagnostics"] = diagnostics
     st.session_state["picking_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
 
@@ -141,7 +149,14 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
             output_dir=tempfile.gettempdir(),
             list_files=lambda prefix: list_drive_files(_picking_output_drive_folder_id(), prefix),
             upload_file=lambda path: upload_file_to_drive(path, _picking_output_drive_folder_id(), "application/pdf"),
-            mark_done=lambda rows: batch_mark_picking_done(_picking_source_spreadsheet_id(), _picking_source_sheet_name(), rows),
+            mark_done=lambda _rows: batch_mark_picking_done(
+                _picking_source_spreadsheet_id(),
+                _picking_source_sheet_name(),
+                resolve_picking_done_row_numbers(
+                    load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name()),
+                    fresh_selected,
+                ),
+            ),
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
     except Exception as exc:
@@ -176,9 +191,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
 
 
 def render_picking_label_tab() -> None:
-    st.subheader("跨境揀貨單")
-    st.caption("成功產生並上傳 Drive 後，會將來源表 L 欄「製單後勾選」改為 TRUE，避免下次重複製作。")
-    st.info("列印設定：PDF 為 100mm × 150mm。請用實際大小 / 100% 列印，勿選 fit-to-page；正式使用前請掃描 QR code 確認可讀。")
+    st.info("列印設定：PDF檔尺寸為 100mm × 150mm，請使用對應Label大小輸出。")
 
     if "picking_orders" not in st.session_state:
         try:
@@ -188,26 +201,71 @@ def render_picking_label_tab() -> None:
             return
 
     orders: list[PickingOrder] = st.session_state.get("picking_orders", [])
-    warnings: list[str] = st.session_state.get("picking_warnings", [])
     selected_rows: set[int] = set(st.session_state.get("picking_selected_rows", set()))
     selected_orders = filter_orders_by_rows(orders, selected_rows)
 
     summary = build_picking_label_summary(orders)
     selected_summary = build_picking_label_summary(selected_orders)
-    st.caption(f"來源表：{summary['source_sheet']}")
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("待製單訂單", summary["order_count"])
-    metric_cols[1].metric("商品總數", summary["item_count"])
-    metric_cols[2].metric("預估 PDF 頁數", selected_summary["estimated_pdf_pages"])
-    metric_cols[3].metric("最後讀取", st.session_state.get("picking_loaded_at", "-"))
-    st.caption("篩選條件：K 訂單狀態 = 可出貨，且 L 製單後勾選 != TRUE")
-    with st.expander("QR內容 / debug summary", expanded=False):
-        st.json(selected_summary)
-
-    if warnings:
-        with st.expander("系統限制與來源欄位狀態", expanded=False):
-            for warning in warnings:
-                st.warning(warning)
+    st.markdown(
+        """
+        <style>
+        .picking-status-row {
+            display: grid;
+            grid-template-columns: minmax(180px, 0.55fr) minmax(220px, 1fr);
+            gap: 12px;
+            margin: 0.2rem 0 0.75rem;
+        }
+        .picking-count-panel {
+            border: 1px solid rgba(251, 146, 60, 0.32);
+            border-radius: 10px;
+            background: rgba(24, 24, 27, 0.86);
+            padding: 0.62rem 0.78rem;
+        }
+        .picking-count-label {
+            color: #f59e0b;
+            font-size: 0.82rem;
+            font-weight: 800;
+            line-height: 1.1;
+        }
+        .picking-count-value {
+            color: #f8fafc;
+            font-size: 2.1rem;
+            font-weight: 900;
+            line-height: 1;
+            margin-top: 0.2rem;
+        }
+        .picking-loaded-panel {
+            min-height: 58px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            color: #cbd5e1;
+            font-size: 0.82rem;
+        }
+        .picking-loaded-panel strong {
+            color: #f8fafc;
+            font-size: 1rem;
+            font-weight: 700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="picking-status-row">
+            <div class="picking-count-panel">
+                <div class="picking-count-label">待製單訂單</div>
+                <div class="picking-count-value">{summary["order_count"]}</div>
+            </div>
+            <div class="picking-loaded-panel">
+                <span>最後讀取</span>
+                <strong>{st.session_state.get("picking_loaded_at", "-")}</strong>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     actions = st.columns(3)
     if actions[0].button("重新讀取", use_container_width=True):
@@ -224,17 +282,7 @@ def render_picking_label_tab() -> None:
         st.rerun()
 
     if not orders:
-        st.info(
-            "目前沒有符合條件的待製單訂單。\n\n"
-            "條件：K 訂單狀態 = 可出貨，且 L 製單後勾選 != TRUE。"
-        )
-        with st.expander("可能原因", expanded=False):
-            st.markdown(
-                "- 來源表目前沒有可出貨訂單\n"
-                "- 已製單訂單已被 L 欄 TRUE 排除\n"
-                "- Streamlit secrets 指向錯誤來源表\n"
-                "- service account 權限不足"
-            )
+        st.info("目前沒有符合條件的待製單訂單。")
     else:
         df = _orders_to_dataframe(orders, selected_rows)
         edited_df = st.data_editor(
@@ -262,3 +310,44 @@ def render_picking_label_tab() -> None:
         disabled=not has_selection,
     ):
         _generate_and_upload(selected_orders)
+
+
+def render_picking_label_diagnostics_panel() -> None:
+    st.markdown("### 跨境揀貨單")
+    diagnostics = st.session_state.get("picking_diagnostics")
+    if not diagnostics:
+        st.info("尚未讀取跨境揀貨單資料。請先打開「跨境揀貨單」頁籤或按「重新讀取」。")
+        return
+
+    meta_rows = {
+        "source sheet name": diagnostics.get("source_sheet", ""),
+        "source spreadsheet id": diagnostics.get("source_spreadsheet_id", ""),
+        "shipping status sheet": diagnostics.get("shipping_status_sheet", ""),
+        "detected K status column": diagnostics.get("status_column", ""),
+        "detected L done column": diagnostics.get("done_column", ""),
+        "detected item groups": diagnostics.get("detected_item_groups", []),
+        "max item group": diagnostics.get("max_item_group", 0),
+        "candidate order count": diagnostics.get("candidate_order_count", 0),
+        "excluded count": diagnostics.get("excluded_count", 0),
+        "filter condition": diagnostics.get("filter_condition", ""),
+    }
+    st.json(meta_rows)
+
+    warnings = diagnostics.get("warnings", [])
+    if warnings:
+        with st.expander("來源欄位 / 系統限制警告", expanded=False):
+            for warning in warnings:
+                st.warning(warning)
+
+    missing_headers = diagnostics.get("missing_item_headers", [])
+    if missing_headers:
+        with st.expander("缺少的 10 組商品欄位", expanded=False):
+            st.write(missing_headers)
+
+    with st.expander("QR / debug summary", expanded=False):
+        st.json(
+            {
+                "qr_contents": diagnostics.get("qr_contents", []),
+                "actual_detected_headers": diagnostics.get("actual_detected_headers", []),
+            }
+        )

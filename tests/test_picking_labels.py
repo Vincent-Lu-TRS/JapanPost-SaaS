@@ -18,6 +18,7 @@ sys.modules.setdefault("googleapiclient.http", types.SimpleNamespace(MediaIoBase
 from bot.picking_labels import (
     PickingItem,
     PickingOrder,
+    build_picking_source_diagnostics,
     build_shipping_deadline_lookup,
     build_picking_pdf_pages,
     build_picking_label_summary,
@@ -25,6 +26,7 @@ from bot.picking_labels import (
     generate_picking_labels_transaction,
     estimate_total_pages,
     parse_picking_label_candidates,
+    resolve_picking_done_row_numbers,
 )
 from bot.picking_pdf import (
     can_fit_items_on_page,
@@ -109,6 +111,38 @@ class PickingLabelParsingTests(unittest.TestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(len(orders[0].items), 10)
         self.assertEqual(orders[0].items[-1].sku, "SKU10")
+        self.assertEqual(warnings, [])
+
+    def test_normalized_headers_detect_wrapped_ten_item_groups(self):
+        header = [
+            "注文番号",
+            "訂單狀態",
+            "製單後勾選",
+            "注文日",
+            "訂單來源",
+            "國際物流方式",
+        ]
+        for idx in range(1, 11):
+            header.extend([
+                f"商品\nSKU {idx}",
+                f"商品 名　{idx}",
+                f"JAN － {idx}",
+                f"數量 {idx}",
+                f"入荷 進捗 {idx}",
+            ])
+        row = _row(
+            order_no="imy10",
+            done="FALSE",
+            max_items=10,
+            items=[("SKU10", "商品十", "JAN10", "1", "本日着予定")],
+        )
+
+        orders, warnings = parse_picking_label_candidates([header, row])
+        diagnostics = build_picking_source_diagnostics([header, row], orders, warnings)
+
+        self.assertEqual(len(orders[0].items), 1)
+        self.assertEqual(diagnostics["max_item_group"], 10)
+        self.assertEqual(diagnostics["missing_item_headers"], [])
         self.assertEqual(warnings, [])
 
     def test_parse_falls_back_to_k_l_columns_when_headers_are_missing(self):
@@ -299,6 +333,16 @@ class PickingLabelTransactionTests(unittest.TestCase):
         self.assertEqual(result.drive_file["id"], "file-id")
         self.assertIn("writeback failed", result.error)
 
+    def test_resolve_done_rows_revalidates_source_row_and_falls_back_to_order_number(self):
+        values = [
+            _header(max_items=1),
+            _row(order_no="wrong-order", max_items=1),
+            _row(order_no="imy-selected", done="FALSE", max_items=1),
+        ]
+        order = PickingOrder(2, "6/27/2026", "imy Shop", "imy-selected", "郵便局", [PickingItem("SKU", "商品", "", "1", "")])
+
+        self.assertEqual(resolve_picking_done_row_numbers(values, [order]), [3])
+
     def test_summary_reports_filter_counts_pages_and_qr_content(self):
         orders = [
             PickingOrder(22, "6/27/2026", "imy Shop", "imy1", "郵便局", [PickingItem("SKU1", "商品", "", "1", "")], qr_content="QR1"),
@@ -308,7 +352,7 @@ class PickingLabelTransactionTests(unittest.TestCase):
         summary = build_picking_label_summary(orders)
 
         self.assertEqual(summary["source_sheet"], "南巽出貨Label")
-        self.assertEqual(summary["filter_condition"], "K 訂單狀態 = 可出貨; L 製單後勾選 != TRUE")
+        self.assertEqual(summary["filter_condition"], "K 訂單狀態 = 可出貨，且 L 製單後勾選 = FALSE")
         self.assertEqual(summary["order_count"], 2)
         self.assertEqual(summary["item_count"], 2)
         self.assertEqual(summary["estimated_pdf_pages"], 2)
