@@ -1378,16 +1378,28 @@ def _render_main_app():
         with toolbar_action_cols[2]:
             btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
             if st.button(btn_label, type="primary",
-                         disabled=(is_running or pending_count == 0 or selected_count == 0), width="stretch"):
+                         disabled=(
+                             is_running
+                             or pending_count == 0
+                             or selected_count == 0
+                             or bool(zero_value_warnings)
+                             or bool(required_id_warnings)
+                         ), width="stretch"):
                 if df_pending.empty:
                     st.warning("沒有符合條件的待打單資料")
                 elif df_pending_for_run.empty:
                     st.warning("目前未選取任何訂單")
                 else:
-                    st.session_state["pending_start_requested"] = True
-                    if hasattr(st, "toast"):
-                        st.toast("請確認本次製單")
-                    st.rerun()
+                    ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
+                    if ok:
+                        st.session_state["job_launching"] = True
+                        if hasattr(st, "toast"):
+                            st.toast("✅ 已啟動自動製單")
+                        st.rerun()
+                    elif reason == "batch_running":
+                        st.error("同一批製單已在執行中，已阻止重複啟動。")
+                    else:
+                        st.error("任務執行中，請稍候")
         with toolbar_action_cols[3]:
             if is_running:
                 if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
@@ -1613,37 +1625,6 @@ def _render_main_app():
                     st.error("有品項 Value 為 0，請先修正：" + "；".join(final_zero_warnings[:5]))
                 if final_required_warnings:
                     st.error("；".join(final_required_warnings[:5]))
-                if st.session_state.get("pending_start_requested"):
-                    st.markdown(
-                        '<div class="running-panel">'
-                        f'<div class="running-title">確認本次製單｜{len(df_pending_for_run)} 筆</div>'
-                        '<div class="running-detail">請確認上方勾選與欄位內容正確後再啟動。</div>'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
-                    confirm_cols = st.columns([1.0, 1.0, 4.0], gap="small")
-                    with confirm_cols[0]:
-                        if st.button(
-                            "🚀 確認開始製單",
-                            type="primary",
-                            width="stretch",
-                            disabled=df_pending_for_run.empty or bool(final_zero_warnings) or bool(final_required_warnings),
-                            key="confirm_start_job",
-                        ):
-                            ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
-                            if ok:
-                                st.session_state.pop("pending_start_requested", None)
-                                if hasattr(st, "toast"):
-                                    st.toast("✅ 已啟動自動製單")
-                                st.rerun()
-                            elif reason == "batch_running":
-                                st.error("同一批製單已在執行中，已阻止重複啟動。")
-                            else:
-                                st.error("任務執行中，請稍候")
-                    with confirm_cols[1]:
-                        if st.button("取消", width="stretch", key="cancel_start_job"):
-                            st.session_state.pop("pending_start_requested", None)
-                            st.rerun()
                 if len(df_pending) > editable_count:
                     st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
         else:
