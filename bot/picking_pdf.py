@@ -25,6 +25,8 @@ from bot.picking_labels import (
 )
 
 PAGE_SIZE = portrait((100 * mm, 150 * mm))
+HEADER_HEIGHT_MM = 21
+ORDER_Y_FROM_TOP_MM = 15.0
 FONT_NAME = "PickingLabelCJK"
 FALLBACK_FONT = "HeiseiKakuGo-W5"
 FONT_BOLD = FONT_NAME
@@ -185,6 +187,28 @@ def _fit_lines(text: str, max_chars: int, max_lines: int) -> list[str]:
     return lines or [""]
 
 
+def _normalize_progress_text(text: str) -> str:
+    normalized = str(text or "").replace("　", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    date_match = re.match(r"^(\d{1,2}/\d{1,2})", normalized)
+    if date_match and normalized.endswith("着予定"):
+        suffix = normalized[len(date_match.group(1)):].strip()
+        if suffix == "着予定":
+            return f"{date_match.group(1)}着予定"
+    return normalized
+
+
+def _plan_progress_lines(text: str, font: str, font_size: float, max_width: float) -> list[str]:
+    normalized = _normalize_progress_text(text)
+    if not normalized:
+        return []
+    if re.fullmatch(r"\d{1,2}/\d{1,2}着予定", normalized) and pdfmetrics.stringWidth(normalized, font, font_size) <= max_width:
+        return [normalized]
+    if normalized in {"本日着予定", "現貨"} and pdfmetrics.stringWidth(normalized, font, font_size) <= max_width:
+        return [normalized]
+    return _fit_lines(normalized, max_chars=5, max_lines=2)
+
+
 def _draw_centered(c: canvas.Canvas, text: str, x: float, y: float, width: float, font_size: float, font: str | None = None) -> None:
     font = font or FONT_NAME
     c.setFont(font, font_size)
@@ -327,6 +351,8 @@ def plan_item_text_layout(item: PickingItem, row_height_points: float, name_widt
             break
         name_font_size -= 0.5
     lines = _wrap_to_width(item.name, FONT_NAME, max(name_font_size, minimum), name_width_points - 6, max_name_lines)
+    progress_font_size = 8 if row_height_points >= 70 else 7.2 if row_height_points >= 45 else 6.5
+    progress_lines = _plan_progress_lines(item.progress, FONT_BOLD, progress_font_size, 16 * mm)
     return {
         "sku_text": item.sku,
         "name_lines": lines,
@@ -336,7 +362,8 @@ def plan_item_text_layout(item: PickingItem, row_height_points: float, name_widt
         "quantity": item.quantity,
         "quantity_font_size": 25 if row_height_points >= 70 else 20 if row_height_points >= 45 else 14.0,
         "progress": item.progress,
-        "progress_font_size": 8 if row_height_points >= 70 else 7.2 if row_height_points >= 45 else 6.5,
+        "progress_lines": progress_lines,
+        "progress_font_size": progress_font_size,
         "sku_font_size": 11 if row_height_points >= 70 else 9.5 if row_height_points >= 45 else 8.0,
     }
 
@@ -385,11 +412,23 @@ def plan_page_grid(items: list[PickingItem]) -> dict:
     }
 
 
+def plan_header_positions() -> dict[str, float]:
+    source_box_y_from_top = 6.2
+    source_box_h = 4.5
+    return {
+        "header_height_mm": HEADER_HEIGHT_MM,
+        "source_box_top_from_top_mm": source_box_y_from_top,
+        "source_box_bottom_from_top_mm": source_box_y_from_top + source_box_h,
+        "order_y_from_top_mm": ORDER_Y_FROM_TOP_MM,
+        "deadline_y_from_top_mm": HEADER_HEIGHT_MM - 1.5,
+    }
+
+
 def _draw_header(c: canvas.Canvas, page: PickingPdfPage) -> float:
     width, height = PAGE_SIZE
     margin = 2 * mm
     top = height - margin
-    header_h = 21 * mm
+    header_h = HEADER_HEIGHT_MM * mm
     bottom = top - header_h
 
     c.setStrokeColor(colors.black)
@@ -429,7 +468,7 @@ def _draw_header(c: canvas.Canvas, page: PickingPdfPage) -> float:
 
     label = "注文番号："
     c.setFont(FONT_NAME, 8)
-    order_y = top - 15.8 * mm
+    order_y = top - ORDER_Y_FROM_TOP_MM * mm
     label_x = x_main + 2.5 * mm
     c.drawString(label_x, order_y, label)
     order_no_x = label_x + pdfmetrics.stringWidth(label, FONT_NAME, 8)
@@ -524,7 +563,7 @@ def _draw_item_row(c: canvas.Canvas, item: PickingItem, y_top: float, row_h: flo
 
     qty_size = text_layout["quantity_font_size"]
     qty_size = _font_size_to_fit(item.quantity, LATIN_BOLD if _is_latinish(item.quantity) else FONT_BOLD, qty_w - 2 * mm, qty_size, 14)
-    progress_lines = _fit_lines(item.progress, max_chars=5, max_lines=2) if item.progress else []
+    progress_lines = text_layout["progress_lines"]
     progress_size = text_layout["progress_font_size"]
     progress_line_gap = progress_size + 1.2
     progress_block_h = len(progress_lines) * progress_line_gap

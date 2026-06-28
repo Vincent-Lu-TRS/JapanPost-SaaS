@@ -108,7 +108,7 @@ def next_sequence_filename(existing_files: list[dict], today: str | None = None)
     else:
         yymmdd = str(today).replace("-", "")[2:8]
 
-    pattern = re.compile(rf"^{re.escape(yymmdd)}-(\d+)揀貨標籤\.pdf$")
+    pattern = re.compile(rf"^{re.escape(yymmdd)}-(\d+)揀貨標籤(?:\.pdf)?$")
     max_sequence = 0
     for file in existing_files:
         match = pattern.match(str(file.get("name", "")))
@@ -123,11 +123,18 @@ def choose_safe_picking_filename(
     today: str | None = None,
     timestamp: str | None = None,
 ) -> str:
-    """Choose a daily sequence filename, falling back to timestamp on race collision."""
-    candidate = next_sequence_filename(initial_files, today=today)
-    existing_names = {str(file.get("name", "")) for file in rechecked_files}
+    """Choose a daily sequence filename, retrying sequence numbers before timestamp fallback."""
+    combined_files = list(initial_files) + list(rechecked_files)
+    existing_names = {str(file.get("name", "")) for file in combined_files}
+    candidate = next_sequence_filename(combined_files, today=today)
     if candidate not in existing_names:
         return candidate
+
+    for _attempt in range(1000):
+        combined_files.append({"name": candidate})
+        candidate = next_sequence_filename(combined_files, today=today)
+        if candidate not in existing_names:
+            return candidate
 
     from datetime import datetime
 

@@ -35,6 +35,7 @@ from bot.picking_pdf import (
     can_fit_items_on_page,
     get_registered_cjk_font_info,
     select_cjk_font_candidate,
+    plan_header_positions,
     plan_logistics_header_text,
     plan_item_text_layout,
     plan_page_grid,
@@ -478,6 +479,28 @@ class PickingLabelPaginationTests(unittest.TestCase):
 
 
 class PickingLabelDriveTests(unittest.TestCase):
+    def test_next_sequence_filename_starts_at_one_when_no_existing_files(self):
+        self.assertEqual(next_sequence_filename([], today="2026-06-28"), "260628-1揀貨標籤.pdf")
+
+    def test_next_sequence_filename_increments_from_existing_one(self):
+        self.assertEqual(
+            next_sequence_filename([{"name": "260628-1揀貨標籤.pdf"}], today="2026-06-28"),
+            "260628-2揀貨標籤.pdf",
+        )
+
+    def test_next_sequence_filename_uses_highest_existing_sequence_plus_one(self):
+        filename = next_sequence_filename(
+            [
+                {"name": "260628-1揀貨標籤"},
+                {"name": "260628-2揀貨標籤.pdf"},
+                {"name": "260628-5揀貨標籤.pdf"},
+                {"name": "260627-99揀貨標籤.pdf"},
+            ],
+            today="2026-06-28",
+        )
+
+        self.assertEqual(filename, "260628-6揀貨標籤.pdf")
+
     def test_next_sequence_filename_uses_max_existing_daily_sequence(self):
         filename = next_sequence_filename(
             [
@@ -491,7 +514,7 @@ class PickingLabelDriveTests(unittest.TestCase):
 
         self.assertEqual(filename, "260627-8揀貨標籤.pdf")
 
-    def test_choose_safe_filename_uses_timestamp_when_candidate_exists_after_recheck(self):
+    def test_choose_safe_filename_uses_next_sequence_when_candidate_exists_after_recheck(self):
         filename = choose_safe_picking_filename(
             initial_files=[{"name": "260627-1揀貨標籤.pdf"}],
             rechecked_files=[{"name": "260627-2揀貨標籤.pdf"}],
@@ -499,7 +522,24 @@ class PickingLabelDriveTests(unittest.TestCase):
             timestamp="145901",
         )
 
-        self.assertEqual(filename, "260627-145901揀貨標籤.pdf")
+        self.assertEqual(filename, "260627-3揀貨標籤.pdf")
+
+    def test_choose_safe_filename_never_returns_existing_drive_filename(self):
+        existing = [
+            {"name": "260628-1揀貨標籤.pdf"},
+            {"name": "260628-2揀貨標籤.pdf"},
+            {"name": "260628-3揀貨標籤.pdf"},
+        ]
+
+        filename = choose_safe_picking_filename(
+            initial_files=existing[:2],
+            rechecked_files=existing,
+            today="2026-06-28",
+            timestamp="145901",
+        )
+
+        self.assertEqual(filename, "260628-4揀貨標籤.pdf")
+        self.assertNotIn(filename, {file["name"] for file in existing})
 
 
 class PickingLabelUiTests(unittest.TestCase):
@@ -780,6 +820,44 @@ class PickingLabelPdfTests(unittest.TestCase):
 
         self.assertTrue(any("Meiryo" in name or "NotoSans" in name for name in font_names), font_names)
         self.assertFalse(any("Thin" in name for name in font_names), font_names)
+
+    def test_header_positions_move_order_number_slightly_upward(self):
+        positions = plan_header_positions()
+
+        self.assertLess(positions["order_y_from_top_mm"], 15.8)
+        self.assertGreater(positions["order_y_from_top_mm"], positions["source_box_bottom_from_top_mm"] + 1.2)
+        self.assertGreater(positions["deadline_y_from_top_mm"], positions["order_y_from_top_mm"])
+
+    def test_progress_short_date_expected_text_stays_on_one_line_when_it_fits(self):
+        for progress in ["06/27\n着予定", "06/27 着予定", "06/27　着予定"]:
+            with self.subTest(progress=progress):
+                layout = plan_item_text_layout(
+                    PickingItem("TRSN8688", "商品", "4901234567890", "1", progress),
+                    row_height_points=11.2 * 2.83465,
+                    name_width_points=64 * 2.83465,
+                )
+
+                self.assertEqual(layout["progress_lines"], ["06/27着予定"])
+
+    def test_progress_short_values_remain_as_is(self):
+        for progress in ["本日着予定", "現貨"]:
+            with self.subTest(progress=progress):
+                layout = plan_item_text_layout(
+                    PickingItem("TRSN8688", "商品", "4901234567890", "1", progress),
+                    row_height_points=11.2 * 2.83465,
+                    name_width_points=64 * 2.83465,
+                )
+
+                self.assertEqual(layout["progress_lines"], [progress])
+
+    def test_long_progress_text_still_wraps_safely(self):
+        layout = plan_item_text_layout(
+            PickingItem("TRSN8688", "商品", "4901234567890", "1", "06/27 着予定 午後確認"),
+            row_height_points=11.2 * 2.83465,
+            name_width_points=64 * 2.83465,
+        )
+
+        self.assertLessEqual(len(layout["progress_lines"]), 2)
 
     def test_dense_long_name_layout_keeps_readable_minimum_sizes(self):
         layout = plan_item_text_layout(
