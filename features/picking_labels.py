@@ -116,7 +116,7 @@ def _preview_pdf(selected_orders: list[PickingOrder]) -> None:
         data=preview_path.read_bytes(),
         file_name="preview-揀貨標籤.pdf",
         mime="application/pdf",
-        use_container_width=True,
+        width="stretch",
     )
     with st.expander("預覽 / debug 摘要"):
         st.json(build_picking_label_summary(selected_orders))
@@ -172,7 +172,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
             data=output_path.read_bytes(),
             file_name=result.filename,
             mime="application/pdf",
-            use_container_width=True,
+            width="stretch",
         )
         return
 
@@ -281,20 +281,20 @@ def render_picking_label_tab() -> None:
     if actions[0].button(
         "產生揀貨單",
         type=generate_type,
-        use_container_width=True,
+        width="stretch",
         disabled=not has_selection,
     ):
         _generate_and_upload(selected_orders)
-    if actions[1].button("重新讀取", use_container_width=True):
+    if actions[1].button("重新讀取", width="stretch"):
         try:
             _load_orders()
             st.rerun()
         except Exception as exc:
             st.error(f"重新讀取失敗：{exc}")
-    if actions[2].button("全選", use_container_width=True, disabled=not orders):
+    if actions[2].button("全選", width="stretch", disabled=not orders):
         st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
         st.rerun()
-    if actions[3].button("取消全選", use_container_width=True, disabled=not orders):
+    if actions[3].button("取消全選", width="stretch", disabled=not orders):
         st.session_state["picking_selected_rows"] = set()
         st.rerun()
     st.caption("成功上傳雲端資料夾後，才會勾選來源表製單檢核欄。")
@@ -306,7 +306,7 @@ def render_picking_label_tab() -> None:
         edited_df = st.data_editor(
             df,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             disabled=[col for col in df.columns if col != "選取"],
             column_config={"選取": st.column_config.CheckboxColumn("選取")},
             key="picking_order_editor",
@@ -357,22 +357,22 @@ def render_picking_label_diagnostics_panel() -> None:
     duplicate_headers = diagnostics.get("duplicate_header_diagnostics", [])
     if duplicate_headers:
         with st.expander("重複欄名錨定狀態", expanded=False):
-            st.dataframe(pd.DataFrame(duplicate_headers), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(duplicate_headers), hide_index=True, width="stretch")
 
     included = diagnostics.get("included_candidate_samples", [])
     if included:
         with st.expander("前 20 筆已納入候選訂單（M:P / K:L）", expanded=False):
-            st.dataframe(pd.DataFrame(included), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(included), hide_index=True, width="stretch")
 
     logistics_exclusions = diagnostics.get("logistics_filter_exclusions", [])
     if logistics_exclusions:
         with st.expander("前 20 筆因物流方式被排除的來源列", expanded=False):
-            st.dataframe(pd.DataFrame(logistics_exclusions), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(logistics_exclusions), hide_index=True, width="stretch")
 
     exclusions = diagnostics.get("near_candidate_exclusions", [])
     if exclusions:
         with st.expander("前 5 筆接近條件但被排除的來源列", expanded=False):
-            st.dataframe(pd.DataFrame(exclusions), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(exclusions), hide_index=True, width="stretch")
 
     warnings = diagnostics.get("warnings", [])
     if warnings:

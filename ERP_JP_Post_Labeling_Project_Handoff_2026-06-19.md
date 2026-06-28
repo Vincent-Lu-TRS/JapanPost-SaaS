@@ -112,7 +112,7 @@ Production：`https://jppost.streamlit.app/`
 - 製單狀態逐筆顯示。
 - 重點日誌移到底部。
 - 詳細 debug log 放在展開區塊。
-- 移除 Streamlit `use_container_width` 警告，改用 `width="stretch"`。
+- 移除 Streamlit 寬度參數 deprecation 警告，改用 `width="stretch"`。
 
 相關 commit：
 
