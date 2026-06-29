@@ -1,6 +1,6 @@
 # Claude Session Notes — JPPost SaaS
 > 每次 Session 結束前更新。新 Session 開始時**必讀**。
-> 最後更新：2026-06-28（Production handoff）
+> 最後更新：2026-06-29（Production handoff refresh）
 
 ---
 
@@ -11,14 +11,14 @@
 1. `CLAUDE_SESSION_NOTES.md`
 2. `docs/picking-label/current-status.md`，如果存在
 3. `docs/picking-label/production-notes.md`，如果存在
-4. `saas/app.py`
-5. `saas/features/picking_labels.py`
-6. `saas/bot/picking_labels.py`
-7. `saas/bot/picking_pdf.py`
-8. `saas/bot/drive.py`
-9. `saas/bot/sheets.py`
+4. `app.py`
+5. `features/picking_labels.py`
+6. `bot/picking_labels.py`
+7. `bot/picking_pdf.py`
+8. `bot/drive.py`
+9. `bot/sheets.py`
 
-實際主要程式路徑以 `saas/` 為準。本地根目錄可能有舊檔、測試資料、`tmp/` checkout、`PAexample/`、`vchunk_*.txt`、舊 logs；不要把那些當作 production 主程式來源。
+目前可用 production checkout 位於 `tmp/streamlit-deploy-JapanPost-SaaS/`，該 repo 內的主要程式路徑是 repo root 的 `app.py`、`features/`、`bot/`、`tests/`。外層根目錄與 `saas/` 的 `.git` 曾確認不可用；不要把外層舊檔、`PAexample/`、`vchunk_*.txt`、舊 logs 當作 production 主程式來源。
 
 ---
 
@@ -53,7 +53,16 @@
 - `発送期限` 顯示到分鐘，例如 `2026/07/04 00:00`。
 - `06/27\n着予定` 已調整為盡量顯示 `06/27着予定`。
 - `注文番号` 區塊已微幅上移。
-- 字體已加入 Noto CJK / Meiryo fallback 邏輯。
+- 字體已調整為漢字優先 Meiryo / Meiryo Bold，雲端環境保留 Noto CJK fallback。
+- 英文字體統一使用 Arial / Arial-Bold；雲端若沒有 Microsoft Arial，使用 Liberation Sans 作 Arial-compatible fallback。
+- 商品名中的 invisible / bidi / zero-width 控制字元會在 PDF wrapping 前清理，避免 `Maruhachi Mawata` 與 `丸八真綿` 之間出現異常大空白。
+
+### 2026-06-29 重要更新
+
+- `91026d2`：改善郵局待打單 reload 回饋，並調整揀貨標籤字體策略。
+- `4569173`：移除郵局待打單頁面上方常駐讀取摘要列。
+- `5bb6af1`：清理揀貨標籤商品名中的不可見文字控制字元，修正 Maruhachi Mawata / 丸八真綿 間距異常。
+- 本次交接更新：`使用說明` 頁籤已補入跨境揀貨單操作、篩選、寫回、PDF 與檔名規則。
 
 ### Cross-Border 來源表解析規則
 
@@ -155,6 +164,13 @@ L 欄是 Google Sheets checkbox / data validation 自訂值：
 
 這些都放在 `讀取診斷` → `跨境揀貨單`。
 
+`使用說明` 頁籤已加入跨境揀貨單說明，重點包含：
+
+- 基本操作流程：重新讀取、選取、產生揀貨單、上傳 Drive、成功後寫回 L 欄。
+- 篩選條件：K 可出貨、L 未製單、P 物流包含郵便局 / 佐川 / MLS / SLS。
+- PDF 規則：100mm × 150mm、固定 10-row grid、空白列、10 件分頁、QR、発送期限、檔名序號。
+- 安全規則：Drive upload 成功後才寫回 L 欄，寫回值為 `已製單`。
+
 ### 郵局待打單狀態
 
 最近曾發生 regression：
@@ -171,6 +187,11 @@ L 欄是 Google Sheets checkbox / data validation 自訂值：
   2. `重新讀取`
 
 後續不要再把郵局待打單改成兩段式確認，除非使用者明確要求。
+
+2026-06-29 補充：
+
+- 郵局待打單 reload 後會顯示一次性「重新讀取完成」提示。
+- 常駐的「最後讀取 / 基礎候選 / 雙重過濾 / 去重後 / 耗時」摘要列已移除，不要再放回主操作頁，除非使用者明確要求。
 
 ### 非阻塞技術債
 

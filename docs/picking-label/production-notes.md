@@ -1,6 +1,6 @@
 # Cross-Border Picking Label Production Notes
 
-Last updated: 2026-06-28
+Last updated: 2026-06-29
 
 ## Do Not Redesign
 
@@ -16,6 +16,12 @@ Hard constraints:
 - Do not broadly change QR, header, product columns, quantity column, or blank grid rows.
 - Do not change candidate filtering unless a real production bug proves it is necessary.
 - Do not change Drive upload / L-column writeback transaction behavior unless the user explicitly requests it.
+
+Recent accepted polish:
+
+- CJK font preference is Meiryo / Meiryo Bold where available, with Noto CJK fallback.
+- Latin font is Arial / Arial-Bold, with Liberation Sans registered as Arial-compatible fallback on Linux/Streamlit Cloud.
+- Product names are normalized to remove invisible text control characters before wrapping.
 
 ## Production Data Rules
 
@@ -103,6 +109,8 @@ Put diagnostics under `讀取診斷` → `跨境揀貨單`, including:
 - system limits
 - font diagnostics
 
+The `使用說明` tab includes Cross-Border operational guidance. Keep this user-facing documentation aligned when changing the picking-label workflow.
+
 ## Postal Label Tab Boundary
 
 The `郵局待打單` tab is separate from the Cross-Border picking-label feature.
@@ -112,6 +120,8 @@ Recent production fix:
 - Commit `ba549e24094bc8f8380da9a4eb4375cd3a46928a` restored `開始製單` to directly call the existing `_start_job(...)` postal workflow.
 
 Do not change that postal start behavior while working on Cross-Border, and do not add a two-step confirmation to postal start unless the user explicitly requests it.
+
+The main postal operation page should not show a permanent technical read-summary row. If reload details are needed, keep them as one-time feedback or in diagnostics.
 
 ## Non-Blocking Technical Debt
 

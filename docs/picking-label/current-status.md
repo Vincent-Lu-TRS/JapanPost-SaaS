@@ -1,6 +1,6 @@
 # Cross-Border Picking Label Current Status
 
-Last updated: 2026-06-28
+Last updated: 2026-06-29
 
 ## Production
 
@@ -12,17 +12,17 @@ Last updated: 2026-06-28
 
 ## Main Code Paths
 
-Use the `saas/` implementation as the production source of truth:
+Use the production checkout root implementation as the source of truth:
 
-- `saas/app.py`
-- `saas/features/picking_labels.py`
-- `saas/bot/picking_labels.py`
-- `saas/bot/picking_pdf.py`
-- `saas/bot/drive.py`
-- `saas/bot/sheets.py`
-- `saas/tests/`
+- `app.py`
+- `features/picking_labels.py`
+- `bot/picking_labels.py`
+- `bot/picking_pdf.py`
+- `bot/drive.py`
+- `bot/sheets.py`
+- `tests/`
 
-Do not treat `tmp/`, `PAexample/`, `vchunk_*.txt`, old logs, or old txt test data as the current production implementation.
+In this local workspace, the usable production checkout is `tmp/streamlit-deploy-JapanPost-SaaS/`. Do not treat outer broken `.git` folders, `PAexample/`, `vchunk_*.txt`, old logs, or old txt test data as the current production implementation.
 
 ## Tabs
 
@@ -47,7 +47,9 @@ Current tab order:
 - `発送期限` displays to minutes, for example `2026/07/04 00:00`.
 - Short progress text such as `06/27\n着予定` is normalized where possible to `06/27着予定`.
 - `注文番号` block has already been moved slightly upward.
-- CJK font handling includes Noto CJK / Meiryo fallback logic.
+- CJK font handling now prefers Meiryo / Meiryo Bold and keeps Noto CJK fallback for cloud environments.
+- Latin text uses Arial / Arial-Bold. Streamlit Cloud can use Liberation Sans as an Arial-compatible fallback.
+- Invisible / bidi / zero-width control characters are removed from product names before PDF wrapping to avoid abnormal gaps.
 
 ## Source Sheet Anchored Schema
 
@@ -143,6 +145,19 @@ The Cross-Border main page should only show daily operation information:
 
 Do not show QR/debug summary, source row number, item count, PDF pages, warnings, possible causes, parser details, or system limits on the main operation page. Put those under `讀取診斷` → `跨境揀貨單`.
 
+## Usage Guide Tab
+
+The `使用說明` tab now includes Cross-Border picking-label documentation in the same prose/list style as the original postal instructions.
+
+It covers:
+
+- Cross-Border basic flow.
+- Candidate filter rules.
+- L-column checkbox values and writeback timing.
+- PDF layout and print size.
+- Drive filename sequence rules.
+- Diagnostic location under `讀取診斷`.
+
 ## Postal Tab Status
 
 Recent regression fixed:
@@ -159,3 +174,8 @@ Current expected behavior:
   2. `重新讀取`
 
 Do not reintroduce a two-step postal confirmation unless the user explicitly asks for it.
+
+Postal UI note:
+
+- The permanent read-summary row was removed from the main postal page.
+- Keep reload details in transient messages or diagnostics, not as a constant toolbar row.
