@@ -36,6 +36,7 @@ from pending_editor import (
     sanitize_hscode,
 )
 from fx_rates import fetch_usd_jpy_rate
+from postal_ui_feedback import summarize_pending_read_logs
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -1310,6 +1311,8 @@ def _render_main_app():
                     pending_count = len(df_pending)
                     st.session_state.last_pending_df = df_pending
                     st.session_state.last_pending_logs = pending_logs
+                    st.session_state.last_pending_loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    st.session_state.last_pending_read_summary = summarize_pending_read_logs(pending_logs)
                 except Exception as e:
                     st.warning(f"無法讀取 Google Sheets：{e}")
 
@@ -1409,6 +1412,7 @@ def _render_main_app():
                 st.session_state.pop("last_pending_logs", None)
                 st.session_state.pop("pending_refresh_notice", None)
                 st.session_state.pop("pending_selected_by_order", None)
+                st.session_state["pending_manual_reload_requested"] = True
                 st.rerun()
         with toolbar_action_cols[5]:
             reset_all_requested = st.button(
@@ -1422,6 +1426,20 @@ def _render_main_app():
             st.session_state.pop("pending_selected_by_order", None)
             _reset_all_order_editors(df_pending.head(editable_count))
             st.rerun()
+        read_summary = st.session_state.get("last_pending_read_summary") or summarize_pending_read_logs(pending_logs)
+        loaded_at = st.session_state.get("last_pending_loaded_at", "-")
+        summary_cols = st.columns([1.1, .9, .9, .9, 1.0], gap="small")
+        summary_cols[0].caption(f"最後讀取：{loaded_at}")
+        summary_cols[1].caption(f"基礎候選：{read_summary.get('base_count', '-')}")
+        summary_cols[2].caption(f"雙重過濾：{read_summary.get('completed_filter', '-')}")
+        summary_cols[3].caption(f"去重後：{read_summary.get('dedup_filter', '-')}")
+        summary_cols[4].caption(f"耗時：{read_summary.get('elapsed', '-')}")
+        if st.session_state.pop("pending_manual_reload_requested", False) and not is_running:
+            st.success(
+                "重新讀取完成："
+                f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
+                f"耗時 {read_summary.get('elapsed', '-')}。"
+            )
         if not rate and not df_pending.empty:
             st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
         if is_running and zero_value_warnings:
@@ -1429,7 +1447,11 @@ def _render_main_app():
         if is_running and required_id_warnings:
             st.error("；".join(required_id_warnings[:5]))
         if st.session_state.get("pending_refresh_notice") and not is_running:
-            st.info("製單已完成。為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。")
+            result_count = len((job or {}).get("results") or [])
+            st.success(
+                f"製單完成：本次完成 {result_count} 筆。"
+                "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
+            )
         if is_running and job:
             _render_running_progress(job)
             _render_blocking_running_guard(job)

@@ -30,13 +30,17 @@ ORDER_Y_FROM_TOP_MM = 15.0
 FONT_NAME = "PickingLabelCJK"
 FALLBACK_FONT = "HeiseiKakuGo-W5"
 FONT_BOLD = FONT_NAME
-LATIN_BOLD = "Helvetica-Bold"
+LATIN_REGULAR = "Arial"
+LATIN_BOLD = "Arial-Bold"
 CJK_NORMAL_SOURCE = ""
 CJK_BOLD_SOURCE = ""
 CJK_FONT_INFO: dict[str, str | bool] = {}
+LATIN_FONT_INFO: dict[str, str | bool] = {}
 
 
 NORMAL_FONT_CANDIDATES = [
+    {"path": "C:/Windows/Fonts/meiryo.ttc", "source_type": "windows-meiryo", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/meiryo.ttc", "source_type": "windows-meiryo", "subfont_index": 1},
     {"path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
     {"path": "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf", "source_type": "system-noto-cjk", "subfont_index": 0},
     {"path": "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
@@ -44,12 +48,13 @@ NORMAL_FONT_CANDIDATES = [
     {"path": "/usr/share/fonts/truetype/noto/NotoSansTC-Regular.ttf", "source_type": "system-noto-tc", "subfont_index": 0},
     {"path": "C:/Windows/Fonts/NotoSansTC-Regular.ttf", "source_type": "windows-noto-tc", "subfont_index": 0},
     {"path": "C:/Windows/Fonts/NotoSansCJK-Regular.ttc", "source_type": "windows-noto-cjk", "subfont_index": 0},
-    {"path": "C:/Windows/Fonts/meiryo.ttc", "source_type": "windows-meiryo", "subfont_index": 0},
     {"path": "C:/Windows/Fonts/YuGothM.ttc", "source_type": "windows-yugothic", "subfont_index": 0},
     {"path": "C:/Windows/Fonts/YuGothR.ttc", "source_type": "windows-yugothic", "subfont_index": 0},
 ]
 
 BOLD_FONT_CANDIDATES = [
+    {"path": "C:/Windows/Fonts/meiryob.ttc", "source_type": "windows-meiryo", "subfont_index": 0},
+    {"path": "C:/Windows/Fonts/meiryob.ttc", "source_type": "windows-meiryo", "subfont_index": 1},
     {"path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
     {"path": "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf", "source_type": "system-noto-cjk", "subfont_index": 0},
     {"path": "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc", "source_type": "system-noto-cjk", "subfont_index": 0},
@@ -57,8 +62,23 @@ BOLD_FONT_CANDIDATES = [
     {"path": "/usr/share/fonts/truetype/noto/NotoSansTC-Bold.ttf", "source_type": "system-noto-tc", "subfont_index": 0},
     {"path": "C:/Windows/Fonts/NotoSansTC-Bold.ttf", "source_type": "windows-noto-tc", "subfont_index": 0},
     {"path": "C:/Windows/Fonts/NotoSansCJK-Bold.ttc", "source_type": "windows-noto-cjk", "subfont_index": 0},
-    {"path": "C:/Windows/Fonts/meiryob.ttc", "source_type": "windows-meiryo", "subfont_index": 0},
     {"path": "C:/Windows/Fonts/YuGothB.ttc", "source_type": "windows-yugothic", "subfont_index": 0},
+]
+
+LATIN_FONT_CANDIDATES = [
+    {"font_name": "Arial", "path": "C:/Windows/Fonts/arial.ttf", "source_type": "windows-arial"},
+    {"font_name": "Arial", "path": "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf", "source_type": "msttcorefonts-arial"},
+    {"font_name": "Arial", "path": "/usr/share/fonts/truetype/msttcorefonts/arial.ttf", "source_type": "msttcorefonts-arial"},
+    {"font_name": "Arial", "path": "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", "source_type": "liberation-arial-compatible"},
+    {"font_name": "Arial", "path": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "source_type": "liberation-arial-compatible"},
+]
+
+LATIN_BOLD_CANDIDATES = [
+    {"font_name": "Arial-Bold", "path": "C:/Windows/Fonts/arialbd.ttf", "source_type": "windows-arial"},
+    {"font_name": "Arial-Bold", "path": "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf", "source_type": "msttcorefonts-arial"},
+    {"font_name": "Arial-Bold", "path": "/usr/share/fonts/truetype/msttcorefonts/arialbd.ttf", "source_type": "msttcorefonts-arial"},
+    {"font_name": "Arial-Bold", "path": "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf", "source_type": "liberation-arial-compatible"},
+    {"font_name": "Arial-Bold", "path": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "source_type": "liberation-arial-compatible"},
 ]
 
 
@@ -97,6 +117,59 @@ def _register_ttfont(font_name: str, candidate: dict) -> bool:
         return False
 
 
+def _select_latin_font_candidate(candidates: list[dict], fallback_font: str, exists=None) -> dict[str, str | bool]:
+    exists = exists or (lambda path: Path(str(path)).exists())
+    for candidate in candidates:
+        path = str(candidate.get("path", ""))
+        if path and exists(path):
+            return {
+                "font_name": str(candidate.get("font_name", fallback_font)),
+                "path": path,
+                "source_type": str(candidate.get("source_type", "file")),
+                "embedded": True,
+                "fallback_reason": "",
+            }
+    return {
+        "font_name": fallback_font,
+        "path": fallback_font,
+        "source_type": "reportlab-built-in",
+        "embedded": False,
+        "fallback_reason": f"Arial font file was not available; using built-in {fallback_font}.",
+    }
+
+
+def get_registered_latin_font_info(exists=None) -> dict[str, str | bool]:
+    normal = _select_latin_font_candidate(LATIN_FONT_CANDIDATES, "Helvetica", exists=exists)
+    bold = _select_latin_font_candidate(LATIN_BOLD_CANDIDATES, "Helvetica-Bold", exists=exists)
+    return {
+        "regular_font": str(normal["font_name"]),
+        "bold_font": str(bold["font_name"]),
+        "regular_source": str(normal["path"]),
+        "bold_source": str(bold["path"]),
+        "regular_source_type": str(normal["source_type"]),
+        "bold_source_type": str(bold["source_type"]),
+        "regular_embedded": bool(normal["embedded"]),
+        "bold_embedded": bool(bold["embedded"]),
+        "fallback_reason": "; ".join(
+            reason for reason in [str(normal.get("fallback_reason", "")), str(bold.get("fallback_reason", ""))] if reason
+        ),
+    }
+
+
+def _register_latin_fonts() -> None:
+    global LATIN_REGULAR, LATIN_BOLD, LATIN_FONT_INFO
+    info = get_registered_latin_font_info()
+    normal_font = str(info["regular_font"])
+    bold_font = str(info["bold_font"])
+    if bool(info["regular_embedded"]) and normal_font not in pdfmetrics.getRegisteredFontNames():
+        _register_ttfont(normal_font, {"path": info["regular_source"], "subfont_index": 0})
+    if bool(info["bold_embedded"]) and bold_font not in pdfmetrics.getRegisteredFontNames():
+        _register_ttfont(bold_font, {"path": info["bold_source"], "subfont_index": 0})
+    LATIN_REGULAR = normal_font
+    LATIN_BOLD = bold_font
+    LATIN_FONT_INFO = info
+
+
 def _register_font_from_candidates(font_name: str, candidates: list[dict]) -> dict[str, str | int | bool]:
     remaining = list(candidates)
     failures: list[str] = []
@@ -120,6 +193,7 @@ def _register_font_from_candidates(font_name: str, candidates: list[dict]) -> di
 
 def _register_fonts() -> None:
     global FONT_NAME, FONT_BOLD, CJK_NORMAL_SOURCE, CJK_BOLD_SOURCE, CJK_FONT_INFO
+    _register_latin_fonts()
     if FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return
     normal = _register_font_from_candidates(FONT_NAME, NORMAL_FONT_CANDIDATES)
@@ -151,6 +225,11 @@ def _register_fonts() -> None:
         "bold_embedded": bool(bold.get("embedded", False)),
         "embedded": bool(normal.get("embedded", False)),
         "fallback_reason": fallback_reason,
+        "latin_regular_font": str(LATIN_FONT_INFO.get("regular_font", LATIN_REGULAR)),
+        "latin_bold_font": str(LATIN_FONT_INFO.get("bold_font", LATIN_BOLD)),
+        "latin_regular_source": str(LATIN_FONT_INFO.get("regular_source", "")),
+        "latin_bold_source": str(LATIN_FONT_INFO.get("bold_source", "")),
+        "latin_fallback_reason": str(LATIN_FONT_INFO.get("fallback_reason", "")),
     }
 
 
@@ -265,7 +344,7 @@ def _source_header_base_text(source: str) -> str:
 def plan_source_header_text(source: str, width_points: float) -> dict:
     _register_fonts()
     text = _source_header_base_text(source)
-    font = FONT_NAME if not _is_latinish(text) else "Helvetica"
+    font = FONT_NAME if not _is_latinish(text) else LATIN_REGULAR
     preferred = 8.8
     minimum = 6.0
     font_size = _font_size_to_fit(text, font, width_points, preferred, minimum)

@@ -20,3 +20,4 @@ libxi6
 libxrender1
 libxtst6
 fonts-noto-cjk
+fonts-liberation2

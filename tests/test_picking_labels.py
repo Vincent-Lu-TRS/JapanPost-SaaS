@@ -34,6 +34,7 @@ from bot.picking_pdf import (
     FALLBACK_FONT,
     can_fit_items_on_page,
     get_registered_cjk_font_info,
+    get_registered_latin_font_info,
     select_cjk_font_candidate,
     plan_header_positions,
     plan_logistics_header_text,
@@ -780,6 +781,36 @@ class PickingLabelPdfTests(unittest.TestCase):
         self.assertNotEqual(selected["path"], FALLBACK_FONT)
         self.assertTrue(selected["embedded"])
         self.assertEqual(selected["fallback_reason"], "")
+
+    def test_font_preference_uses_meiryo_before_noto_when_available(self):
+        selected = select_cjk_font_candidate(
+            [
+                {"path": "C:/Windows/Fonts/meiryo.ttc", "source_type": "windows-meiryo"},
+                {"path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "source_type": "system-noto"},
+            ],
+            exists=lambda path: path.endswith("meiryo.ttc") or path.endswith("NotoSansCJK-Regular.ttc"),
+        )
+
+        self.assertEqual(selected["path"], "C:/Windows/Fonts/meiryo.ttc")
+        self.assertEqual(selected["source_type"], "windows-meiryo")
+
+    def test_latin_font_prefers_arial(self):
+        info = get_registered_latin_font_info(
+            exists=lambda path: path.endswith("arial.ttf") or path.endswith("arialbd.ttf")
+        )
+
+        self.assertEqual(info["regular_font"], "Arial")
+        self.assertEqual(info["bold_font"], "Arial-Bold")
+
+    def test_latin_font_uses_arial_compatible_linux_font_before_helvetica(self):
+        info = get_registered_latin_font_info(
+            exists=lambda path: "LiberationSans-Regular.ttf" in path or "LiberationSans-Bold.ttf" in path
+        )
+
+        self.assertEqual(info["regular_font"], "Arial")
+        self.assertEqual(info["bold_font"], "Arial-Bold")
+        self.assertIn("liberation", info["regular_source_type"])
+        self.assertEqual(info["fallback_reason"], "")
 
     def test_font_selection_reports_heisei_fallback_when_no_preferred_font_exists(self):
         selected = select_cjk_font_candidate(
