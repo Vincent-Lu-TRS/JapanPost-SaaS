@@ -373,6 +373,18 @@ def plan_logistics_header_text(logistics_method: str) -> dict:
 _TOKEN_PATTERN = re.compile(
     r"[A-Za-z]+(?:[-&/][A-Za-z0-9]+)*|[A-Z]{1,6}(?:-[A-Z0-9]+)+|[A-Z]{1,6}\d{2,}[A-Z0-9]*|\d+(?:\.\d+)?(?:L|ml|ML|cm|mm|kg|g)?|\S"
 )
+_INVISIBLE_TEXT_CONTROLS = dict.fromkeys(
+    ord(ch)
+    for ch in (
+        "\u200b\u200c\u200d\u200e\u200f"
+        "\u202a\u202b\u202c\u202d\u202e"
+        "\u2066\u2067\u2068\u2069\ufeff"
+    )
+)
+
+
+def _normalize_label_text(text: str) -> str:
+    return " ".join(str(text or "").translate(_INVISIBLE_TEXT_CONTROLS).split())
 
 
 def _tokenize_for_wrap(text: str) -> list[str]:
@@ -386,7 +398,7 @@ def _tokenize_for_wrap(text: str) -> list[str]:
 
 
 def _wrap_to_width(text: str, font: str, size: float, max_width: float, max_lines: int) -> list[str]:
-    normalized = " ".join(str(text or "").split())
+    normalized = _normalize_label_text(text)
     if not normalized:
         return [""]
     lines: list[str] = []

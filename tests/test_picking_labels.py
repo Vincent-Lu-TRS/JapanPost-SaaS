@@ -928,6 +928,23 @@ class PickingLabelPdfTests(unittest.TestCase):
             if token in joined.replace("\n", " "):
                 self.assertTrue(any(token in line for line in layout["name_lines"]), token)
 
+    def test_product_name_normalizes_invisible_direction_marks(self):
+        layout = plan_item_text_layout(
+            PickingItem(
+                "TRSN-MARU",
+                "Maruhachi Mawata \u200e\u200e丸八真綿 - 至福の眠りシリーズ",
+                "4901234567890",
+                "1",
+                "本日着予定",
+            ),
+            row_height_points=13 * 2.83465,
+            name_width_points=64 * 2.83465,
+        )
+
+        joined = " ".join(layout["name_lines"])
+        self.assertNotIn("\u200e", joined)
+        self.assertIn("Maruhachi Mawata 丸八真綿", joined)
+
     def test_sparse_layout_keeps_long_name_tail_or_adds_ellipsis(self):
         layout = plan_item_text_layout(
             PickingItem(
