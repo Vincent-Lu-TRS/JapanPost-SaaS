@@ -1427,13 +1427,6 @@ def _render_main_app():
             _reset_all_order_editors(df_pending.head(editable_count))
             st.rerun()
         read_summary = st.session_state.get("last_pending_read_summary") or summarize_pending_read_logs(pending_logs)
-        loaded_at = st.session_state.get("last_pending_loaded_at", "-")
-        summary_cols = st.columns([1.1, .9, .9, .9, 1.0], gap="small")
-        summary_cols[0].caption(f"最後讀取：{loaded_at}")
-        summary_cols[1].caption(f"基礎候選：{read_summary.get('base_count', '-')}")
-        summary_cols[2].caption(f"雙重過濾：{read_summary.get('completed_filter', '-')}")
-        summary_cols[3].caption(f"去重後：{read_summary.get('dedup_filter', '-')}")
-        summary_cols[4].caption(f"耗時：{read_summary.get('elapsed', '-')}")
         if st.session_state.pop("pending_manual_reload_requested", False) and not is_running:
             st.success(
                 "重新讀取完成："
