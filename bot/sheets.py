@@ -5,6 +5,7 @@ Google Sheets 操作模組
 """
 import os
 import logging
+import re
 import time
 import pandas as pd
 import streamlit as st
@@ -106,6 +107,10 @@ def _format_sample(values, limit: int = 8) -> str:
     return ", ".join(shown) + suffix
 
 
+def _looks_like_jp_tracking(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z]{2}\d{9}JP", str(value or "").strip()))
+
+
 def _filter_pending_orders_dataframe(
     df: pd.DataFrame,
     completed_ids: set[str] | None = None,
@@ -147,8 +152,24 @@ def _filter_pending_orders_dataframe(
         )
         shipname_col = "Shipping Name"
 
+    has_target_authority = completed_ids is not None
+    completed_id_set = completed_ids or set()
+    stale_source_status_mask = (
+        df[status_col].map(_looks_like_jp_tracking)
+        & has_target_authority
+        & ~df[order_id_col].isin(completed_id_set)
+    )
+    if stale_source_status_mask.any():
+        stale_rows = df[stale_source_status_mask]
+        _log(
+            "♻️ 來源狀態疑似快取過期，目標表未完成但來源 AU 仍是 tracking，"
+            f"改以待打單處理 {len(stale_rows)} 筆："
+            f"{_format_sample(stale_rows[order_id_col].tolist())}"
+        )
+
+    status_pending_mask = (df[status_col] == "未打單") | stale_source_status_mask
     base_mask = (
-        (df[status_col] == "未打單")
+        status_pending_mask
         & (df[amount_col] != "")
         & (df[check_col].str.upper() != "TRUE")
         & (df[shipname_col] != "")
@@ -168,7 +189,7 @@ def _filter_pending_orders_dataframe(
             f"🔎 基礎篩選排除：{len(excluded)} 筆"
         )
         reason_masks = [
-            ("狀態不是未打單排除", df[status_col] != "未打單"),
+            ("狀態不是未打單排除", ~status_pending_mask),
             ("申告金額空白排除", df[amount_col] == ""),
             ("製單檢核 TRUE 排除", df[check_col].str.upper() == "TRUE"),
             ("Shipping Name 空白排除", df[shipname_col] == ""),
@@ -180,9 +201,8 @@ def _filter_pending_orders_dataframe(
     df_filtered = df[base_mask].copy()
     _log(f"📋 篩選後（未打單+必填）：{len(df_filtered)} 筆")
 
-    completed_ids = completed_ids or set()
-    if completed_ids:
-        completed_mask = df_filtered[order_id_col].isin(completed_ids)
+    if completed_id_set:
+        completed_mask = df_filtered[order_id_col].isin(completed_id_set)
         completed_rows = df_filtered[completed_mask]
         if not completed_rows.empty:
             _log(
@@ -295,7 +315,7 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         )
 
         # ── 🔥 雙重過濾：即時讀取目標表單已完成單號 ──────
-        completed_ids: set[str] = set()
+        completed_ids: set[str] | None = None
         try:
             target_started_at = time.perf_counter()
             sh_target = client.open_by_key(TARGET_SHEET_ID)

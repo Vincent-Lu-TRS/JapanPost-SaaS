@@ -241,6 +241,46 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(any("已在目標表完成而排除" in line and "WhoWhy-Test6" in line for line in logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_treats_stale_source_tracking_as_pending_when_target_missing(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "imy2036360",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "LX324329616JP",
+                    "郵局申告金額(USD)": "11.57",
+                    "製單檢核": "FALSE",
+                    "Shipping Name": "David G Derrick Jr",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                }
+            ]
+        )
+        logs = []
+
+        result = _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
+
+        self.assertEqual(list(result["注文番号(貼上原始資料)"]), ["imy2036360"])
+        self.assertTrue(any("來源狀態疑似快取過期" in line and "imy2036360" in line for line in logs))
+
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_does_not_override_tracking_status_without_target_authority(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "imy2036360",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "LX324329616JP",
+                    "郵局申告金額(USD)": "11.57",
+                    "製單檢核": "FALSE",
+                    "Shipping Name": "David G Derrick Jr",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                }
+            ]
+        )
+
+        result = _filter_pending_orders_dataframe(df, completed_ids=None)
+
+        self.assertTrue(result.empty)
+
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
     def test_filter_pending_orders_logs_base_exclusion_reasons(self):
         df = pd.DataFrame(
             [
