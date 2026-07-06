@@ -1940,9 +1940,11 @@ Toolbar 會顯示：
 
 `PRC ID 110108198309121213`
 
-製單送出時，系統會再組回：
+製單送出時，系統會：
 
-`zhuxiaomu (PRC ID:110108198309121213)`
+1. 將收件人姓名送為 `Name + 注文番号`
+2. 將 PRC ID 放在地址最後方
+3. 依日本郵政欄位長度自動拆分 Address 1 / Address 2 / Address 3
 
 ### 韓國訂單
 
@@ -1956,15 +1958,45 @@ Toolbar 會顯示：
 
 `PCCC P18026936191`
 
-製單送出時，系統會再組回：
+製單送出時，系統會：
 
-`Eunseo Ha (PCCC:P18026936191)`
+1. 將收件人姓名送為 `Name + 注文番号`
+2. 將 PCCC 放在地址最後方
+3. 依日本郵政欄位長度自動拆分 Address 1 / Address 2 / Address 3
+
+例如訂單 `imy2036430`：
+
+`kim sang woo imy2036430`
+
+地址會保留完整 Shipping Street，PCCC 會放在地址最後一行。
+
+### 日本郵政送出格式範例
+
+若 Shipping Street 為：
+
+`3518, Changmil-ro, Miryang-si, Gyeongsangnam-do, Republic of Korea, e-Pyeonhansesang Nanovalley 103-2501`
+
+且 PCCC 為：
+
+`P210006411542`
+
+系統送出時會將姓名與地址整理為：
+
+`Name: kim sang woo imy2036430`
+
+`Address 1: 3518, Changmil-ro, Miryang-si, Gyeongsangnam-do, Republic of Korea,`
+
+`Address 2: e-Pyeonhansesang Nanovalley 103-2501`
+
+`Address 3: PCCC:P210006411542`
 
 ### 顯示規則
 
 1. 只有 CHINA 訂單會顯示 PRC ID 欄位
 2. 只有 KOREA 訂單會顯示 PCCC 欄位
 3. 其他國家不會顯示 PRC ID 或 PCCC 欄位
+4. 日本郵政 Address 2 欄位上限為 80 字，Address 3 欄位上限為 36 字；系統會自動拆行，避免 Shipping Street 被截斷
+5. PRC ID / PCCC 會從 Name 中移出，避免姓名欄過長，但輸出的 Name 仍會保留注文番号
 
 ## 十二、PRC ID / PCCC 必填規則
 

@@ -134,10 +134,20 @@ Frontend display must split these into fields:
 - Other countries:
   - only `Name`
 
-Payload/output must recombine to the Japan Post expected format:
+Japan Post payload/output rules:
 
-- China: `zhuxiaomu (PRC ID:110108198309121213)`
-- Korea: `Eunseo Ha (PCCC:P180026936191)`
+- `addrToBean.nam` must be clean recipient name plus order id.
+  - Example: `kim sang woo imy2036430`
+- PRC ID / PCCC must be removed from the name field before submit.
+- PRC ID / PCCC must be appended at the end of the recipient address.
+- Recipient address must preserve the full Shipping Street.
+- Use `addrToBean.add1`, `addrToBean.add2`, and `addrToBean.add3` to avoid Japan Post field limits.
+  - Observed limits: Address 2 `maxlength=80`, Address 3 `maxlength=36`.
+  - Example:
+    - `addrToBean.add1`: `3518, Changmil-ro, Miryang-si, Gyeongsangnam-do, Republic of Korea,`
+    - `addrToBean.add2`: `e-Pyeonhansesang Nanovalley 103-2501`
+    - `addrToBean.add3`: `PCCC:P210006411542`
+- Do not place PRC ID / PCCC in `addrToBean.sortNum`; observed page context indicates address-book sorting, not customs ID input.
 
 Validation on `開始自動製單`:
 

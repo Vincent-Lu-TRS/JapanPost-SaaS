@@ -70,9 +70,12 @@ Last updated: 2026-06-20 JST
 - Parse:
   - `PRC ID:` and `PRC ID：`
   - `PCCC:` and `PCCC：`
-- Recompose payload:
-  - `Name (PRC ID:value)` for China.
-  - `Name (PCCC:value)` for Korea.
+- Japan Post payload:
+  - Name is sent as clean recipient name plus order id, e.g. `kim sang woo imy2036430`.
+  - PRC ID / PCCC is removed from the name field and appended at the end of the address.
+  - Full `Shipping Street` must be preserved.
+  - Split recipient address across `addrToBean.add1`, `addrToBean.add2`, and `addrToBean.add3` to avoid Japan Post limits.
+  - Keep PRC ID / PCCC in the final address line; do not use `addrToBean.sortNum` for this value.
 - Block start if:
   - China order lacks PRC ID.
   - Korea order lacks PCCC.

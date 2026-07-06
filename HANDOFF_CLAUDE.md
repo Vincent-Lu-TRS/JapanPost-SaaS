@@ -4,6 +4,18 @@
 
 Use `CLAUDE.md` as the current first-read handoff file, and use `memory.md` for durable UI/data preferences. This file contains older but still useful auth and automation context.
 
+## 2026-07-06 Recipient Address / Order ID Update
+
+Current production behavior for China/Korea recipient IDs:
+
+- Frontend still displays clean `Name` plus country-specific `PRC ID` or `PCCC` fields.
+- Japan Post `addrToBean.nam` is submitted as clean name plus order id, e.g. `kim sang woo imy2036430`.
+- PRC ID / PCCC is removed from the name and appended at the end of the recipient address.
+- Full `Shipping Street` must not be truncated.
+- Recipient street is split across `addrToBean.add1`, `addrToBean.add2`, and `addrToBean.add3`.
+- Observed Japan Post limits: Address 2 `maxlength=80`, Address 3 `maxlength=36`.
+- `addrToBean.sortNum` was investigated; captured field context indicated address-book sorting, not the customs ID field. Do not put PCCC there unless future Japan Post evidence says otherwise.
+
 Latest confirmed working commit before the 2026-06-20 documentation handoff:
 
 ```text
