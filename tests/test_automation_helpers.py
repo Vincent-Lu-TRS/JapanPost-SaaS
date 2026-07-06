@@ -40,6 +40,7 @@ from bot.automation import (
     _select_option_value,
     _shipping_profile,
     _summarize_error_text,
+    _summarize_field_context,
     _summarize_forms,
     _summarize_m060800_item_state,
     _summarize_submit_commands,
@@ -1110,6 +1111,24 @@ class AutomationHtmlTests(unittest.TestCase):
         """
 
         self.assertIn("Please enter the total weight", _summarize_error_text(html))
+
+    def test_summarize_field_context_extracts_attrs_and_nearby_label(self):
+        html = """
+        <html><body>
+          <tr>
+            <th>Customs reference number</th>
+            <td><input id="M060505_addrToBean_sortNum" name="addrToBean.sortNum"
+                title="Enter PCCC" maxlength="13" value=""></td>
+          </tr>
+        </body></html>
+        """
+
+        summary = _summarize_field_context(html, ["addrToBean.sortNum"])
+
+        self.assertIn("addrToBean.sortNum", summary)
+        self.assertIn("Customs reference number", summary)
+        self.assertIn("title=Enter PCCC", summary)
+        self.assertIn("maxlength=13", summary)
 
     def test_detects_m060800_item_book_warning_markup(self):
         html = """

@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-07-06-m060505-diagnostics"
+AUTOMATION_BUILD_ID = "2026-07-06-field-context-diagnostics"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -712,6 +712,39 @@ def _summarize_error_text(html: str, limit: int = 6) -> str:
         if len(found) >= limit:
             break
     return " | ".join(found) if found else "-"
+
+
+def _summarize_field_context(html: str, field_names: list[str], window: int = 320) -> str:
+    summaries: list[str] = []
+    source = html or ""
+    for field_name in field_names:
+        match = re.search(
+            rf"<[^>]+\bname=[\"']{re.escape(field_name)}[\"'][^>]*>",
+            source,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            match = re.search(re.escape(field_name), source, flags=re.IGNORECASE)
+        if not match:
+            summaries.append(f"{field_name}: not found")
+            continue
+        start = max(0, match.start() - window)
+        end = min(len(source), match.end() + window)
+        snippet = source[start:end]
+        attrs = []
+        tag = source[match.start():match.end()] if source[match.start():match.end()].startswith("<") else ""
+        for attr in ["id", "title", "placeholder", "maxlength", "class"]:
+            attr_match = re.search(rf"\b{attr}=[\"']([^\"']*)[\"']", tag, flags=re.IGNORECASE)
+            if attr_match:
+                attrs.append(f"{attr}={attr_match.group(1)}")
+        text = re.sub(r"(?is)<(script|style).*?</\1>", " ", snippet)
+        text = re.sub(r"(?is)<[^>]+>", " ", text)
+        text = " ".join(unescape(text).split())
+        if len(text) > 220:
+            text = text[:220] + "..."
+        attr_text = ", ".join(attrs) if attrs else "attrs=-"
+        summaries.append(f"{field_name}: {attr_text}; nearby={text or '-'}")
+    return " | ".join(summaries)
 
 
 def _has_m060800_item_book_warning(html: str) -> bool:
@@ -1746,7 +1779,8 @@ def run_automation(
                 f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                 f"markers={marker_summary}; "
                 f"forms={_summarize_forms(resp.text)}; "
-                f"errors={_summarize_error_text(resp.text)}"
+                f"errors={_summarize_error_text(resp.text)}; "
+                f"field_context={_summarize_field_context(resp.text, ['addrToBean.sortNum', 'addrToBean.add2', 'addrToBean.add3'])}"
             )
             if resp.status_code >= 400:
                 raise RuntimeError(f"M060505 addrToBean submit failed: HTTP {resp.status_code}")
