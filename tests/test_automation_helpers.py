@@ -100,6 +100,13 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertIn("PCCC:P210006411542", lines["addrToBean.add3"])
         self.assertNotIn("PCCC:P210006411542", lines["addrToBean.add2"])
 
+    def test_split_address_lines_without_recipient_id_keeps_street_in_address_2(self):
+        lines = _split_addr_to_bean_address_lines("22331 Circle J Ranch Road", "Santa Clarita")
+
+        self.assertEqual(lines["addrToBean.add1"], "")
+        self.assertEqual(lines["addrToBean.add2"], "22331 Circle J Ranch Road")
+        self.assertEqual(lines["addrToBean.add3"], "Santa Clarita")
+
     def test_with_base_href_inserts_base_inside_head(self):
         html = "<html><head><title>Main</title></head><body>Create New Labels</body></html>"
 

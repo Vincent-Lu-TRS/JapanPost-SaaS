@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-07-06-three-line-address-order-id"
+AUTOMATION_BUILD_ID = "2026-07-06-address2-default-order-id"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -122,15 +122,21 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
     address = " ".join(_clean(address_line).split())
     city_text = " ".join(_clean(city).split())
     address_without_id, recipient_id = _split_recipient_name_and_id(address)
-    add1, overflow = _split_text_at_limit(address_without_id, 80)
-    add2, overflow = _split_text_at_limit(overflow, 80)
-    if recipient_id:
-        if overflow:
-            add2 = " ".join(part for part in [add2, overflow] if part).strip()[:80]
-        add3 = recipient_id[:36]
-    else:
+    if not recipient_id:
+        add2, overflow = _split_text_at_limit(address_without_id, 80)
         add3_source = " ".join(part for part in [overflow, city_text] if part)
         add3, _ = _split_text_at_limit(add3_source, 36)
+        return {
+            "addrToBean.add1": "",
+            "addrToBean.add2": add2,
+            "addrToBean.add3": add3,
+        }
+
+    add1, overflow = _split_text_at_limit(address_without_id, 80)
+    add2, overflow = _split_text_at_limit(overflow, 80)
+    if overflow:
+        add2 = " ".join(part for part in [add2, overflow] if part).strip()[:80]
+    add3 = recipient_id[:36]
     return {
         "addrToBean.add1": add1,
         "addrToBean.add2": add2,
