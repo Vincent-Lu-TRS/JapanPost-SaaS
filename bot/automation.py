@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-07-06-recipient-id-address"
+AUTOMATION_BUILD_ID = "2026-07-06-m060505-diagnostics"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -1710,7 +1710,11 @@ def run_automation(
             _log(
                 "🌐 requests 提交 M060505/addrToBean 收件人 payload："
                 f"command={command}, action={post_target}, name={final_name}, "
-                f"address_id={recipient_fields['recipient_id'] or '-'}, country={country_raw}"
+                f"address_id={recipient_fields['recipient_id'] or '-'}, country={country_raw}, "
+                f"country_value={country_value}, "
+                f"add2_len={len(data.get('addrToBean.add2', ''))}, "
+                f"postal_len={len(data.get('addrToBean.postal', ''))}, "
+                f"tel_len={len(data.get('addrToBean.tel', ''))}"
             )
             resp = req_session.post(
                 post_target,
@@ -1741,7 +1745,8 @@ def run_automation(
                 "🔎 addrToBean response diagnostics："
                 f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                 f"markers={marker_summary}; "
-                f"forms={_summarize_forms(resp.text)}"
+                f"forms={_summarize_forms(resp.text)}; "
+                f"errors={_summarize_error_text(resp.text)}"
             )
             if resp.status_code >= 400:
                 raise RuntimeError(f"M060505 addrToBean submit failed: HTTP {resp.status_code}")
