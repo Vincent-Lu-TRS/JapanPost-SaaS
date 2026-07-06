@@ -31,6 +31,7 @@ from bot.automation import (
     _html_for_playwright_form,
     _has_m060800_item_book_warning,
     _iter_content_items,
+    _format_addr_to_bean_name,
     _prepare_batch_hs_codes,
     _prepare_addr_to_bean_recipient_fields,
     _split_addr_to_bean_address_lines,
@@ -74,18 +75,28 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(fields["address_line"], "Rua Um 20 PRC ID:12345678901")
         self.assertEqual(fields["recipient_id"], "PRC ID:12345678901")
 
+    def test_format_recipient_name_keeps_order_id_but_removes_pccc(self):
+        row = {"Shipping Name": "kim sang woo (PCCC:P210006411542)"}
+
+        self.assertEqual(_format_addr_to_bean_name(row, "imy2036430"), "kim sang woo imy2036430")
+
     def test_split_address_lines_keeps_address_2_and_3_within_japan_post_limits(self):
         address = (
-            "A" * 70
-            + " "
-            + "B" * 30
-            + " PCCC:P210006411542"
+            "3518, Changmil-ro, Miryang-si, Gyeongsangnam-do, Republic of Korea, "
+            "e-Pyeonhansesang Nanovalley 103-2501 PCCC:P210006411542"
         )
 
         lines = _split_addr_to_bean_address_lines(address, "Seoul")
 
+        combined = " ".join(
+            lines[key]
+            for key in ["addrToBean.add1", "addrToBean.add2", "addrToBean.add3"]
+            if lines[key]
+        )
+        self.assertLessEqual(len(lines["addrToBean.add1"]), 80)
         self.assertLessEqual(len(lines["addrToBean.add2"]), 80)
         self.assertLessEqual(len(lines["addrToBean.add3"]), 36)
+        self.assertIn("Nanovalley 103-2501", combined)
         self.assertIn("PCCC:P210006411542", lines["addrToBean.add3"])
         self.assertNotIn("PCCC:P210006411542", lines["addrToBean.add2"])
 
