@@ -33,6 +33,7 @@ from bot.automation import (
     _iter_content_items,
     _prepare_batch_hs_codes,
     _prepare_addr_to_bean_recipient_fields,
+    _split_addr_to_bean_address_lines,
     _resolve_addr_country_value,
     _validate_required_hs_codes,
     _parse_forms,
@@ -72,6 +73,21 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(fields["name"], "Maria Silva")
         self.assertEqual(fields["address_line"], "Rua Um 20 PRC ID:12345678901")
         self.assertEqual(fields["recipient_id"], "PRC ID:12345678901")
+
+    def test_split_address_lines_keeps_address_2_and_3_within_japan_post_limits(self):
+        address = (
+            "A" * 70
+            + " "
+            + "B" * 30
+            + " PCCC:P210006411542"
+        )
+
+        lines = _split_addr_to_bean_address_lines(address, "Seoul")
+
+        self.assertLessEqual(len(lines["addrToBean.add2"]), 80)
+        self.assertLessEqual(len(lines["addrToBean.add3"]), 36)
+        self.assertIn("PCCC:P210006411542", lines["addrToBean.add3"])
+        self.assertNotIn("PCCC:P210006411542", lines["addrToBean.add2"])
 
     def test_with_base_href_inserts_base_inside_head(self):
         html = "<html><head><title>Main</title></head><body>Create New Labels</body></html>"

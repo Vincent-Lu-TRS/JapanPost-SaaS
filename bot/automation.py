@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-07-06-field-context-diagnostics"
+AUTOMATION_BUILD_ID = "2026-07-06-split-recipient-address"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -106,6 +106,35 @@ def _append_recipient_id_to_address(address: str, recipient_id: str) -> str:
     if normalized_id.lower() in cleaned_address.lower():
         return cleaned_address
     return f"{cleaned_address} {normalized_id}"
+
+
+def _split_text_at_limit(text: str, limit: int) -> tuple[str, str]:
+    cleaned = " ".join(_clean(text).split())
+    if len(cleaned) <= limit:
+        return cleaned, ""
+    split_at = cleaned.rfind(" ", 0, limit + 1)
+    if split_at <= 0:
+        split_at = limit
+    return cleaned[:split_at].strip(), cleaned[split_at:].strip()
+
+
+def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict[str, str]:
+    address = " ".join(_clean(address_line).split())
+    city_text = " ".join(_clean(city).split())
+    address_without_id, recipient_id = _split_recipient_name_and_id(address)
+    add2, overflow = _split_text_at_limit(address_without_id, 80)
+    if recipient_id:
+        room_for_prefix = max(0, 36 - len(recipient_id) - 1)
+        prefix_source = overflow or city_text
+        prefix = prefix_source[:room_for_prefix].strip()
+        add3 = " ".join(part for part in [prefix, recipient_id] if part)
+    else:
+        add3_source = " ".join(part for part in [overflow, city_text] if part)
+        add3, _ = _split_text_at_limit(add3_source, 36)
+    return {
+        "addrToBean.add2": add2,
+        "addrToBean.add3": add3,
+    }
 
 
 def _prepare_addr_to_bean_recipient_fields(row) -> dict[str, str]:
@@ -1714,6 +1743,10 @@ def run_automation(
             country_code = resolve_country_code(country_raw, COUNTRY_CODE_MAP)
             recipient_fields = _prepare_addr_to_bean_recipient_fields(row)
             final_name = recipient_fields["name"]
+            address_lines = _split_addr_to_bean_address_lines(
+                recipient_fields["address_line"],
+                _get_excel_val(row, ["Shipping City", "城市"]),
+            )
 
             form = _pick_form(
                 label_form_html,
@@ -1733,8 +1766,8 @@ def run_automation(
                 "addrToBean.couCode": country_value,
                 "addrToBean.nam": final_name,
                 "addrToBean.add1": "",
-                "addrToBean.add2": recipient_fields["address_line"],
-                "addrToBean.add3": _get_excel_val(row, ["Shipping City", "城市"]),
+                "addrToBean.add2": address_lines["addrToBean.add2"],
+                "addrToBean.add3": address_lines["addrToBean.add3"],
                 "addrToBean.pref": _get_excel_val(row, ["收件人洲/省", "State"]),
                 "addrToBean.postal": _get_excel_val(row, ["Shipping Zip", "郵遞區號"]),
                 "addrToBean.tel": _get_excel_val(row, ["Shipping Phone", "電話"]),
@@ -1746,6 +1779,7 @@ def run_automation(
                 f"address_id={recipient_fields['recipient_id'] or '-'}, country={country_raw}, "
                 f"country_value={country_value}, "
                 f"add2_len={len(data.get('addrToBean.add2', ''))}, "
+                f"add3_len={len(data.get('addrToBean.add3', ''))}, "
                 f"postal_len={len(data.get('addrToBean.postal', ''))}, "
                 f"tel_len={len(data.get('addrToBean.tel', ''))}"
             )
