@@ -32,6 +32,7 @@ from bot.automation import (
     _has_m060800_item_book_warning,
     _iter_content_items,
     _prepare_batch_hs_codes,
+    _prepare_addr_to_bean_recipient_fields,
     _resolve_addr_country_value,
     _validate_required_hs_codes,
     _parse_forms,
@@ -47,6 +48,30 @@ from bot.automation import (
 
 
 class AutomationHtmlTests(unittest.TestCase):
+    def test_prepare_recipient_fields_moves_pccc_from_name_to_address(self):
+        row = {
+            "Shipping Name": "kim sang woo (PCCC:P210006411542)",
+            "Shipping Street": "123 Gangnam-daero",
+        }
+
+        fields = _prepare_addr_to_bean_recipient_fields(row)
+
+        self.assertEqual(fields["name"], "kim sang woo")
+        self.assertEqual(fields["address_line"], "123 Gangnam-daero PCCC:P210006411542")
+        self.assertEqual(fields["recipient_id"], "PCCC:P210006411542")
+
+    def test_prepare_recipient_fields_moves_prc_id_from_name_to_address(self):
+        row = {
+            "Shipping Name": "Maria Silva (PRC ID:12345678901)",
+            "Shipping Street": "Rua Um 20",
+        }
+
+        fields = _prepare_addr_to_bean_recipient_fields(row)
+
+        self.assertEqual(fields["name"], "Maria Silva")
+        self.assertEqual(fields["address_line"], "Rua Um 20 PRC ID:12345678901")
+        self.assertEqual(fields["recipient_id"], "PRC ID:12345678901")
+
     def test_with_base_href_inserts_base_inside_head(self):
         html = "<html><head><title>Main</title></head><body>Create New Labels</body></html>"
 

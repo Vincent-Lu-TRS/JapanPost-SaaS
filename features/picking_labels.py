@@ -194,12 +194,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
 def render_picking_label_tab() -> None:
     st.info("列印設定：PDF檔尺寸為 100mm × 150mm，請使用對應Label大小輸出。")
 
-    if "picking_orders" not in st.session_state:
-        try:
-            _load_orders()
-        except Exception as exc:
-            st.error(f"無法讀取跨境揀貨單來源表：{exc}")
-            return
+    has_loaded_orders = "picking_orders" in st.session_state
 
     orders: list[PickingOrder] = st.session_state.get("picking_orders", [])
     selected_rows: set[int] = set(st.session_state.get("picking_selected_rows", set()))
@@ -299,7 +294,9 @@ def render_picking_label_tab() -> None:
         st.rerun()
     st.caption("成功上傳雲端資料夾後，才會勾選來源表製單檢核欄。")
 
-    if not orders:
+    if not has_loaded_orders:
+        st.info("尚未讀取跨境揀貨單資料。請按「重新讀取」取得目前待製單訂單。")
+    elif not orders:
         st.info("目前沒有符合條件的待製單訂單。")
     else:
         df = _orders_to_dataframe(orders, selected_rows)

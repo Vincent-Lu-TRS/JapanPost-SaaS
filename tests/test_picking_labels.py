@@ -544,6 +544,64 @@ class PickingLabelDriveTests(unittest.TestCase):
 
 
 class PickingLabelUiTests(unittest.TestCase):
+    def test_initial_render_does_not_auto_load_google_sheets(self):
+        import features.picking_labels as picking_ui
+
+        class FakeColumn:
+            def button(self, *args, **kwargs):
+                return False
+
+        class FakeStreamlit:
+            def __init__(self):
+                self.session_state = {}
+                self.column_config = types.SimpleNamespace(CheckboxColumn=lambda *a, **k: None)
+                self.messages = []
+
+            def info(self, message):
+                self.messages.append(("info", message))
+
+            def error(self, message):
+                self.messages.append(("error", message))
+
+            def markdown(self, *args, **kwargs):
+                pass
+
+            def caption(self, *args, **kwargs):
+                pass
+
+            def columns(self, spec, **kwargs):
+                count = spec if isinstance(spec, int) else len(spec)
+                return [FakeColumn() for _ in range(count)]
+
+            def button(self, *args, **kwargs):
+                return False
+
+            def data_editor(self, df, **kwargs):
+                return df
+
+            def rerun(self):
+                raise AssertionError("Initial picking-label render should not rerun.")
+
+        fake_st = FakeStreamlit()
+        original_st = picking_ui.st
+        original_load = picking_ui.load_sheet_values
+        try:
+            picking_ui.st = fake_st
+
+            def fail_if_called(*args, **kwargs):
+                raise AssertionError("Initial picking-label render should not call Google Sheets.")
+
+            picking_ui.load_sheet_values = fail_if_called
+
+            picking_ui.render_picking_label_tab()
+
+            self.assertNotIn("picking_orders", fake_st.session_state)
+            self.assertFalse(any(kind == "error" for kind, _message in fake_st.messages))
+            self.assertTrue(any(kind == "info" for kind, _message in fake_st.messages))
+        finally:
+            picking_ui.st = original_st
+            picking_ui.load_sheet_values = original_load
+
     def test_visible_operation_table_omits_internal_and_debug_columns(self):
         from features.picking_labels import _orders_to_dataframe
 

@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-06-18-m060800-ordered-payload"
+AUTOMATION_BUILD_ID = "2026-07-06-recipient-id-address"
 
 from .drive import upload_pdf
 from .gemini_helper import predict_hs_code
@@ -67,6 +67,56 @@ def _row_val(row, keys: list[str]) -> str:
             if value:
                 return value
     return ""
+
+
+_RECIPIENT_ID_PATTERN = re.compile(
+    r"\s*\(?\s*((?:PCCC|PRC\s*ID)\s*:\s*[^)]+?)\s*\)?\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_recipient_id(value: str) -> str:
+    raw = " ".join(_clean(value).split())
+    if not raw:
+        return ""
+    if ":" not in raw:
+        return raw
+    label, code = raw.split(":", 1)
+    label = "PRC ID" if "PRC" in label.upper() else "PCCC"
+    return f"{label}:{code.strip()}"
+
+
+def _split_recipient_name_and_id(name: str) -> tuple[str, str]:
+    cleaned_name = _clean(name)
+    match = _RECIPIENT_ID_PATTERN.search(cleaned_name)
+    if not match:
+        return cleaned_name, ""
+    recipient_id = _normalize_recipient_id(match.group(1))
+    cleaned_name = _RECIPIENT_ID_PATTERN.sub("", cleaned_name).strip()
+    return cleaned_name, recipient_id
+
+
+def _append_recipient_id_to_address(address: str, recipient_id: str) -> str:
+    cleaned_address = _clean(address)
+    normalized_id = _normalize_recipient_id(recipient_id)
+    if not normalized_id:
+        return cleaned_address
+    if not cleaned_address:
+        return normalized_id
+    if normalized_id.lower() in cleaned_address.lower():
+        return cleaned_address
+    return f"{cleaned_address} {normalized_id}"
+
+
+def _prepare_addr_to_bean_recipient_fields(row) -> dict[str, str]:
+    name_val = _row_val(row, ["Shipping Name", "Shipping Name_1"])
+    address_line = _row_val(row, ["Shipping Street", "收件地址"])
+    clean_name, recipient_id = _split_recipient_name_and_id(name_val)
+    return {
+        "name": clean_name,
+        "address_line": _append_recipient_id_to_address(address_line, recipient_id),
+        "recipient_id": recipient_id,
+    }
 
 
 def _build_result_record(row, order_id: str, tracking: str) -> dict:
@@ -1629,8 +1679,8 @@ def run_automation(
 
             country_raw = _get_excel_val(row, ["收件人國家", "Country"])
             country_code = resolve_country_code(country_raw, COUNTRY_CODE_MAP)
-            name_val = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
-            final_name = f"{name_val} {order_id}".strip()
+            recipient_fields = _prepare_addr_to_bean_recipient_fields(row)
+            final_name = recipient_fields["name"]
 
             form = _pick_form(
                 label_form_html,
@@ -1650,7 +1700,7 @@ def run_automation(
                 "addrToBean.couCode": country_value,
                 "addrToBean.nam": final_name,
                 "addrToBean.add1": "",
-                "addrToBean.add2": _get_excel_val(row, ["Shipping Street", "收件地址"]),
+                "addrToBean.add2": recipient_fields["address_line"],
                 "addrToBean.add3": _get_excel_val(row, ["Shipping City", "城市"]),
                 "addrToBean.pref": _get_excel_val(row, ["收件人洲/省", "State"]),
                 "addrToBean.postal": _get_excel_val(row, ["Shipping Zip", "郵遞區號"]),
@@ -1659,7 +1709,8 @@ def run_automation(
             post_target = urljoin(label_form_url or main_menu_url, form.get("action") or label_form_url)
             _log(
                 "🌐 requests 提交 M060505/addrToBean 收件人 payload："
-                f"command={command}, action={post_target}, name={final_name}, country={country_raw}"
+                f"command={command}, action={post_target}, name={final_name}, "
+                f"address_id={recipient_fields['recipient_id'] or '-'}, country={country_raw}"
             )
             resp = req_session.post(
                 post_target,

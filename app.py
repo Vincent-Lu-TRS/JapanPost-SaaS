@@ -418,6 +418,7 @@ def _summary_label(label: str) -> str:
 
 
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
+    _install_playwright()
     ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
     if not ok or job is None:
         return False, reason
@@ -1286,11 +1287,14 @@ def _render_main_app():
     df_pending = pd.DataFrame()
     pending_count = 0
     pending_logs: list[str] = []
+    pending_manual_reload_requested = False
+    pending_read_error = ""
     if is_running:
         df_pending = st.session_state.get("last_pending_df", pd.DataFrame())
         pending_logs = st.session_state.get("last_pending_logs", [])
         pending_count = len(df_pending)
     else:
+        pending_manual_reload_requested = bool(st.session_state.pop("pending_manual_reload_requested", False))
         refresh_notice = bool(job and job.pop("pending_refresh_needed", False))
         if refresh_notice:
             st.session_state["pending_refresh_notice"] = True
@@ -1304,7 +1308,7 @@ def _render_main_app():
             df_pending = pd.DataFrame()
             pending_logs = []
             pending_count = 0
-        if not isinstance(cached_pending, pd.DataFrame):
+        if pending_manual_reload_requested:
             with st.spinner("讀取 Google Sheets 待打單資料..."):
                 try:
                     df_pending, pending_logs = _load_pending_orders()
@@ -1314,9 +1318,12 @@ def _render_main_app():
                     st.session_state.last_pending_loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     st.session_state.last_pending_read_summary = summarize_pending_read_logs(pending_logs)
                 except Exception as e:
+                    pending_read_error = str(e)
                     st.warning(f"無法讀取 Google Sheets：{e}")
 
-    rate, rate_date, rate_source = _load_usd_jpy_rate()
+    rate, rate_date, rate_source = None, "", ""
+    if not df_pending.empty:
+        rate, rate_date, rate_source = _load_usd_jpy_rate()
     editable_count = min(len(df_pending), 20)
     if not is_running and not df_pending.empty:
         _sync_visible_order_selection_from_widgets(df_pending, editable_count)
@@ -1427,12 +1434,15 @@ def _render_main_app():
             _reset_all_order_editors(df_pending.head(editable_count))
             st.rerun()
         read_summary = st.session_state.get("last_pending_read_summary") or summarize_pending_read_logs(pending_logs)
-        if st.session_state.pop("pending_manual_reload_requested", False) and not is_running:
-            st.success(
-                "重新讀取完成："
-                f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
-                f"耗時 {read_summary.get('elapsed', '-')}。"
-            )
+        if pending_manual_reload_requested and not is_running:
+            if pending_read_error:
+                st.warning(f"重新讀取失敗：{pending_read_error}")
+            else:
+                st.success(
+                    "重新讀取完成："
+                    f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
+                    f"耗時 {read_summary.get('elapsed', '-')}。"
+                )
         if not rate and not df_pending.empty:
             st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
         if is_running and zero_value_warnings:
@@ -2147,7 +2157,6 @@ PDF 會上傳至指定 Google Drive 資料夾。
 # 主程式入口
 # ══════════════════════════════════════════════════════
 
-_install_playwright()
 init_auth_state(_cm)
 
 if handle_oauth_callback(_cm):
