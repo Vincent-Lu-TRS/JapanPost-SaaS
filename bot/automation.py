@@ -132,6 +132,15 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
             "addrToBean.add3": add3,
         }
 
+    if len(address_without_id) <= 80:
+        add2 = address_without_id
+        add3, _ = _split_text_at_limit(recipient_id, 36)
+        return {
+            "addrToBean.add1": "",
+            "addrToBean.add2": add2,
+            "addrToBean.add3": add3,
+        }
+
     add1, overflow = _split_text_at_limit(address_without_id, 80)
     add2, overflow = _split_text_at_limit(overflow, 80)
     if overflow:

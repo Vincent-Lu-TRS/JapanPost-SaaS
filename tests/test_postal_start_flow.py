@@ -30,11 +30,12 @@ class PostalStartFlowTests(unittest.TestCase):
     def test_playwright_install_is_deferred_until_postal_job_start(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
-        self.assertIn(
-            "def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:\n"
-            "    _install_playwright()",
-            app_source,
-        )
+        start_body = app_source[
+            app_source.index("def _start_job("):app_source.index("# ══════════════════════════════════════════════════════\n# 頁面渲染函數")
+        ]
+
+        self.assertLess(start_body.index("_JOB_REGISTRY.start"), start_body.index("_install_playwright()"))
+        self.assertLess(start_body.index("_install_playwright()"), start_body.index("from bot.automation import"))
         self.assertNotIn("\n_install_playwright()\ninit_auth_state(_cm)", app_source)
 
     def test_fx_rate_load_is_skipped_until_pending_orders_exist(self):

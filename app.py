@@ -418,7 +418,6 @@ def _summary_label(label: str) -> str:
 
 
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
-    _install_playwright()
     ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
     if not ok or job is None:
         return False, reason
@@ -438,6 +437,8 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
 
         try:
             _log("🚀 任務啟動，正在載入模組...")
+            _log("🧰 正在準備 Playwright Chromium 環境...")
+            _install_playwright()
             from bot.automation import AUTOMATION_BUILD_ID, _prepare_batch_hs_codes, run_automation
             from bot.sheets import COUNTRY_CODE_MAP, backfill_results
             _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
