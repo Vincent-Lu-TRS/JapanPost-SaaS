@@ -480,6 +480,50 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.sendType"], "8")
         self.assertEqual(payload["shippingBean.transType"], "1")
 
+    def test_build_m060800_item_payload_preserves_existing_item_count_fields(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="8">
+          <input type="hidden" name="shippingBean.transType" value="1">
+          <input type="hidden" name="shippingBean.itemList[0].no.value" value="-1">
+          <input type="hidden" name="cost.value" value="10.11">
+          <input type="hidden" name="curUnit" value="USD">
+          <input type="hidden" name="printCurUnit" value="USD">
+          <input name="itemCount" value="1">
+          <input type="hidden" name="shippingBean.itemList[1].no.value" value="-2">
+          <input type="hidden" name="cost.value" value="6.44">
+          <input type="hidden" name="curUnit" value="USD">
+          <input type="hidden" name="printCurUnit" value="USD">
+          <input name="itemCount" value="1">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+            "內容物3": "Car Tissue Holder TRSN0285",
+            "申告金額3": "6.62",
+            "數量3": "1",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            row,
+            item_index=3,
+        )
+
+        payload_pairs = list(payload.items()) if hasattr(payload, "items") else list(payload)
+
+        self.assertEqual([name for name, _ in payload_pairs].count("itemCount"), 2)
+        self.assertEqual([value for name, value in payload_pairs if name == "itemCount"], ["1", "1"])
+        self.assertEqual([name for name, _ in payload_pairs].count("cost.value"), 2)
+        self.assertEqual(payload["itemBean.num.value"], "1")
+
     def test_build_m060800_next_payload_uses_regist_after_item_confirm(self):
         html = """
         <form action="/mypage/M060800.do" method="post">

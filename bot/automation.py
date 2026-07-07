@@ -936,14 +936,14 @@ def _build_m060800_item_payload(
     hs_code: str = "",
     submit_command: str = "itemAdd2",
     item_index: int = 1,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, _OrderedPayload]:
     form = _pick_form(
         html,
         preferred_action="M060800",
         required_fields=["itemBean.pkg"],
     )
-    payload = dict(form["fields"])
-    payload.pop("command", None)
+    payload = _OrderedPayload(form.get("pairs") or list(form["fields"].items()))
+    _ordered_payload_remove(payload, "command")
 
     pkg = _row_item_value(row, "內容物", item_index)
     cost = _row_item_value(row, "申告金額", item_index) or "0"
@@ -953,17 +953,19 @@ def _build_m060800_item_payload(
     except Exception:
         num = "1"
 
-    payload.update({
-        "itemBean.pkg": pkg,
-        "itemBean.cost.value": cost,
-        "itemBean.num.value": num,
-        "itemBean.curUnit": _select_option_value(
+    _ordered_payload_set(payload, "itemBean.pkg", pkg)
+    _ordered_payload_set(payload, "itemBean.cost.value", cost)
+    _ordered_payload_set(payload, "itemBean.num.value", num)
+    _ordered_payload_set(
+        payload,
+        "itemBean.curUnit",
+        _select_option_value(
             form,
             "itemBean.curUnit",
             "USD",
             fallback=payload.get("itemBean.curUnit", "USD") or "USD",
         ),
-    })
+    )
     profile = _shipping_profile(row)
     if profile == "ems_goods":
         ems_assignments = _set_value_assignments_for_labels(
@@ -971,9 +973,9 @@ def _build_m060800_item_payload(
             ["EMS(Goods)", "EMS (Goods)", "EMS goods"],
         )
         if "shippingBean.sendType" in ems_assignments:
-            payload["shippingBean.sendType"] = ems_assignments["shippingBean.sendType"]
+            _ordered_payload_set(payload, "shippingBean.sendType", ems_assignments["shippingBean.sendType"])
         if "shippingBean.pkgType" in ems_assignments:
-            payload["shippingBean.pkgType"] = ems_assignments["shippingBean.pkgType"]
+            _ordered_payload_set(payload, "shippingBean.pkgType", ems_assignments["shippingBean.pkgType"])
         if payload.get("shippingBean.sendType", "") == "0":
             raise RuntimeError(
                 "Unable to resolve EMS(Goods) payload from M060800 HTML; "
@@ -985,14 +987,14 @@ def _build_m060800_item_payload(
     elif profile == "postal_parcel_air":
         send_type_assignments = _set_value_assignments_for_labels(html, ["Postal Parcel", "POSTAL PARCEL"])
         if "shippingBean.sendType" in send_type_assignments:
-            payload["shippingBean.sendType"] = send_type_assignments["shippingBean.sendType"]
+            _ordered_payload_set(payload, "shippingBean.sendType", send_type_assignments["shippingBean.sendType"])
         if "shippingBean.pkgType" in send_type_assignments:
-            payload["shippingBean.pkgType"] = send_type_assignments["shippingBean.pkgType"]
+            _ordered_payload_set(payload, "shippingBean.pkgType", send_type_assignments["shippingBean.pkgType"])
         air_assignments = _set_value_assignments_for_labels(html, ["Air"])
         if "shippingBean.transType" in air_assignments:
-            payload["shippingBean.transType"] = air_assignments["shippingBean.transType"]
+            _ordered_payload_set(payload, "shippingBean.transType", air_assignments["shippingBean.transType"])
         elif "chgTransTypeBtn" in html:
-            payload["shippingBean.transType"] = "1"
+            _ordered_payload_set(payload, "shippingBean.transType", "1")
         if payload.get("shippingBean.sendType", "") == "0" or not payload.get("shippingBean.transType", ""):
             raise RuntimeError(
                 "Unable to resolve Postal Parcel/Air payload from M060800 HTML; "
@@ -1007,7 +1009,7 @@ def _build_m060800_item_payload(
             ["International ePacket light", "ePacket light", "EPACK_LITE", "Eパケットライト"],
         )
         if "shippingBean.sendType" in epacket_assignments:
-            payload["shippingBean.sendType"] = epacket_assignments["shippingBean.sendType"]
+            _ordered_payload_set(payload, "shippingBean.sendType", epacket_assignments["shippingBean.sendType"])
         if payload.get("shippingBean.sendType", "") == "0":
             raise RuntimeError(
                 "Unable to resolve ePacket payload from M060800 HTML; "
@@ -1018,9 +1020,9 @@ def _build_m060800_item_payload(
             )
         air_assignments = _set_value_assignments_for_labels(html, ["AIR", "Air"])
         if "shippingBean.transType" in air_assignments:
-            payload["shippingBean.transType"] = air_assignments["shippingBean.transType"]
+            _ordered_payload_set(payload, "shippingBean.transType", air_assignments["shippingBean.transType"])
         elif payload.get("shippingBean.sendType", "") == "8" and not payload.get("shippingBean.transType", ""):
-            payload["shippingBean.transType"] = "1"
+            _ordered_payload_set(payload, "shippingBean.transType", "1")
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         _ordered_payload_set(payload, "shippingBean.pkgTotalPrice.value", total_jpy)
@@ -1031,13 +1033,13 @@ def _build_m060800_item_payload(
             form["fields"].get("ShippingBean.danger") or "1",
         )
     if "shippingBean.danger" in form["fields"]:
-        payload["shippingBean.danger"] = form["fields"].get("shippingBean.danger") or "1"
+        _ordered_payload_set(payload, "shippingBean.danger", form["fields"].get("shippingBean.danger") or "1")
     if is_eu and hs_code:
         for field_name in ("itemBean.hsCode", "itemBean.hsCode.value"):
             if field_name in form["fields"]:
-                payload[field_name] = hs_code
+                _ordered_payload_set(payload, field_name, hs_code)
                 break
-    payload[f"method:{submit_command}"] = ""
+    payload.append((f"method:{submit_command}", ""))
     return urljoin(page_url, form.get("action") or page_url), payload
 
 
