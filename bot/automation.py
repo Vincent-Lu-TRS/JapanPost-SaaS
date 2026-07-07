@@ -1016,6 +1016,11 @@ def _build_m060800_item_payload(
                 f"pkgType={payload.get('shippingBean.pkgType', '')}; "
                 f"context={_html_context_for_labels(html, ['International ePacket light', 'ePacket light', 'EPACK_LITE', 'Eパケットライト'])}"
             )
+        air_assignments = _set_value_assignments_for_labels(html, ["AIR", "Air"])
+        if "shippingBean.transType" in air_assignments:
+            payload["shippingBean.transType"] = air_assignments["shippingBean.transType"]
+        elif payload.get("shippingBean.sendType", "") == "8" and not payload.get("shippingBean.transType", ""):
+            payload["shippingBean.transType"] = "1"
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         _ordered_payload_set(payload, "shippingBean.pkgTotalPrice.value", total_jpy)
@@ -1091,6 +1096,17 @@ def _build_m060800_next_payload(
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         payload["shippingBean.pkgTotalPrice.value"] = total_jpy
+    if (
+        _shipping_profile(row) == "epacket_light"
+        and payload.get("shippingBean.sendType", "") == "8"
+        and not payload.get("shippingBean.transType", "")
+    ):
+        air_assignments = _set_value_assignments_for_labels(html, ["AIR", "Air"])
+        _ordered_payload_set(
+            payload,
+            "shippingBean.transType",
+            air_assignments.get("shippingBean.transType", "1") or "1",
+        )
     if "ShippingBean.danger" in form["fields"]:
         payload["ShippingBean.danger"] = form["fields"].get("ShippingBean.danger") or "1"
     if "shippingBean.danger" in form["fields"]:

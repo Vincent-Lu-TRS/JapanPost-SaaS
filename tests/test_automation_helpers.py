@@ -445,6 +445,41 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["method:itemAdd2"], "")
         self.assertNotIn("command", payload)
 
+    def test_build_m060800_item_payload_sets_epacket_air_trans_type(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.sendType" value="">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <select name="itemBean.curUnit"><option value="USD">USD</option></select>
+          <button type="button" id="ID_SENDTYPE_BTN_EPACK_LITE" onclick="chgSendTypeBtn(8);">
+            <img alt="International Air Packet">
+          </button>
+          <button type="button" id="ID_TRANSTYPE_BTN_AIR" onclick="chgTransTypeBtn(1);">
+            <img alt="AIR">
+          </button>
+        </form>
+        """
+        row = {
+            "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+            "內容物1": "Pouch TRSN6161",
+            "申告金額1": "10.11",
+            "數量1": "1",
+        }
+
+        _, payload = _build_m060800_item_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            row,
+        )
+
+        self.assertEqual(payload["shippingBean.sendType"], "8")
+        self.assertEqual(payload["shippingBean.transType"], "1")
+
     def test_build_m060800_next_payload_uses_regist_after_item_confirm(self):
         html = """
         <form action="/mypage/M060800.do" method="post">
@@ -618,6 +653,37 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(payload["shippingBean.pkgTotalPrice.value"], "3750")
         self.assertEqual([name for name, _ in payload].count("cost.value"), 3)
         self.assertEqual(payload["method:regist"], "")
+
+    def test_build_m060800_next_payload_keeps_epacket_air_trans_type(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token2">
+          <input type="hidden" name="shippingBean.sendType" value="8">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <input type="hidden" name="shippingBean.itemList[0].no.value" value="-1">
+          <input type="hidden" name="cost.value" value="10.11">
+          <input name="shippingBean.pkgTotalPrice.value" value="3750">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+          <button type="button" id="ID_SENDTYPE_BTN_EPACK_LITE" onclick="chgSendTypeBtn(8);">
+            <img alt="International Air Packet">
+          </button>
+          <button type="button" id="ID_TRANSTYPE_BTN_AIR" onclick="chgTransTypeBtn(1);">
+            <img alt="AIR">
+          </button>
+        </form>
+        """
+
+        _, payload = _build_m060800_next_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            {"郵局運送方式(複數商品請自行確認是否走小包)": "ePacket"},
+        )
+
+        self.assertEqual(payload["shippingBean.transType"], "1")
 
     def test_build_m060800_next_payload_sets_over_confirm_for_multi_item_warning(self):
         html = """
