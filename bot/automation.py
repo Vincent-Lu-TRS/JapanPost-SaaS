@@ -1047,7 +1047,7 @@ def _build_m060800_next_payload(
     )
     payload = _OrderedPayload(form.get("pairs") or list(form["fields"].items()))
     _ordered_payload_remove(payload, "command")
-    for field_name in (
+    pending_item_fields = (
         "itemBean.pkg",
         "itemBean.cost.value",
         "itemBean.num.value",
@@ -1055,22 +1055,36 @@ def _build_m060800_next_payload(
         "itemBean.curUnitEtc",
         "itemBean.hsCode",
         "itemBean.hsCode.value",
-    ):
-        if field_name in payload:
+    )
+    item_indexes = {
+        int(match.group(1))
+        for match in re.finditer(r"shippingBean\.itemList\[(\d+)\]", html or "")
+    }
+    remove_pending_item_fields = len(item_indexes) > 1
+    for field_name in pending_item_fields:
+        if remove_pending_item_fields:
+            _ordered_payload_remove(payload, field_name)
+        elif field_name in payload:
             _ordered_payload_set(payload, field_name, "")
     if "itemBean.curUnit" in payload:
-        _ordered_payload_set(
-            payload,
-            "itemBean.curUnit",
-            _select_option_value(
-                form,
+        if remove_pending_item_fields:
+            _ordered_payload_remove(payload, "itemBean.curUnit")
+        else:
+            _ordered_payload_set(
+                payload,
                 "itemBean.curUnit",
-                "JPY",
-                fallback=payload.get("itemBean.curUnit", "JPY") or "JPY",
-            ),
-        )
+                _select_option_value(
+                    form,
+                    "itemBean.curUnit",
+                    "JPY",
+                    fallback=payload.get("itemBean.curUnit", "JPY") or "JPY",
+                ),
+            )
     if "itemBean.couCd" in payload:
-        _ordered_payload_set(payload, "itemBean.couCd", "")
+        if remove_pending_item_fields:
+            _ordered_payload_remove(payload, "itemBean.couCd")
+        else:
+            _ordered_payload_set(payload, "itemBean.couCd", "")
     total_jpy = _row_val(row, ["訂單合計申告金額(JPY)"])
     if total_jpy:
         payload["shippingBean.pkgTotalPrice.value"] = total_jpy

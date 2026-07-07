@@ -377,16 +377,18 @@ def _render_running_progress(job: dict) -> None:
         st.caption("最新狀態：" + "　".join(html.escape(line) for line in latest_logs))
 
 
-def _render_blocking_running_guard(job: dict | None) -> None:
+def _render_blocking_running_guard(job: dict | None, launching: bool = False) -> None:
     progress = summarize_job_progress(job)
     total = progress["total"]
     done = progress["done"]
     active_order = progress["active_order_id"] or "準備中"
-    active_stage = progress["active_stage"] or "建立製單任務"
+    active_stage = progress["active_stage"] or ("啟動製單任務" if launching else "建立製單任務")
+    title = "製單啟動中" if launching and not job else "製單進行中"
+    count_text = f"｜{done}/{total}" if total else ""
     st.markdown(
         '<div class="running-guard-overlay">'
         '<div class="running-guard-box">'
-        f'<div class="running-guard-title">製單進行中｜{done}/{total}</div>'
+        f'<div class="running-guard-title">{title}{count_text}</div>'
         f'<div class="running-guard-text">目前處理：{html.escape(active_order)}｜{html.escape(active_stage)}</div>'
         '<div class="running-guard-sub">已鎖定操作以避免重複製單，畫面會自動更新。</div>'
         '</div></div>',
@@ -1282,15 +1284,17 @@ def _render_main_app():
 
     job = _get_job(email)
     is_running = job is not None and job.get("status") == "running"
-    if job is not None:
+    if is_running and st.session_state.get("job_launching"):
         st.session_state.pop("job_launching", None)
+    is_launching = bool(st.session_state.get("job_launching"))
+    is_busy = is_running or is_launching
 
     df_pending = pd.DataFrame()
     pending_count = 0
     pending_logs: list[str] = []
     pending_manual_reload_requested = False
     pending_read_error = ""
-    if is_running:
+    if is_busy:
         df_pending = st.session_state.get("last_pending_df", pd.DataFrame())
         pending_logs = st.session_state.get("last_pending_logs", [])
         pending_count = len(df_pending)
@@ -1326,9 +1330,9 @@ def _render_main_app():
     if not df_pending.empty:
         rate, rate_date, rate_source = _load_usd_jpy_rate()
     editable_count = min(len(df_pending), 20)
-    if not is_running and not df_pending.empty:
+    if not is_busy and not df_pending.empty:
         _sync_visible_order_selection_from_widgets(df_pending, editable_count)
-    if is_running or df_pending.empty:
+    if is_busy or df_pending.empty:
         df_pending_for_run = df_pending
         if is_running and job:
             selected_order_ids = {
@@ -1381,16 +1385,16 @@ def _render_main_app():
             max_rows_input = st.number_input(
                 "最大處理",
                 min_value=0, max_value=500, value=20, step=1,
-                disabled=is_running,
+                disabled=is_busy,
             )
         with toolbar_action_cols[1]:
             st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
         max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
         with toolbar_action_cols[2]:
-            btn_label = "執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單")
+            btn_label = "製單啟動中…" if is_launching else ("執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單"))
             if st.button(btn_label, type="primary",
                          disabled=(
-                             is_running
+                             is_busy
                              or pending_count == 0
                              or selected_count == 0
                              or bool(zero_value_warnings)
@@ -1408,11 +1412,12 @@ def _render_main_app():
                             st.toast("✅ 已啟動自動製單")
                         st.rerun()
                     elif reason == "batch_running":
+                        st.session_state["job_launching"] = True
                         st.error("同一批製單已在執行中，已阻止重複啟動。")
                     else:
                         st.error("任務執行中，請稍候")
         with toolbar_action_cols[3]:
-            if is_running:
+            if is_busy:
                 if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                     st.rerun()
             elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
@@ -1427,7 +1432,7 @@ def _render_main_app():
                 "恢復全部預設",
                 width="stretch",
                 key="reset_all_pending",
-                disabled=is_running or df_pending.empty,
+                disabled=is_busy or df_pending.empty,
             )
 
         if reset_all_requested and not df_pending.empty:
@@ -1435,7 +1440,7 @@ def _render_main_app():
             _reset_all_order_editors(df_pending.head(editable_count))
             st.rerun()
         read_summary = st.session_state.get("last_pending_read_summary") or summarize_pending_read_logs(pending_logs)
-        if pending_manual_reload_requested and not is_running:
+        if pending_manual_reload_requested and not is_busy:
             if pending_read_error:
                 st.warning(f"重新讀取失敗：{pending_read_error}")
             else:
@@ -1446,22 +1451,23 @@ def _render_main_app():
                 )
         if not rate and not df_pending.empty:
             st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
-        if is_running and zero_value_warnings:
+        if is_busy and zero_value_warnings:
             st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
-        if is_running and required_id_warnings:
+        if is_busy and required_id_warnings:
             st.error("；".join(required_id_warnings[:5]))
-        if st.session_state.get("pending_refresh_notice") and not is_running:
+        if st.session_state.get("pending_refresh_notice") and not is_busy:
             result_count = len((job or {}).get("results") or [])
             st.success(
                 f"製單完成：本次完成 {result_count} 筆。"
                 "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
             )
-        if is_running and job:
-            _render_running_progress(job)
-            _render_blocking_running_guard(job)
+        if is_busy:
+            if job:
+                _render_running_progress(job)
+            _render_blocking_running_guard(job, launching=is_launching)
 
         if not df_pending.empty:
-            if is_running:
+            if is_busy:
                 running_orders = pd.DataFrame((job or {}).get("orders") or [])
                 if not running_orders.empty:
                     run_cols = ["position", "order_id", "recipient", "country", "trans_type", "total_usd", "total_jpy"]
@@ -1477,7 +1483,7 @@ def _render_main_app():
                     })
                     st.caption("本次送出製單")
                     st.dataframe(running_preview, hide_index=True, width="stretch")
-            else:
+            elif not is_busy:
                 edited_summary_rows: list[dict[str, str]] = []
                 edited_items_by_position: dict[int, pd.DataFrame] = {}
                 job_order_by_id = {str(order.get("order_id", "")): order for order in (job or {}).get("orders", [])}
@@ -2181,7 +2187,7 @@ PDF 會上傳至指定 Google Drive 資料夾。
 
         render_picking_label_diagnostics_panel()
 
-    if is_running:
+    if is_busy:
         time.sleep(2)
         st.rerun()
 

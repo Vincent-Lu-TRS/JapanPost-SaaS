@@ -45,6 +45,17 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn("if not df_pending.empty:\n        rate, rate_date, rate_source = _load_usd_jpy_rate()", app_source)
         self.assertNotIn("\n    rate, rate_date, rate_source = _load_usd_jpy_rate()\n    editable_count", app_source)
 
+    def test_job_launching_state_locks_ui_until_running_job_is_visible(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn('is_launching = bool(st.session_state.get("job_launching"))', app_source)
+        self.assertIn('is_busy = is_running or is_launching', app_source)
+        self.assertIn('if is_running and st.session_state.get("job_launching"):', app_source)
+        self.assertIn('st.session_state.pop("job_launching", None)', app_source)
+        self.assertIn('disabled=is_busy,', app_source)
+        self.assertIn('if is_busy:', app_source)
+        self.assertIn('_render_blocking_running_guard(job, launching=is_launching)', app_source)
+
 
 if __name__ == "__main__":
     unittest.main()
