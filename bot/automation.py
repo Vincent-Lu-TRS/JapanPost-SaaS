@@ -1061,6 +1061,8 @@ def _build_m060800_next_payload(
         for match in re.finditer(r"shippingBean\.itemList\[(\d+)\]", html or "")
     }
     remove_pending_item_fields = len(item_indexes) > 1
+    if remove_pending_item_fields and "shippingBean.overConfirm" in form["fields"]:
+        _ordered_payload_set(payload, "shippingBean.overConfirm", "true")
     for field_name in pending_item_fields:
         if remove_pending_item_fields:
             _ordered_payload_remove(payload, field_name)
@@ -1954,6 +1956,25 @@ def run_automation(
                 raise RuntimeError("M060800 item submit did not produce a response")
             if "M060800" in resp.text and "M060900" not in resp.text:
                 next_action, next_payload = _build_m060800_next_payload(resp.text, resp.url, row)
+                next_payload_names = [name for name, _ in next_payload]
+                next_item_indexes = sorted({
+                    int(match.group(1))
+                    for name in next_payload_names
+                    for match in [re.search(r"shippingBean\.itemList\[(\d+)\]", name)]
+                    if match
+                })
+                next_pending_fields = [
+                    name for name in (
+                        "itemBean.pkg",
+                        "itemBean.cost.value",
+                        "itemBean.num.value",
+                        "itemBean.curUnit",
+                        "itemBean.couCd",
+                        "itemBean.hsCode",
+                        "itemBean.hsCode.value",
+                    )
+                    if name in next_payload_names
+                ]
                 _log(
                     "🌐 requests 提交 M060800 Next payload："
                     f"action={next_action}, "
@@ -1962,6 +1983,14 @@ def run_automation(
                     f"transType={next_payload.get('shippingBean.transType', '')}, "
                     f"pkgType={next_payload.get('shippingBean.pkgType', '')}, "
                     f"totalJpy={next_payload.get('shippingBean.pkgTotalPrice.value', '')}"
+                )
+                _log(
+                    "🔬 M060800 Next payload diagnostics："
+                    f"itemListIndexes={next_item_indexes or '-'}, "
+                    f"pendingFieldsSent={next_pending_fields or '-'}, "
+                    f"overConfirm={next_payload.get('shippingBean.overConfirm', '-')}, "
+                    f"danger={next_payload.get('shippingBean.danger', next_payload.get('ShippingBean.danger', '-'))}, "
+                    f"fieldCount={len(next_payload_names)}"
                 )
                 resp = req_session.post(
                     next_action,

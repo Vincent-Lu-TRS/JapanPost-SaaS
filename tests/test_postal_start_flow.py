@@ -51,10 +51,20 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn('is_launching = bool(st.session_state.get("job_launching"))', app_source)
         self.assertIn('is_busy = is_running or is_launching', app_source)
         self.assertIn('if is_running and st.session_state.get("job_launching"):', app_source)
-        self.assertIn('st.session_state.pop("job_launching", None)', app_source)
         self.assertIn('disabled=is_busy,', app_source)
         self.assertIn('if is_busy:', app_source)
         self.assertIn('_render_blocking_running_guard(job, launching=is_launching)', app_source)
+
+    def test_job_launching_state_clears_after_terminal_or_stale_launch(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn('if job is not None and not is_running and st.session_state.get("job_launching"):', app_source)
+        self.assertIn('st.session_state.pop("job_launching_started_at", None)', app_source)
+        self.assertIn('launch_timed_out = (', app_source)
+        self.assertIn('launch_age_seconds > 90', app_source)
+        self.assertIn('if launch_timed_out:', app_source)
+        self.assertIn('st.session_state["job_launching_started_at"] = time.time()', app_source)
+        self.assertNotIn('elif reason == "batch_running":\n                        st.session_state["job_launching"] = True', app_source)
 
 
 if __name__ == "__main__":

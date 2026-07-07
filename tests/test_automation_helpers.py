@@ -612,6 +612,36 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual([name for name, _ in payload].count("cost.value"), 3)
         self.assertEqual(payload["method:regist"], "")
 
+    def test_build_m060800_next_payload_sets_over_confirm_for_multi_item_warning(self):
+        html = """
+        <form action="/mypage/M060800.do" method="post">
+          <input type="hidden" name="command" value="">
+          <input type="hidden" name="csrfToken" value="token">
+          <input type="hidden" name="shippingBean.overConfirm" value="">
+          <input type="hidden" name="shippingBean.sendType" value="8">
+          <input type="hidden" name="shippingBean.transType" value="">
+          <input type="hidden" name="shippingBean.pkgType" value="0">
+          <input type="hidden" name="shippingBean.itemList[0].no.value" value="-1">
+          <input type="hidden" name="cost.value" value="10.11">
+          <input type="hidden" name="shippingBean.itemList[1].no.value" value="-2">
+          <input type="hidden" name="cost.value" value="6.44">
+          <input type="hidden" name="shippingBean.itemList[2].no.value" value="-3">
+          <input type="hidden" name="cost.value" value="6.62">
+          <input name="shippingBean.pkgTotalPrice.value" value="">
+          <input name="itemBean.pkg" value="">
+          <input name="itemBean.cost.value" value="">
+          <input name="itemBean.num.value" value="">
+        </form>
+        """
+
+        _, payload = _build_m060800_next_payload(
+            html,
+            "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
+            {"訂單合計申告金額(JPY)": "3750"},
+        )
+
+        self.assertEqual(payload["shippingBean.overConfirm"], "true")
+
     def test_build_m060800_item_payload_selects_postal_parcel_air_for_international_parcel(self):
         html = """
         <form action="/mypage/M060800.do" method="post">

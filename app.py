@@ -1286,6 +1286,21 @@ def _render_main_app():
     is_running = job is not None and job.get("status") == "running"
     if is_running and st.session_state.get("job_launching"):
         st.session_state.pop("job_launching", None)
+        st.session_state.pop("job_launching_started_at", None)
+    if job is not None and not is_running and st.session_state.get("job_launching"):
+        st.session_state.pop("job_launching", None)
+        st.session_state.pop("job_launching_started_at", None)
+    launch_started_at = float(st.session_state.get("job_launching_started_at", 0) or 0)
+    launch_age_seconds = time.time() - launch_started_at if launch_started_at else 0
+    launch_timed_out = (
+        job is None
+        and bool(st.session_state.get("job_launching"))
+        and launch_started_at > 0
+        and launch_age_seconds > 90
+    )
+    if launch_timed_out:
+        st.session_state.pop("job_launching", None)
+        st.session_state.pop("job_launching_started_at", None)
     is_launching = bool(st.session_state.get("job_launching"))
     is_busy = is_running or is_launching
 
@@ -1408,11 +1423,11 @@ def _render_main_app():
                     ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
                     if ok:
                         st.session_state["job_launching"] = True
+                        st.session_state["job_launching_started_at"] = time.time()
                         if hasattr(st, "toast"):
                             st.toast("✅ 已啟動自動製單")
                         st.rerun()
                     elif reason == "batch_running":
-                        st.session_state["job_launching"] = True
                         st.error("同一批製單已在執行中，已阻止重複啟動。")
                     else:
                         st.error("任務執行中，請稍候")
