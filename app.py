@@ -6,12 +6,15 @@ Streamlit Web UI + Google OAuth（限 @tkrjm.co.jp）
 import os
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
 
+import hashlib
 import html
 from datetime import datetime
+from pathlib import Path
 import subprocess
 import sys
 import time
 import threading
+import tempfile
 import streamlit as st
 import pandas as pd
 from job_control import (
@@ -87,6 +90,38 @@ def _install_playwright():
 # ── 全域任務追蹤器 ──────────────────────────────────────
 if "_JOB_REGISTRY" not in globals():
     _JOB_REGISTRY = BatchJobRegistry()
+
+
+def _job_lock_path(email: str) -> Path:
+    digest = hashlib.sha256((email or "anonymous").encode("utf-8")).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / "jppost-job-locks" / f"{digest}.lock"
+
+
+def _write_job_lock(email: str) -> None:
+    path = _job_lock_path(email)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(time.time()), encoding="utf-8")
+
+
+def _clear_job_lock(email: str) -> None:
+    try:
+        _job_lock_path(email).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _job_lock_is_active(email: str, max_age_seconds: int = 1800) -> bool:
+    path = _job_lock_path(email)
+    if not path.exists():
+        return False
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age > max_age_seconds:
+            path.unlink(missing_ok=True)
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def _get_job(email: str) -> dict | None:
@@ -423,6 +458,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
     ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
     if not ok or job is None:
         return False, reason
+    _write_job_lock(email)
 
     def _run():
         import traceback as tb
@@ -478,6 +514,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 _log("ℹ️ 自動化完成，無新增結果。")
                 mark_unfinished_orders(job, "skipped", "無新增結果", "自動化完成但沒有產生新結果")
             _JOB_REGISTRY.finish(job, "completed")
+            _clear_job_lock(email)
         except BaseException as e:
             err_text = tb.format_exc()
             print(f"[BOT_ERROR] {err_text}", file=sys.stderr, flush=True)
@@ -491,6 +528,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 _JOB_REGISTRY.finish(job, "error")
             except Exception:
                 pass
+            _clear_job_lock(email)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -1284,21 +1322,14 @@ def _render_main_app():
 
     job = _get_job(email)
     is_running = job is not None and job.get("status") == "running"
+    launch_lock_active = _job_lock_is_active(email)
     if is_running and st.session_state.get("job_launching"):
         st.session_state.pop("job_launching", None)
         st.session_state.pop("job_launching_started_at", None)
     if job is not None and not is_running and st.session_state.get("job_launching"):
         st.session_state.pop("job_launching", None)
         st.session_state.pop("job_launching_started_at", None)
-    launch_started_at = float(st.session_state.get("job_launching_started_at", 0) or 0)
-    launch_age_seconds = time.time() - launch_started_at if launch_started_at else 0
-    launch_timed_out = (
-        job is None
-        and bool(st.session_state.get("job_launching"))
-        and launch_started_at > 0
-        and launch_age_seconds > 90
-    )
-    if launch_timed_out:
+    if job is None and st.session_state.get("job_launching") and not launch_lock_active:
         st.session_state.pop("job_launching", None)
         st.session_state.pop("job_launching_started_at", None)
     is_launching = bool(st.session_state.get("job_launching"))

@@ -60,9 +60,10 @@ class PostalStartFlowTests(unittest.TestCase):
 
         self.assertIn('if job is not None and not is_running and st.session_state.get("job_launching"):', app_source)
         self.assertIn('st.session_state.pop("job_launching_started_at", None)', app_source)
-        self.assertIn('launch_timed_out = (', app_source)
-        self.assertIn('launch_age_seconds > 90', app_source)
-        self.assertIn('if launch_timed_out:', app_source)
+        self.assertIn('launch_lock_active = _job_lock_is_active(email)', app_source)
+        self.assertIn('if job is None and st.session_state.get("job_launching") and not launch_lock_active:', app_source)
+        self.assertIn('_write_job_lock(email)', app_source)
+        self.assertIn('_clear_job_lock(email)', app_source)
         self.assertIn('st.session_state["job_launching_started_at"] = time.time()', app_source)
         self.assertNotIn('elif reason == "batch_running":\n                        st.session_state["job_launching"] = True', app_source)
 

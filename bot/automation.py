@@ -12,6 +12,7 @@ import os
 import re
 import time
 import logging
+import tempfile
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -19,9 +20,9 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
-AUTOMATION_BUILD_ID = "2026-07-06-address2-default-order-id"
+AUTOMATION_BUILD_ID = "2026-07-07-debug-snapshot-lock-ui"
 
-from .drive import upload_pdf
+from .drive import DRIVE_FOLDER_ID, upload_file_to_drive, upload_pdf
 from .gemini_helper import predict_hs_code
 from .countries import resolve_country_code
 from .hs_codes import normalize_hs_code, prepare_hs_codes_for_items, required_hs_code_length
@@ -1330,6 +1331,45 @@ def run_automation(
                     reset_playwright_page("set_content target closed")
             raise last_exc
 
+        def capture_requests_debug_snapshot(
+            html: str,
+            page_url: str,
+            order_id: str,
+            step: str,
+        ) -> None:
+            snapshot_dir = Path(tempfile.gettempdir()) / "jppost-debug-snapshots"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            base_name = _sanitize_filename(f"{stamp}_{order_id}_{step}")
+            html_path = snapshot_dir / f"{base_name}.html"
+            png_path = snapshot_dir / f"{base_name}.png"
+            rendered_html = _with_base_href(
+                _html_for_playwright_form(html),
+                page_url or "https://www.int-mypage.post.japanpost.jp/mypage/",
+            )
+            try:
+                html_path.write_text(rendered_html, encoding="utf-8")
+                ensure_playwright_page(f"debug snapshot {step}")
+                page.set_viewport_size({"width": 1440, "height": 1200})
+                page.set_content(rendered_html, wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(1000)
+                page.screenshot(path=str(png_path), full_page=True)
+                _log(f"📸 已建立郵局失敗快照：{png_path.name}")
+            except Exception as snapshot_err:
+                _log(f"⚠️ 郵局失敗快照建立失敗：{type(snapshot_err).__name__}: {snapshot_err}")
+                return
+
+            for local_path, mime_type, label in [
+                (png_path, "image/png", "PNG"),
+                (html_path, "text/html", "HTML"),
+            ]:
+                try:
+                    uploaded = upload_file_to_drive(str(local_path), DRIVE_FOLDER_ID, mime_type=mime_type)
+                    link = uploaded.get("webViewLink") or uploaded.get("id") or "-"
+                    _log(f"☁️ 郵局失敗快照{label}已上傳：{uploaded.get('name', local_path.name)}｜{link}")
+                except Exception as upload_err:
+                    _log(f"⚠️ 郵局失敗快照{label}上傳失敗：{type(upload_err).__name__}: {upload_err}")
+
         def safe_page_url() -> str:
             try:
                 return page.url
@@ -2029,6 +2069,13 @@ def run_automation(
                 )
                 if resp.status_code >= 400:
                     raise RuntimeError(f"M060800 next submit failed: HTTP {resp.status_code}")
+                if "M060800" in resp.text and "M060900" not in resp.text:
+                    capture_requests_debug_snapshot(
+                        resp.text,
+                        resp.url,
+                        _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"]) or "unknown-order",
+                        "M060800_next_failed",
+                    )
             return resp
 
         def submit_m060900_weight_via_requests(html: str, page_url: str):

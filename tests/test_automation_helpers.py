@@ -9,7 +9,14 @@ except Exception:
         "pandas",
         types.SimpleNamespace(Series=object, DataFrame=object, isna=lambda value: False),
     )
-sys.modules.setdefault("bot.drive", types.SimpleNamespace(upload_pdf=lambda *a, **k: None))
+sys.modules.setdefault(
+    "bot.drive",
+    types.SimpleNamespace(
+        DRIVE_FOLDER_ID="debug-folder",
+        upload_file_to_drive=lambda *a, **k: {},
+        upload_pdf=lambda *a, **k: None,
+    ),
+)
 try:
     import bot.gemini_helper  # noqa: F401
 except Exception:
@@ -1489,13 +1496,17 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(result["country_raw"], "UNITED STATES OF AMERICA")
         self.assertRegex(result["date"], r"^\d{4}-\d{2}-\d{2}$")
 
-    def test_run_automation_does_not_call_playwright_html_injection(self):
+    def test_run_automation_only_uses_playwright_html_injection_for_failure_snapshot(self):
         from pathlib import Path
 
         source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(encoding="utf-8")
         body = source.split("def set_content_from_requests", 1)[1]
 
         self.assertNotIn("set_content_from_requests(", body)
+        self.assertIn("def capture_requests_debug_snapshot", source)
+        self.assertIn("page.screenshot(path=str(png_path), full_page=True)", source)
+        self.assertIn("upload_file_to_drive(str(local_path), DRIVE_FOLDER_ID", source)
+        self.assertIn("M060800_next_failed", source)
 
 
 if __name__ == "__main__":
