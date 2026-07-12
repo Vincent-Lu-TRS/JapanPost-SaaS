@@ -40,6 +40,7 @@
 3. 設定：
    - Main file path: `app.py`
    - Branch: `main`
+   - Advanced settings → Python version: **Python 3.12**
 4. **App Settings → Secrets** 貼入以下內容（參考 `.streamlit/secrets.toml.template`）：
 
 ```toml
@@ -90,6 +91,8 @@ https://jppost.streamlit.app/oauth2callback
 - Streamlit Cloud 免費方案記憶體 1GB，Playwright 執行時可能接近上限
 - 若遇到記憶體問題，考慮改用 HF Spaces Docker
 - `requirements.txt` 目前固定 `streamlit[auth]==1.56.0`，避免原生登入 30 天 cookie 行為在新版本發生回歸。升級 Streamlit 前需重新測試登入持久化。
+- 既有 App 若已使用其他 Python 版本，單純更新 GitHub 程式碼不會切換 Python。請記下 URL、Secrets 與部署設定後，刪除並重新部署 App，並在 Advanced settings 選擇 Python 3.12。
+- 資料處理套件固定在已驗證的 Python 3.12 wheel 版本，避免 Community Cloud 重新解析依賴時自動跨入不相容的大版本。
 
 ---
 
