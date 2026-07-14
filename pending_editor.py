@@ -1,6 +1,8 @@
 import pandas as pd
 import re
 
+from shipment_quantity import parse_shipment_quantity
+
 
 SHIPPING_COL = "郵局運送方式(複數商品請自行確認是否走小包)"
 SHIPPING_OPTIONS = ["EMS", "國際小包", "ePacket"]
@@ -91,9 +93,8 @@ def _money_to_float(value) -> float:
         return 0.0
 
 
-def _quantity_to_float(value) -> float:
-    qty = _money_to_float(value)
-    return qty if qty > 0 else 0.0
+def _quantity_to_float(value, item_index: int) -> float:
+    return float(parse_shipment_quantity(_str_value(value), item_index))
 
 
 def _format_usd(value: float) -> str:
@@ -133,9 +134,9 @@ def calculate_total_value_usd(row: pd.Series, max_items: int = MAX_EDITOR_ITEMS)
     for index in range(1, max_items + 1):
         content = _str_value(row.get(_content_col(index), ""))
         value = _money_to_float(row.get(_value_col(index), ""))
-        quantity = _quantity_to_float(row.get(_quantity_col(index), "1"))
-        if content or value:
-            total += value * (quantity or 1)
+        quantity = _quantity_to_float(row.get(_quantity_col(index), ""), index)
+        if (content or value) and quantity > 0:
+            total += value * quantity
     return total
 
 

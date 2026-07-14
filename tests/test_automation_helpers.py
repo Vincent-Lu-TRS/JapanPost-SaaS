@@ -1112,6 +1112,43 @@ class AutomationHtmlTests(unittest.TestCase):
             ],
         )
 
+    def test_iter_content_items_skips_canceled_items_and_preserves_indexes(self):
+        row = {
+            "內容物1": "Face Primer TRSN8666",
+            "申告金額1": "4.85",
+            "數量1": "0",
+            "內容物2": "Canceled Blank Item",
+            "申告金額2": "2.00",
+            "數量2": "",
+            "內容物3": "Canceled Negative Item",
+            "申告金額3": "3.00",
+            "數量3": "-1",
+            "內容物4": "Beads TRSN9960",
+            "申告金額4": "1.31",
+            "數量4": "4",
+        }
+
+        self.assertEqual(
+            _iter_content_items(row),
+            [{"index": "4", "pkg": "Beads TRSN9960", "cost": "1.31", "num": "4"}],
+        )
+
+    def test_iter_content_items_rejects_invalid_quantities(self):
+        for quantity in ("abc", "1.5"):
+            with self.subTest(quantity=quantity):
+                with self.assertRaisesRegex(ValueError, "內容物1.*數量格式錯誤"):
+                    _iter_content_items({"內容物1": "Item", "申告金額1": "1", "數量1": quantity})
+
+    def test_iter_content_items_returns_empty_when_every_item_is_canceled(self):
+        row = {
+            "內容物1": "Canceled Blank Item",
+            "數量1": "",
+            "內容物2": "Canceled Zero Item",
+            "數量2": "0",
+        }
+
+        self.assertEqual(_iter_content_items(row), [])
+
     def test_prepare_batch_hs_codes_resolves_each_required_item_before_flow(self):
         calls = []
 
@@ -1128,12 +1165,15 @@ class AutomationHtmlTests(unittest.TestCase):
                 "注文番号(貼上原始資料)": "DE-1",
                 "收件人國家": "GERMANY",
                 "內容物1": "Mask",
+                "數量1": "1",
                 "內容物2": "Pillow",
+                "數量2": "1",
             },
             {
                 "注文番号(貼上原始資料)": "IE-1",
                 "收件人國家": "IRELAND",
                 "內容物1": "Gift",
+                "數量1": "1",
             },
         ]
 
@@ -1187,11 +1227,13 @@ class AutomationHtmlTests(unittest.TestCase):
                 "注文番号(貼上原始資料)": "DE-1",
                 "收件人國家": "GERMANY",
                 "內容物1": "Mask",
+                "數量1": "1",
             },
             {
                 "注文番号(貼上原始資料)": "DE-2",
                 "收件人國家": "GERMANY",
                 "內容物1": "Mask",
+                "數量1": "1",
             },
         ]
 
@@ -1217,6 +1259,7 @@ class AutomationHtmlTests(unittest.TestCase):
                 "注文番号(貼上原始資料)": "DE-1",
                 "收件人國家": "GERMANY",
                 "內容物1": "Mask",
+                "數量1": "1",
                 "HSCode1": "HS:3304.99",
             }
         ]

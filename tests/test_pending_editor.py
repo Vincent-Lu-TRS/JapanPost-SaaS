@@ -12,6 +12,7 @@ from pending_editor import (
     build_pending_editor_frame,
     build_pending_item_frame,
     build_pending_summary_frame,
+    calculate_total_value_usd,
     coerce_pending_editor_values,
     compose_shipping_name,
     country_kind,
@@ -90,6 +91,33 @@ class PendingEditorTests(unittest.TestCase):
         )
 
         self.assertEqual(has_zero_value_items(row), [1])
+
+    def test_total_excludes_blank_zero_and_negative_quantity_items(self):
+        row = pd.Series(
+            {
+                "內容物1": "Face Primer",
+                "申告金額1": "4.85",
+                "數量1": "0",
+                "內容物2": "Canceled Blank Item",
+                "申告金額2": "2.00",
+                "數量2": "",
+                "內容物3": "Canceled Negative Item",
+                "申告金額3": "3.00",
+                "數量3": "-1",
+                "內容物4": "Beads",
+                "申告金額4": "1.31",
+                "數量4": "4",
+            }
+        )
+
+        self.assertEqual(calculate_total_value_usd(row), 5.24)
+
+    def test_total_rejects_invalid_quantity(self):
+        for quantity in ("abc", "1.5"):
+            with self.subTest(quantity=quantity):
+                row = pd.Series({"內容物1": "Item", "申告金額1": "1", "數量1": quantity})
+                with self.assertRaisesRegex(ValueError, "內容物1.*數量格式錯誤"):
+                    calculate_total_value_usd(row)
 
     def test_sanitize_hscode_keeps_digits_only(self):
         self.assertEqual(sanitize_hscode("9404.90"), "940490")

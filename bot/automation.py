@@ -20,6 +20,8 @@ from urllib.parse import urljoin
 from datetime import date
 import pandas as pd
 
+from shipment_quantity import parse_shipment_quantity
+
 AUTOMATION_BUILD_ID = "2026-07-07-debug-snapshot-lock-ui"
 
 from .drive import DRIVE_FOLDER_ID, upload_file_to_drive, upload_pdf
@@ -822,6 +824,17 @@ def _row_item_value(row, base_name: str, item_index: int) -> str:
     return _row_val(row, candidates)
 
 
+def _row_item_quantity_value(row, item_index: int) -> str:
+    item_key = f"數量{item_index}"
+    if hasattr(row, "index") and item_key in row.index:
+        return _clean(row[item_key])
+    if hasattr(row, "get") and item_key in row:
+        return _clean(row.get(item_key, ""))
+    if item_index == 1:
+        return _row_val(row, ["數量集合"])
+    return ""
+
+
 def _iter_content_items(row, max_items: int = 10) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     for item_index in range(1, max_items + 1):
@@ -829,11 +842,10 @@ def _iter_content_items(row, max_items: int = 10) -> list[dict[str, str]]:
         if not pkg:
             continue
         cost = _row_item_value(row, "申告金額", item_index) or "0"
-        raw_num = _row_item_value(row, "數量", item_index) or "1"
-        try:
-            num = str(int(float(raw_num)))
-        except Exception:
-            num = "1"
+        quantity = parse_shipment_quantity(_row_item_quantity_value(row, item_index), item_index)
+        if quantity <= 0:
+            continue
+        num = str(quantity)
         items.append({
             "index": str(item_index),
             "pkg": pkg,
@@ -947,11 +959,7 @@ def _build_m060800_item_payload(
 
     pkg = _row_item_value(row, "內容物", item_index)
     cost = _row_item_value(row, "申告金額", item_index) or "0"
-    raw_num = _row_item_value(row, "數量", item_index) or "1"
-    try:
-        num = str(int(float(raw_num)))
-    except Exception:
-        num = "1"
+    num = str(parse_shipment_quantity(_row_item_quantity_value(row, item_index), item_index))
 
     _ordered_payload_set(payload, "itemBean.pkg", pkg)
     _ordered_payload_set(payload, "itemBean.cost.value", cost)
@@ -1927,7 +1935,7 @@ def run_automation(
         ):
             items = _iter_content_items(row)
             if not items:
-                raise RuntimeError("M060800 payload has no content items")
+                raise RuntimeError("M060800 沒有可寄送的內容物：所有商品數量皆為空白、0 或負數")
             hs_codes_by_item = hs_codes_by_item or {}
             _validate_required_hs_codes(
                 items,
@@ -2391,16 +2399,14 @@ def run_automation(
                     page.wait_for_timeout(1000)
                     dismiss_dialogs()
 
-                    for i in range(1, 5):
-                        pkg = _clean(row.get(f"內容物{i}", ""))
-                        if not pkg:
-                            break
-                        cost = _clean(row.get(f"申告金額{i}", "0"))
-                        raw_num = row.get(f"數量{i}", 1)
-                        try:
-                            num = str(int(float(raw_num))) if raw_num != "" else "1"
-                        except Exception:
-                            num = "1"
+                    fallback_items = _iter_content_items(row, max_items=4)
+                    if not fallback_items:
+                        raise RuntimeError("沒有可寄送的內容物：所有商品數量皆為空白、0 或負數")
+                    for item in fallback_items:
+                        i = int(item["index"])
+                        pkg = item["pkg"]
+                        cost = item["cost"]
+                        num = item["num"]
 
                         safe_fill("input[name='itemBean.pkg']", pkg, label=f"pkg_{i}")
                         safe_fill("input[name='itemBean.cost.value']", cost, label=f"cost_{i}")
@@ -2473,14 +2479,14 @@ def run_automation(
                     except Exception:
                         pass
 
-                    pkg = _clean(row.get("內容物1", ""))
-                    if pkg:
-                        cost = _clean(row.get("申告金額1", "0"))
-                        raw_num = row.get("數量1", 1)
-                        try:
-                            num = str(int(float(raw_num))) if raw_num != "" else "1"
-                        except Exception:
-                            num = "1"
+                    fallback_items = _iter_content_items(row, max_items=4)
+                    if not fallback_items:
+                        raise RuntimeError("沒有可寄送的內容物：所有商品數量皆為空白、0 或負數")
+                    for item in fallback_items:
+                        i = int(item["index"])
+                        pkg = item["pkg"]
+                        cost = item["cost"]
+                        num = item["num"]
                         safe_fill("input[name='itemBean.pkg']", pkg, label="parcel_pkg")
                         safe_fill("input[name='itemBean.cost.value']", cost, label="parcel_cost")
                         safe_fill("input[name='itemBean.num.value']", num, label="parcel_num")
@@ -2499,7 +2505,7 @@ def run_automation(
                                     except Exception:
                                         pass
 
-                        safe_click("input[value='Confirm']", label="parcel_confirm")
+                        safe_click("input[value='Confirm']", label=f"parcel_confirm_{i}")
                         page.wait_for_timeout(800)
                         dismiss_dialogs()
 
