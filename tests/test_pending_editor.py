@@ -78,6 +78,57 @@ class PendingEditorTests(unittest.TestCase):
         self.assertEqual(items.iloc[1]["Description"], "Pillow")
         self.assertEqual(items.iloc[1]["HSCode"], "940490")
 
+    def test_legacy_single_item_uses_top_level_postal_fields(self):
+        row = pd.Series(
+            {
+                "郵局內容物": "Pillow TRSN3392",
+                "郵局申告金額(USD)": "10.98",
+                "数量": "1",
+                "內容物1": "",
+                "申告金額1": "",
+                "數量1": "",
+                "訂單合計申告金額(JPY)": "0",
+            }
+        )
+
+        items = build_pending_item_frame(row)
+        summary = build_pending_summary_frame(pd.DataFrame([row]))
+
+        self.assertEqual(
+            items.iloc[0].to_dict(),
+            {
+                "Content": "1",
+                "Description": "Pillow TRSN3392",
+                "HSCode": "",
+                "Value": "10.98",
+                "Quantity": "1",
+            },
+        )
+        self.assertEqual(summary.iloc[0]["TotalValue(USD)"], "10.98")
+
+    def test_applying_untouched_legacy_single_item_preserves_postal_amount(self):
+        original = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "imy2038370",
+                    "郵局內容物": "Pillow TRSN3392",
+                    "郵局申告金額(USD)": "10.98",
+                    "数量": "1",
+                    "內容物1": "",
+                    "申告金額1": "",
+                    "數量1": "",
+                }
+            ]
+        )
+        summary = build_pending_summary_frame(original)
+        items = build_pending_item_frame(original.iloc[0])
+
+        applied = apply_pending_order_editor_values(original, summary, {0: items})
+
+        self.assertEqual(applied.loc[0, "郵局申告金額(USD)"], "10.98")
+        self.assertEqual(applied.loc[0, "申告金額1"], "10.98")
+        self.assertEqual(applied.loc[0, "數量1"], "1")
+
     def test_zero_value_items_are_detected(self):
         row = pd.Series(
             {

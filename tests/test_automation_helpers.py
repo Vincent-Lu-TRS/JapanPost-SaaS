@@ -1152,6 +1152,21 @@ class AutomationHtmlTests(unittest.TestCase):
             ],
         )
 
+    def test_iter_content_items_uses_legacy_single_item_fallback_fields(self):
+        row = {
+            "郵局內容物": "Pillow TRSN3392",
+            "郵局申告金額(USD)": "10.98",
+            "数量": "1",
+            "內容物1": "",
+            "申告金額1": "",
+            "數量1": "",
+        }
+
+        self.assertEqual(
+            _iter_content_items(row),
+            [{"index": "1", "pkg": "Pillow TRSN3392", "cost": "10.98", "num": "1"}],
+        )
+
     def test_iter_content_items_skips_canceled_items_and_preserves_indexes(self):
         row = {
             "內容物1": "Face Primer TRSN8666",
@@ -1313,14 +1328,19 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(codes["DE-1"], {"1": "330499"})
         self.assertEqual(calls, [])
 
-    def test_validate_required_hs_codes_rejects_missing_before_any_item_submit(self):
+    def test_validate_required_hs_codes_reports_missing_without_raising(self):
         items = [
             {"index": "1", "pkg": "Facial Mask"},
             {"index": "2", "pkg": "Unknown Item"},
         ]
 
-        with self.assertRaisesRegex(RuntimeError, "HS Code missing before M060800 submit"):
-            _validate_required_hs_codes(items, is_eu=True, hs_codes_by_item={"1": "330499"})
+        missing = _validate_required_hs_codes(
+            items,
+            is_eu=True,
+            hs_codes_by_item={"1": "330499"},
+        )
+
+        self.assertEqual(missing, ["item=2/2, pkg=Unknown Item"])
 
     def test_validate_required_hs_codes_allows_non_eu_without_codes(self):
         items = [{"index": "1", "pkg": "Unknown Item"}]

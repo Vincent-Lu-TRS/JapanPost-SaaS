@@ -893,12 +893,17 @@ def _row_item_value(row, base_name: str, item_index: int) -> str:
 
 def _row_item_quantity_value(row, item_index: int) -> str:
     item_key = f"數量{item_index}"
+    numbered_content = _row_val(row, [f"內容物{item_index}"])
     if hasattr(row, "index") and item_key in row.index:
-        return _clean(row[item_key])
+        quantity = _clean(row[item_key])
+        if quantity or numbered_content or item_index != 1:
+            return quantity
     if hasattr(row, "get") and item_key in row:
-        return _clean(row.get(item_key, ""))
+        quantity = _clean(row.get(item_key, ""))
+        if quantity or numbered_content or item_index != 1:
+            return quantity
     if item_index == 1:
-        return _row_val(row, ["數量集合"])
+        return _row_val(row, ["數量集合", "数量"])
     return ""
 
 
@@ -992,19 +997,14 @@ def _validate_required_hs_codes(
     *,
     is_eu: bool,
     hs_codes_by_item: dict[str, str],
-) -> None:
+) -> list[str]:
     if not is_eu:
-        return
-    missing = [
+        return []
+    return [
         f"item={pos}/{len(items)}, pkg={item.get('pkg', '')}"
         for pos, item in enumerate(items, start=1)
         if item.get("pkg") and not hs_codes_by_item.get(str(item.get("index", "")))
     ]
-    if missing:
-        raise RuntimeError(
-            "HS Code missing before M060800 submit: "
-            + "; ".join(missing)
-        )
 
 
 def _build_m060800_item_payload(
@@ -2007,11 +2007,16 @@ def run_automation(
             if not items:
                 raise RuntimeError("M060800 沒有可寄送的內容物：所有商品數量皆為空白、0 或負數")
             hs_codes_by_item = hs_codes_by_item or {}
-            _validate_required_hs_codes(
+            missing_hs_codes = _validate_required_hs_codes(
                 items,
                 is_eu=is_eu,
                 hs_codes_by_item=hs_codes_by_item,
             )
+            if missing_hs_codes:
+                _log(
+                    "⚠️ HS Code 預查未取得結果；日本郵便為建議填寫，將留空繼續："
+                    + "; ".join(missing_hs_codes)
+                )
             current_html = html
             current_url = page_url
             resp = None

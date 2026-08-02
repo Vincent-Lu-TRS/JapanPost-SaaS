@@ -121,6 +121,23 @@ def _hscode_col(index: int) -> str:
     return f"HSCode{index}"
 
 
+def _pending_item_values(row: pd.Series, index: int) -> tuple[str, str, str]:
+    content = _str_value(row.get(_content_col(index), ""))
+    value = _str_value(row.get(_value_col(index), ""))
+    quantity = _str_value(row.get(_quantity_col(index), ""))
+    if index == 1 and not content:
+        fallback_content = _str_value(row.get("郵局內容物", ""))
+        if fallback_content:
+            content = fallback_content
+            value = value or _str_value(row.get("郵局申告金額(USD)", ""))
+            quantity = (
+                quantity
+                or _str_value(row.get("數量集合", ""))
+                or _str_value(row.get("数量", ""))
+            )
+    return content, value, quantity
+
+
 def display_country(value: str) -> str:
     text = _str_value(value)
     for separator in ("（", "("):
@@ -132,9 +149,9 @@ def display_country(value: str) -> str:
 def calculate_total_value_usd(row: pd.Series, max_items: int = MAX_EDITOR_ITEMS) -> float:
     total = 0.0
     for index in range(1, max_items + 1):
-        content = _str_value(row.get(_content_col(index), ""))
-        value = _money_to_float(row.get(_value_col(index), ""))
-        quantity = _quantity_to_float(row.get(_quantity_col(index), ""), index)
+        content, raw_value, raw_quantity = _pending_item_values(row, index)
+        value = _money_to_float(raw_value)
+        quantity = _quantity_to_float(raw_quantity, index)
         if (content or value) and quantity > 0:
             total += value * quantity
     return total
@@ -143,8 +160,8 @@ def calculate_total_value_usd(row: pd.Series, max_items: int = MAX_EDITOR_ITEMS)
 def has_zero_value_items(row: pd.Series, max_items: int = MAX_EDITOR_ITEMS) -> list[int]:
     zero_items: list[int] = []
     for index in range(1, max_items + 1):
-        content = _str_value(row.get(_content_col(index), ""))
-        if content and _money_to_float(row.get(_value_col(index), "")) <= 0:
+        content, value, _ = _pending_item_values(row, index)
+        if content and _money_to_float(value) <= 0:
             zero_items.append(index)
     return zero_items
 
@@ -173,9 +190,7 @@ def build_pending_item_frame(
     hs_codes = hs_codes or {}
     rows: list[dict[str, str | int]] = []
     for index in range(1, max_items + 1):
-        content = _str_value(row.get(_content_col(index), ""))
-        value = _str_value(row.get(_value_col(index), ""))
-        quantity = _str_value(row.get(_quantity_col(index), ""))
+        content, value, quantity = _pending_item_values(row, index)
         if not any([content, value, quantity, hs_codes.get(str(index), "")]):
             continue
         rows.append(
@@ -184,11 +199,11 @@ def build_pending_item_frame(
                 "Description": content,
                 "HSCode": sanitize_hscode(hs_codes.get(str(index), _str_value(row.get(_hscode_col(index), "")))),
                 "Value": value,
-                "Quantity": quantity or "1",
+                "Quantity": quantity,
             }
         )
     if not rows:
-        rows.append({"Content": "1", "Description": "", "HSCode": "", "Value": "", "Quantity": "1"})
+        rows.append({"Content": "1", "Description": "", "HSCode": "", "Value": "", "Quantity": ""})
     for row in rows:
         row["Content"] = str(row["Content"]).replace("Content", "")
     return pd.DataFrame(rows, columns=["Content", "Description", "HSCode", "Value", "Quantity"])
