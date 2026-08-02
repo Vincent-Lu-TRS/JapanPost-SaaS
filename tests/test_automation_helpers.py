@@ -124,6 +124,46 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(lines["addrToBean.add2"], "22331 Circle J Ranch Road")
         self.assertEqual(lines["addrToBean.add3"], "Santa Clarita")
 
+    def test_split_address_lines_normalizes_imy2038230_for_japan_post_width(self):
+        address = "Aleea Locotenent Gheorghe Stâlpeanu 11‚ bl 8‚ sc B‚ et 4‚ ap 38‚ interfon 38"
+
+        lines = _split_addr_to_bean_address_lines(address, "București")
+
+        self.assertEqual(
+            lines["addrToBean.add2"],
+            "Aleea Locotenent Gheorghe Stalpeanu 11, bl 8, sc B, et 4, ap 38, interfon 38",
+        )
+        self.assertEqual(lines["addrToBean.add3"], "Bucuresti")
+        self.assertLessEqual(
+            sum(1 if ord(char) < 128 else 2 for char in lines["addrToBean.add2"]),
+            80,
+        )
+
+    def test_split_address_lines_preserves_non_latin_text(self):
+        lines = _split_addr_to_bean_address_lines("台北市 Stâlpeanu‚ 1", "台北市")
+
+        self.assertEqual(lines["addrToBean.add2"], "台北市 Stalpeanu, 1")
+        self.assertEqual(lines["addrToBean.add3"], "台北市")
+
+    def test_split_address_lines_uses_weighted_limits_for_non_ascii_text(self):
+        address = "台" * 41
+
+        lines = _split_addr_to_bean_address_lines(address)
+
+        self.assertEqual(lines["addrToBean.add2"], "台" * 40)
+        self.assertEqual(lines["addrToBean.add3"], "台")
+        for key, limit in (
+            ("addrToBean.add1", 80),
+            ("addrToBean.add2", 80),
+            ("addrToBean.add3", 36),
+        ):
+            width = sum(1 if ord(char) < 128 else 2 for char in lines[key])
+            self.assertLessEqual(width, limit)
+
+    def test_split_address_lines_rejects_unrepresentable_overflow(self):
+        with self.assertRaisesRegex(ValueError, "日本郵局收件地址過長"):
+            _split_addr_to_bean_address_lines("A" * 197)
+
     def test_with_base_href_inserts_base_inside_head(self):
         html = "<html><head><title>Main</title></head><body>Create New Labels</body></html>"
 

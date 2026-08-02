@@ -13,6 +13,7 @@ import re
 import time
 import logging
 import tempfile
+import unicodedata
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -77,6 +78,41 @@ _RECIPIENT_ID_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+_JAPAN_POST_PUNCTUATION_MAP = str.maketrans({
+    "\u00a0": " ",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": ",",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2013": "-",
+    "\u2014": "-",
+    "\uff0c": ",",
+})
+
+
+def _normalize_japan_post_address_text(value: str) -> str:
+    translated = _clean(value).translate(_JAPAN_POST_PUNCTUATION_MAP)
+    normalized: list[str] = []
+    for char in translated:
+        decomposed = unicodedata.normalize("NFKD", char)
+        without_marks = "".join(
+            part for part in decomposed if not unicodedata.combining(part)
+        )
+        if (
+            without_marks
+            and any(part.isalpha() for part in without_marks)
+            and all(ord(part) < 128 for part in without_marks)
+        ):
+            normalized.append(without_marks)
+        else:
+            normalized.append(char)
+    return " ".join("".join(normalized).split())
+
+
+def _japan_post_text_width(value: str) -> int:
+    return sum(1 if ord(char) < 128 else 2 for char in _clean(value))
+
 
 def _normalize_recipient_id(value: str) -> str:
     raw = " ".join(_clean(value).split())
@@ -113,31 +149,58 @@ def _append_recipient_id_to_address(address: str, recipient_id: str) -> str:
 
 def _split_text_at_limit(text: str, limit: int) -> tuple[str, str]:
     cleaned = " ".join(_clean(text).split())
-    if len(cleaned) <= limit:
+    if _japan_post_text_width(cleaned) <= limit:
         return cleaned, ""
-    split_at = cleaned.rfind(" ", 0, limit + 1)
+
+    width = 0
+    prefix_end = 0
+    for index, char in enumerate(cleaned):
+        char_width = 1 if ord(char) < 128 else 2
+        if width + char_width > limit:
+            break
+        width += char_width
+        prefix_end = index + 1
+
+    split_at = cleaned.rfind(" ", 0, prefix_end + 1)
     if split_at <= 0:
-        split_at = limit
+        split_at = prefix_end
     return cleaned[:split_at].strip(), cleaned[split_at:].strip()
 
 
 def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict[str, str]:
-    address = " ".join(_clean(address_line).split())
-    city_text = " ".join(_clean(city).split())
+    address = _normalize_japan_post_address_text(address_line)
+    city_text = _normalize_japan_post_address_text(city)
     address_without_id, recipient_id = _split_recipient_name_and_id(address)
     if not recipient_id:
         add2, overflow = _split_text_at_limit(address_without_id, 80)
         add3_source = " ".join(part for part in [overflow, city_text] if part)
-        add3, _ = _split_text_at_limit(add3_source, 36)
+        add3, remaining = _split_text_at_limit(add3_source, 36)
+        if not remaining:
+            return {
+                "addrToBean.add1": "",
+                "addrToBean.add2": add2,
+                "addrToBean.add3": add3,
+            }
+
+        add1, overflow = _split_text_at_limit(address_without_id, 80)
+        add2, overflow = _split_text_at_limit(overflow, 80)
+        add3_source = " ".join(part for part in [overflow, city_text] if part)
+        add3, remaining = _split_text_at_limit(add3_source, 36)
+        if remaining:
+            raise ValueError(
+                "日本郵局收件地址過長：正規化後仍超過 Address 1/2/3 可用容量"
+            )
         return {
-            "addrToBean.add1": "",
+            "addrToBean.add1": add1,
             "addrToBean.add2": add2,
             "addrToBean.add3": add3,
         }
 
-    if len(address_without_id) <= 80:
+    if _japan_post_text_width(address_without_id) <= 80:
         add2 = address_without_id
-        add3, _ = _split_text_at_limit(recipient_id, 36)
+        add3, remaining = _split_text_at_limit(recipient_id, 36)
+        if remaining:
+            raise ValueError("日本郵局收件地址過長：PCCC／PRC ID 超過 Address 3 容量")
         return {
             "addrToBean.add1": "",
             "addrToBean.add2": add2,
@@ -147,8 +210,12 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
     add1, overflow = _split_text_at_limit(address_without_id, 80)
     add2, overflow = _split_text_at_limit(overflow, 80)
     if overflow:
-        add2 = " ".join(part for part in [add2, overflow] if part).strip()[:80]
-    add3 = recipient_id[:36]
+        raise ValueError(
+            "日本郵局收件地址過長：保留 PCCC／PRC ID 後超過 Address 1/2 可用容量"
+        )
+    add3, remaining = _split_text_at_limit(recipient_id, 36)
+    if remaining:
+        raise ValueError("日本郵局收件地址過長：PCCC／PRC ID 超過 Address 3 容量")
     return {
         "addrToBean.add1": add1,
         "addrToBean.add2": add2,
@@ -1882,8 +1949,11 @@ def run_automation(
                 f"address_id={recipient_fields['recipient_id'] or '-'}, country={country_raw}, "
                 f"country_value={country_value}, "
                 f"add1_len={len(data.get('addrToBean.add1', ''))}, "
+                f"add1_units={_japan_post_text_width(data.get('addrToBean.add1', ''))}, "
                 f"add2_len={len(data.get('addrToBean.add2', ''))}, "
+                f"add2_units={_japan_post_text_width(data.get('addrToBean.add2', ''))}, "
                 f"add3_len={len(data.get('addrToBean.add3', ''))}, "
+                f"add3_units={_japan_post_text_width(data.get('addrToBean.add3', ''))}, "
                 f"postal_len={len(data.get('addrToBean.postal', ''))}, "
                 f"tel_len={len(data.get('addrToBean.tel', ''))}"
             )
