@@ -1,5 +1,7 @@
 # JP Post SaaS Claude Handoff
 
+> Superseded for current continuation by `HANDOFF.md` (2026-08-04). Keep this file as historical authentication and automation evidence; do not treat its older blocker/status sections as current without re-verification.
+
 ## 2026-06-20 Latest Continuation Note
 
 Use `CLAUDE.md` as the current first-read handoff file, and use `memory.md` for durable UI/data preferences. This file contains older but still useful auth and automation context.

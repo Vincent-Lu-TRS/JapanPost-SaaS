@@ -1,6 +1,53 @@
 # memory.md - Durable Project Memory
 
-Last updated: 2026-06-20 JST
+Last updated: 2026-08-04 JST
+
+## Canonical Status
+
+- Production: `https://jppost.streamlit.app/`
+- Repository: `https://github.com/Vincent-Lu-TRS/JapanPost-SaaS`
+- Production branch and entrypoint: `main` / `app.py`
+- Current verified `main`: `8d9c2ae7953e912a2a221f67e7bbc166ebe08d84`
+- PR #1 and PR #2 were merged on 2026-08-02.
+- The production app was verified after PR #2 to render the authenticated Cross-Border UI rather than Streamlit's error page.
+- The four top-level views are cross-border picking labels, Japan Post pending labels, usage instructions, and read diagnostics.
+- `HANDOFF.md` is the canonical continuation file. Older handoff files are historical evidence only.
+
+## Durable Architecture
+
+- Streamlit is the operator UI; browser automation runs server-side/headless.
+- Google authentication must remain restricted to `@tkrjm.co.jp` or explicit whitelist entries.
+- Google Sheets is the operational source and writeback surface for pending orders, results, and duplicate-prevention state.
+- Japan Post navigation is requests-first. Avoid injecting legacy Japan Post HTML into Playwright because Streamlit Cloud previously killed Chromium during that path.
+- Keep Playwright only for steps that truly require browser rendering or browser-only interaction; prefer structured HTTP form parsing/submission and direct PDF download.
+- Successful PDF upload and source-sheet writeback are part of job completion. Do not mark an order complete before both are confirmed.
+- Never commit Streamlit secrets, OAuth client secrets, Japan Post credentials, API keys, or service-account JSON.
+
+## Shipment Item Semantics
+
+- Explicit quantity `0`, a negative quantity, or a blank quantity means that shipment item is canceled and must be skipped.
+- Do not silently convert a blank or invalid explicit quantity to `1`.
+- Legacy single-item rows may store only the top-level fields `郵局內容物`, `郵局申告金額(USD)`, and `数量`/`數量集合`.
+- Only when numbered item content is absent may item 1 fall back to those top-level legacy fields.
+- If numbered item content exists, its explicit quantity remains authoritative; a blank numbered quantity still means canceled.
+- Recalculating editor values must preserve untouched legacy item description, amount, and quantity instead of overwriting the postal amount with `0.00`.
+
+## Japan Post Form Rules
+
+- Recipient address splitting must respect Japan Post's field limits using Japan Post's effective character width, not Python character count alone.
+- Preserve the full address across `addrToBean.add1`, `addrToBean.add2`, and `addrToBean.add3`; do not truncate silently.
+- `addrToBean.add2` has been observed with `maxlength=80`; `addrToBean.add3` with `maxlength=36`.
+- PRC ID/PCCC belongs at the end of the address, not in `addrToBean.sortNum`.
+- An unavailable EU HS Code is a warning, not a hard stop. Leave it blank and continue; never invent a code.
+- Failure diagnostics should retain the relevant Japan Post response markers and capture a failure snapshot when available, without exposing secrets.
+
+## 2026-08-02 Regression Fixes
+
+- `3bb0c64` / PR #1: handle non-ASCII recipient addresses using Japan Post-compatible width limits. This fixed the Romania address path used by `imy2038230`.
+- `f26332d` / PR #2: preserve legacy single-item postal values and make missing HS Code lookup non-fatal. This fixed the `0.00` Hong Kong payload path seen for `imy2038370` and the HS precheck stop seen for `imy2038230`.
+- Merge commits: `c2c6d81` (PR #1) and `8d9c2ae` (PR #2).
+- Post-merge verification on 2026-08-02: `python -m unittest discover -s tests` reported 209 tests, all passing.
+- The two production orders were not automatically retried after deployment to avoid duplicate labels. Their later business outcome is not established by the code merge alone.
 
 ## User Preferences
 
