@@ -182,6 +182,7 @@ def mark_results_completed(job: dict[str, Any], results: list[dict[str, Any]]) -
         tracking = str(result.get("tracking") or "").strip()
         trans_type = str(result.get("trans_type") or result.get("TransType") or "").strip()
         if order_id:
+            result["status"] = "completed"
             _mark_order(
                 orders,
                 order_id,
@@ -195,6 +196,115 @@ def mark_results_completed(job: dict[str, Any], results: list[dict[str, Any]]) -
             )
 
 
+def mark_results_failed(job: dict[str, Any], results: list[dict[str, Any]]) -> None:
+    orders = job.get("orders") or []
+    for result in results:
+        order_id = str(result.get("order_id") or "").strip()
+        if not order_id:
+            continue
+        reason_code = str(result.get("reason_code") or "unknown").strip()
+        reason_text = str(result.get("reason_text") or result.get("message") or reason_code).strip()
+        status = str(result.get("status") or "failed").strip()
+        _mark_order(
+            orders,
+            order_id,
+            {
+                "status": "skipped" if status in {"skipped", "blocked"} else "failed",
+                "stage": "未製單" if status in {"skipped", "blocked"} else "需排查",
+                "reason_code": reason_code,
+                "message": reason_text,
+            },
+            trans_type=str(result.get("trans_type") or result.get("TransType") or "").strip(),
+        )
+
+
+def summarize_job_results(results: list[dict[str, Any]] | None) -> dict[str, Any]:
+    rows = list(results or [])
+    completed_statuses = {"success", "completed"}
+    failure_statuses = {"failed", "backfill_failed", "error"}
+    skipped_statuses = {"skipped", "blocked"}
+    failures = [
+        result
+        for result in rows
+        if str(result.get("status") or "").strip() in failure_statuses | skipped_statuses
+    ]
+    return {
+        "total": len(rows),
+        "completed": sum(1 for result in rows if str(result.get("status") or "").strip() in completed_statuses),
+        "failed": sum(1 for result in rows if str(result.get("status") or "").strip() in failure_statuses),
+        "skipped": sum(1 for result in rows if str(result.get("status") or "").strip() in skipped_statuses),
+        "failures": failures,
+    }
+
+
+def preflight_batch_orders(
+    selected_df: pd.DataFrame,
+    latest_pending_df: pd.DataFrame,
+    completed_ids: set[str],
+) -> list[dict[str, str]]:
+    """Compare the selected snapshot with fresh source/target authority."""
+    latest_by_order: dict[str, pd.Series] = {}
+    if isinstance(latest_pending_df, pd.DataFrame):
+        for _, row in latest_pending_df.iterrows():
+            order_id = _row_value(row, ORDER_ID_COLUMNS)
+            if order_id and order_id not in latest_by_order:
+                latest_by_order[order_id] = row
+
+    checks: list[dict[str, str]] = []
+    seen: set[str] = set()
+    if not isinstance(selected_df, pd.DataFrame):
+        return checks
+    for _, row in selected_df.iterrows():
+        order_id = _row_value(row, ORDER_ID_COLUMNS)
+        if not order_id or order_id in seen:
+            continue
+        seen.add(order_id)
+        if order_id in completed_ids:
+            checks.append({
+                "order_id": order_id,
+                "status": "already_completed",
+                "reason_code": "already_completed",
+                "reason_text": "目標表已有完成紀錄",
+            })
+            continue
+        latest = latest_by_order.get(order_id)
+        if latest is None:
+            source_status = _row_value(row, ["製單上傳狀態(請用[未打單]檢視模式)"])
+            status_code = (
+                "source_indicates_done_target_missing"
+                if re.fullmatch(r"[A-Z]{2}\d{9}JP", source_status)
+                else "source_changed"
+            )
+            checks.append({
+                "order_id": order_id,
+                "status": status_code,
+                "reason_code": status_code,
+                "reason_text": (
+                    "來源狀態已有 tracking、但目標表缺少完成證據，停止自動製單"
+                    if status_code == "source_indicates_done_target_missing"
+                    else "最新來源資料已不再是可製單狀態，停止以避免誤製"
+                ),
+            })
+            continue
+        selected_fingerprint = _row_value(row, ["_source_fingerprint"])
+        latest_fingerprint = _row_value(latest, ["_source_fingerprint"])
+        if selected_fingerprint and latest_fingerprint and selected_fingerprint != latest_fingerprint:
+            checks.append({
+                "order_id": order_id,
+                "status": "source_changed",
+                "reason_code": "source_changed",
+                "reason_text": "來源資料在選取後已變更，停止以避免使用過期內容",
+            })
+            continue
+        checks.append({
+            "order_id": order_id,
+            "status": "ready",
+            "reason_code": "",
+            "reason_text": "",
+        })
+    return checks
+
+
 def mark_unfinished_orders(job: dict[str, Any], status: str, stage: str, message: str) -> None:
     for order in job.get("orders") or []:
         if order.get("status") in {"queued", "running"}:
@@ -204,7 +314,7 @@ def mark_unfinished_orders(job: dict[str, Any], status: str, stage: str, message
 def summarize_job_progress(job: dict[str, Any] | None) -> dict[str, Any]:
     orders = (job or {}).get("orders") or []
     total = len(orders)
-    done_statuses = {"success", "failed", "skipped"}
+    done_statuses = {"success", "completed", "failed", "skipped", "blocked"}
     done = sum(1 for order in orders if order.get("status") in done_statuses)
     active = next((order for order in orders if order.get("status") == "running"), None)
     if active is None:

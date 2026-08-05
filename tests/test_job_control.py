@@ -10,6 +10,9 @@ from job_control import (
     create_order_states,
     filter_key_log_lines,
     mark_results_completed,
+    mark_results_failed,
+    preflight_batch_orders,
+    summarize_job_results,
     summarize_job_progress,
     update_order_status_from_log,
 )
@@ -128,6 +131,14 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(job["orders"][1]["status"], "success")
         self.assertEqual(job["orders"][1]["tracking_no"], "LX323090458JP")
 
+    def test_mark_results_completed_promotes_result_after_backfill_verification(self):
+        job = {"orders": [{"order_id": "WhoWhy-Test5", "status": "queued", "tracking_no": ""}]}
+        results = [{"order_id": "WhoWhy-Test5", "status": "success", "tracking": "LX323090458JP"}]
+
+        mark_results_completed(job, results)
+
+        self.assertEqual(results[0]["status"], "completed")
+
     def test_summarize_job_progress_reports_current_running_order(self):
         job = {
             "orders": [
@@ -144,6 +155,59 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(progress["active_order_id"], "WhoWht-Test2")
         self.assertEqual(progress["active_stage"], "填寫收件人")
         self.assertAlmostEqual(progress["ratio"], 1 / 3)
+
+    def test_preflight_batch_orders_blocks_completed_and_changed_orders(self):
+        selected = pd.DataFrame(
+            [
+                {"注文番号(貼上原始資料)": "imy2038510", "_source_fingerprint": "fp-1"},
+                {"注文番号(貼上原始資料)": "imy2038490", "_source_fingerprint": "fp-2"},
+                {"注文番号(貼上原始資料)": "imy2038410", "_source_fingerprint": "fp-3"},
+            ]
+        )
+        latest = pd.DataFrame(
+            [
+                {"注文番号(貼上原始資料)": "imy2038510", "_source_fingerprint": "fp-1"},
+                {"注文號": "not-used"},
+                {"注文番号(貼上原始資料)": "imy2038410", "_source_fingerprint": "fp-new"},
+            ]
+        )
+
+        checks = preflight_batch_orders(selected, latest, {"imy2038490"})
+
+        self.assertEqual(
+            {check["order_id"]: check["status"] for check in checks},
+            {
+                "imy2038510": "ready",
+                "imy2038490": "already_completed",
+                "imy2038410": "source_changed",
+            },
+        )
+
+    def test_summarize_job_results_counts_success_and_failure_reasons(self):
+        summary = summarize_job_results(
+            [
+                {"order_id": "ok-1", "status": "success", "tracking": "LX123456789JP"},
+                {"order_id": "ok-2", "status": "completed", "tracking": "LX123456780JP"},
+                {"order_id": "bad-1", "status": "failed", "reason_code": "address_too_long", "reason_text": "地址過長"},
+            ]
+        )
+
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["completed"], 2)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["failures"][0]["order_id"], "bad-1")
+
+    def test_mark_results_failed_records_reason_on_order(self):
+        job = {"orders": create_order_states(self._pending_df(), None)}
+
+        mark_results_failed(
+            job,
+            [{"order_id": "WhoWhy-Test5", "status": "failed", "reason_code": "address_too_long", "reason_text": "地址過長"}],
+        )
+
+        self.assertEqual(job["orders"][0]["status"], "failed")
+        self.assertEqual(job["orders"][0]["reason_code"], "address_too_long")
+        self.assertIn("地址過長", job["orders"][0]["message"])
 
     def test_update_order_status_from_log_marks_running_and_stopped(self):
         job = {"orders": create_order_states(self._pending_df(), None)}

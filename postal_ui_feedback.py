@@ -4,6 +4,42 @@ from __future__ import annotations
 import re
 
 
+def summarize_batch_results(results: list[dict] | None) -> dict[str, object]:
+    """Return authoritative counts and user-facing alerts for a completed job."""
+    rows = list(results or [])
+    completed_statuses = {"success", "completed"}
+    failed_statuses = {"failed", "backfill_failed", "error", "skipped", "blocked"}
+    completed_count = sum(
+        1 for result in rows if str(result.get("status") or "").strip() in completed_statuses
+    )
+    failed_rows = [
+        result for result in rows if str(result.get("status") or "").strip() in failed_statuses
+    ]
+    alerts = []
+    for result in failed_rows:
+        order_id = str(result.get("order_id") or "未指定").strip()
+        reason = str(
+            result.get("reason_text")
+            or result.get("message")
+            or result.get("reason_code")
+            or "未知原因"
+        ).strip()
+        alerts.append(f"訂單編號 {order_id}：未製單（{reason}）")
+    return {
+        "total_count": len(rows),
+        "completed_count": completed_count,
+        "failed_count": sum(
+            1 for result in failed_rows
+            if str(result.get("status") or "").strip() in {"failed", "backfill_failed", "error"}
+        ),
+        "skipped_count": sum(
+            1 for result in failed_rows
+            if str(result.get("status") or "").strip() in {"skipped", "blocked"}
+        ),
+        "failure_alerts": alerts,
+    }
+
+
 def summarize_pending_read_logs(logs: list[str]) -> dict[str, str]:
     """Extract the useful pending-order read summary from diagnostic log lines."""
     summary = {

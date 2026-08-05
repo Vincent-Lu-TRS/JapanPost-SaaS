@@ -23,7 +23,7 @@ import pandas as pd
 
 from shipment_quantity import parse_shipment_quantity
 
-AUTOMATION_BUILD_ID = "2026-07-07-debug-snapshot-lock-ui"
+AUTOMATION_BUILD_ID = "2026-08-05-array-formula-address-normalization"
 
 from .drive import DRIVE_FOLDER_ID, upload_file_to_drive, upload_pdf
 from .gemini_helper import predict_hs_code
@@ -110,6 +110,91 @@ def _normalize_japan_post_address_text(value: str) -> str:
     return " ".join("".join(normalized).split())
 
 
+_ADDRESS_VARIANT_SEPARATOR_RE = re.compile(r"[‚\u201a|\n;]+")
+_ADDRESS_SIGNAL_WORDS = {
+    "address",
+    "building",
+    "bldg",
+    "condo",
+    "district",
+    "floor",
+    "house",
+    "road",
+    "room",
+    "station",
+    "street",
+    "subdistrict",
+    "village",
+}
+
+
+def _address_variant_parts(value: str) -> list[str]:
+    return [
+        part.strip(" ,")
+        for part in _ADDRESS_VARIANT_SEPARATOR_RE.split(_clean(value))
+        if part.strip(" ,")
+    ]
+
+
+def _select_bilingual_english_address_segment(
+    address_line: str,
+    city: str = "",
+    postal_code: str = "",
+) -> str:
+    """Select a trusted English duplicate from a bilingual street field.
+
+    The source sheet sometimes stores a Thai address followed by an English
+    rendering separated with ``‚``.  This deliberately does not translate or
+    truncate text: it selects the English suffix only when it is mostly ASCII,
+    contains recognizable address terms, and repeats at least two numeric
+    anchors from the preceding address (for example room/floor/postcode).
+    """
+    raw = _clean(address_line)
+    parts = _address_variant_parts(raw)
+    if len(parts) < 2:
+        return raw
+
+    postal_tokens = set(re.findall(r"\d+", _clean(postal_code)))
+    for start in range(1, len(parts)):
+        prefix = ", ".join(parts[:start])
+        candidate = ", ".join(parts[start:])
+        alphanumeric = [char for char in candidate if char.isalnum()]
+        ascii_alphanumeric = [char for char in alphanumeric if ord(char) < 128]
+        if not alphanumeric or not ascii_alphanumeric:
+            continue
+        if len(ascii_alphanumeric) / len(alphanumeric) < 0.85:
+            continue
+
+        candidate_words = {
+            word.casefold()
+            for word in re.findall(r"[A-Za-z]+", candidate)
+        }
+        if len(candidate_words & _ADDRESS_SIGNAL_WORDS) < 2:
+            continue
+
+        shared_numbers = set(re.findall(r"\d+", prefix)) & set(re.findall(r"\d+", candidate))
+        if len(shared_numbers) < 2:
+            continue
+        if postal_tokens and not postal_tokens.issubset(set(re.findall(r"\d+", candidate))):
+            continue
+
+        selected = _normalize_japan_post_address_text(candidate)
+        selected_postal_tokens = set(re.findall(r"\d+", selected))
+        if postal_tokens and postal_tokens.issubset(selected_postal_tokens):
+            selected = re.sub(
+                rf"(?:[ ,]+)?{re.escape(next(iter(postal_tokens)))}$",
+                "",
+                selected,
+            ).strip(" ,")
+
+        normalized_city = _normalize_japan_post_address_text(city)
+        if normalized_city and selected.casefold().endswith(normalized_city.casefold()):
+            selected = selected[: -len(normalized_city)].rstrip(" ,")
+        return selected or raw
+
+    return raw
+
+
 def _japan_post_text_width(value: str) -> int:
     return sum(1 if ord(char) < 128 else 2 for char in _clean(value))
 
@@ -133,6 +218,40 @@ def _split_recipient_name_and_id(name: str) -> tuple[str, str]:
     recipient_id = _normalize_recipient_id(match.group(1))
     cleaned_name = _RECIPIENT_ID_PATTERN.sub("", cleaned_name).strip()
     return cleaned_name, recipient_id
+
+
+_RECIPIENT_NAME_ALIAS_RE = re.compile(r"[\(（]([^()（）]*)[\)）]")
+
+
+def _select_preferred_recipient_name(name: str) -> str:
+    """Drop native-script aliases only when a clear Latin name is present."""
+    raw = _clean(name)
+    if not raw:
+        return raw
+
+    matches = list(_RECIPIENT_NAME_ALIAS_RE.finditer(raw))
+    thai_aliases = [
+        match.group(1)
+        for match in matches
+        if any(0x0E00 <= ord(char) <= 0x0E7F for char in match.group(1))
+    ]
+    if not thai_aliases:
+        return raw
+
+    latin_base = _RECIPIENT_NAME_ALIAS_RE.sub(" ", raw)
+    base_letters = [char for char in latin_base if char.isalpha()]
+    latin_letters = [char for char in base_letters if ord(char) < 128]
+    latin_words = re.findall(r"[A-Za-z]+", latin_base)
+    if len(latin_words) < 2 or not base_letters:
+        return raw
+    if len(latin_letters) / len(base_letters) < 0.85:
+        return raw
+
+    selected = _RECIPIENT_NAME_ALIAS_RE.sub(
+        lambda match: "" if any(0x0E00 <= ord(char) <= 0x0E7F for char in match.group(1)) else match.group(0),
+        raw,
+    )
+    return " ".join(selected.split())
 
 
 def _append_recipient_id_to_address(address: str, recipient_id: str) -> str:
@@ -172,6 +291,20 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
     city_text = _normalize_japan_post_address_text(city)
     address_without_id, recipient_id = _split_recipient_name_and_id(address)
     if not recipient_id:
+        if _japan_post_text_width(city_text) > 36:
+            combined = " ".join(part for part in [address_without_id, city_text] if part)
+            add1, overflow = _split_text_at_limit(combined, 80)
+            add2, overflow = _split_text_at_limit(overflow, 80)
+            add3, remaining = _split_text_at_limit(overflow, 36)
+            if remaining:
+                raise ValueError(
+                    "日本郵局收件地址過長：正規化後仍超過 Address 1/2/3 可用容量"
+                )
+            return {
+                "addrToBean.add1": add1,
+                "addrToBean.add2": add2,
+                "addrToBean.add3": add3,
+            }
         add2, overflow = _split_text_at_limit(address_without_id, 80)
         add3_source = " ".join(part for part in [overflow, city_text] if part)
         add3, remaining = _split_text_at_limit(add3_source, 36)
@@ -223,10 +356,91 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
     }
 
 
+class AddressValidationError(ValueError):
+    """A local or remote address validation failure with a stable reason code."""
+
+    def __init__(self, message: str, reason_code: str = "unknown"):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def _diagnose_address_payload(address_line: str, city: str = "") -> dict[str, object]:
+    raw_address = _clean(address_line)
+    raw_city = _clean(city)
+    raw_combined = " ".join(part for part in (raw_address, raw_city) if part)
+    normalized_address = _normalize_japan_post_address_text(raw_address)
+    normalized_city = _normalize_japan_post_address_text(raw_city)
+    normalized_combined = " ".join(
+        part for part in (normalized_address, normalized_city) if part
+    )
+    try:
+        split_lines = _split_addr_to_bean_address_lines(raw_address, raw_city)
+        field_widths = {
+            key: _japan_post_text_width(value)
+            for key, value in split_lines.items()
+        }
+        capacity_exceeded = False
+        split_error = ""
+    except ValueError as exc:
+        field_widths = {}
+        capacity_exceeded = True
+        split_error = str(exc)
+
+    return {
+        "raw_chars": len(raw_combined),
+        "normalized_chars": len(normalized_combined),
+        "raw_width": _japan_post_text_width(raw_combined),
+        "normalized_width": _japan_post_text_width(normalized_combined),
+        "address_chars": len(raw_address),
+        "city_chars": len(raw_city),
+        "thai_codepoints": sum(0x0E00 <= ord(char) <= 0x0E7F for char in raw_combined),
+        "non_ascii_codepoints": sum(ord(char) >= 128 for char in raw_combined),
+        "field_widths": field_widths,
+        "capacity_exceeded": capacity_exceeded,
+        "split_error": split_error,
+    }
+
+
+def _classify_address_error(
+    error: Exception | None = None,
+    *,
+    response_text: str = "",
+    status_code: int | None = None,
+) -> str:
+    error_text = _clean(error) if error else ""
+    text = f"{error_text} {response_text or ''}".lower()
+    if "地址過長" in text or "overflow" in text or "too long" in text:
+        return "address_too_long"
+    if any(marker in text for marker in (
+        "invalid character",
+        "unrepresentable",
+        "unsupported character",
+        "thai",
+        "泰文",
+        "タイ語",
+        "字符不",
+        "文字不",
+    )):
+        return "address_invalid_character"
+    if any(marker in text for marker in ("postal", "zip", "郵遞區號", "郵便番号", "郵便番號")):
+        return "postal_validation_error"
+    if status_code is not None and status_code >= 400:
+        return "remote_form_error"
+    return "unknown"
+
+
 def _prepare_addr_to_bean_recipient_fields(row) -> dict[str, str]:
     name_val = _row_val(row, ["Shipping Name", "Shipping Name_1"])
     address_line = _row_val(row, ["Shipping Street", "收件地址"])
+    city = _row_val(row, ["Shipping City", "城市"])
+    postal_code = _row_val(row, ["Shipping Zip", "Shipping Postal Code", "郵遞區號", "郵便番号"])
+    address_line = _select_bilingual_english_address_segment(
+        address_line,
+        city,
+        postal_code,
+    )
     clean_name, recipient_id = _split_recipient_name_and_id(name_val)
+    clean_name = _select_preferred_recipient_name(clean_name)
     return {
         "name": clean_name,
         "address_line": _append_recipient_id_to_address(address_line, recipient_id),
@@ -246,9 +460,33 @@ def _build_result_record(row, order_id: str, tracking: str) -> dict:
         "name": _row_val(row, ["Shipping Name", "Shipping Name_1"]),
         "order_id": order_id,
         "tracking": tracking,
+        "status": "success",
+        "items_expected": len(_iter_content_items(row)),
+        "items_submitted": len(_iter_content_items(row)),
         "country": country_raw,
         "country_raw": country_raw,
         "trans_type": trans_type,
+        "date": time.strftime("%Y-%m-%d"),
+    }
+
+
+def _build_failure_record(row, order_id: str, error: Exception, status: str = "failed") -> dict:
+    reason_code = getattr(error, "reason_code", "") or _classify_address_error(error)
+    reason_text = str(error or "未知錯誤").strip() or "未知錯誤"
+    items_expected = len(_iter_content_items(row))
+    return {
+        "name": _row_val(row, ["Shipping Name", "Shipping Name_1"]),
+        "order_id": order_id,
+        "tracking": "",
+        "status": status,
+        "reason_code": reason_code,
+        "reason_text": reason_text,
+        "message": reason_text,
+        "items_expected": items_expected,
+        "items_submitted": 0,
+        "country": _row_val(row, ["收件人國家", "Country"]),
+        "country_raw": _row_val(row, ["收件人國家", "Country"]),
+        "trans_type": _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]),
         "date": time.strftime("%Y-%m-%d"),
     }
 
@@ -1298,7 +1536,7 @@ def run_automation(
         precomputed_hs_codes: 預先查好的 HS Code，避免重複呼叫 AI
 
     Returns:
-        成功結果清單，每筆為 dict {name, order_id, tracking, country_raw, date}
+        結果清單；成功項目包含 tracking，失敗項目包含 status、reason_code、reason_text。
     """
     def _log(msg: str):
         if log_cb:
@@ -1913,10 +2151,40 @@ def run_automation(
             country_code = resolve_country_code(country_raw, COUNTRY_CODE_MAP)
             recipient_fields = _prepare_addr_to_bean_recipient_fields(row)
             final_name = _format_addr_to_bean_name(row, order_id)
-            address_lines = _split_addr_to_bean_address_lines(
-                recipient_fields["address_line"],
-                _get_excel_val(row, ["Shipping City", "城市"]),
+            raw_name = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
+            _log(
+                "🧭 收件人姓名診斷："
+                f"raw_chars={len(raw_name)}, final_chars={len(final_name)}, "
+                f"raw_width={_japan_post_text_width(raw_name)}, "
+                f"final_width={_japan_post_text_width(final_name)}, "
+                f"thai_codepoints={sum(0x0E00 <= ord(char) <= 0x0E7F for char in raw_name)}"
             )
+            city = _get_excel_val(row, ["Shipping City", "城市"])
+            address_diagnostics = _diagnose_address_payload(
+                recipient_fields["address_line"],
+                city,
+            )
+            _log(
+                "🧭 地址診斷："
+                f"raw_chars={address_diagnostics['raw_chars']}, "
+                f"normalized_chars={address_diagnostics['normalized_chars']}, "
+                f"raw_width={address_diagnostics['raw_width']}, "
+                f"normalized_width={address_diagnostics['normalized_width']}, "
+                f"thai_codepoints={address_diagnostics['thai_codepoints']}, "
+                f"non_ascii_codepoints={address_diagnostics['non_ascii_codepoints']}, "
+                f"capacity_exceeded={address_diagnostics['capacity_exceeded']}"
+            )
+            try:
+                address_lines = _split_addr_to_bean_address_lines(
+                    recipient_fields["address_line"],
+                    city,
+                )
+            except ValueError as exc:
+                reason_code = _classify_address_error(exc)
+                raise AddressValidationError(
+                    f"[{reason_code}] {exc}",
+                    reason_code,
+                ) from exc
 
             form = _pick_form(
                 label_form_html,
@@ -1991,9 +2259,35 @@ def run_automation(
                 f"field_context={_summarize_field_context(resp.text, ['addrToBean.sortNum', 'addrToBean.add2', 'addrToBean.add3'])}"
             )
             if resp.status_code >= 400:
-                raise RuntimeError(f"M060505 addrToBean submit failed: HTTP {resp.status_code}")
+                reason_code = _classify_address_error(
+                    RuntimeError(f"HTTP {resp.status_code}"),
+                    response_text=_summarize_error_text(resp.text),
+                    status_code=resp.status_code,
+                )
+                raise AddressValidationError(
+                    f"[{reason_code}] M060505 addrToBean submit failed: HTTP {resp.status_code}",
+                    reason_code,
+                )
+            response_error = _summarize_error_text(resp.text)
+            response_reason_code = _classify_address_error(
+                response_text=response_error,
+                status_code=resp.status_code,
+            )
+            if response_reason_code in {
+                "address_too_long",
+                "address_invalid_character",
+                "postal_validation_error",
+            }:
+                reason_code = response_reason_code
+                raise AddressValidationError(
+                    f"[{reason_code}] M060505 收件資訊驗證失敗：{response_error}",
+                    reason_code,
+                )
             if "addrToBean" in resp.text and "error" in resp.text[:5000].lower():
-                _log("⚠️ M060505 回應仍停留在收件人頁，可能有欄位驗證錯誤")
+                _log(
+                    "⚠️ M060505 回應仍停留在收件人頁，可能有欄位驗證錯誤；"
+                    f"reason_code={_classify_address_error(response_text=response_error)}"
+                )
             return resp, country_raw, country_code
 
         def submit_m060800_item_via_requests(
@@ -2006,6 +2300,7 @@ def run_automation(
             items = _iter_content_items(row)
             if not items:
                 raise RuntimeError("M060800 沒有可寄送的內容物：所有商品數量皆為空白、0 或負數")
+            _log(f"📦 M060800 內容物數量確認：items_expected={len(items)}")
             hs_codes_by_item = hs_codes_by_item or {}
             missing_hs_codes = _validate_required_hs_codes(
                 items,
@@ -2092,6 +2387,8 @@ def run_automation(
                     )
                 current_html = resp.text
                 current_url = resp.url
+
+            _log(f"📦 M060800 內容物送出完成：items_submitted={len(items)}")
 
             if resp is None:
                 raise RuntimeError("M060800 item submit did not produce a response")
@@ -2456,10 +2753,11 @@ def run_automation(
                 if len(results) > results_before_order:
                     _log(f"✅ 訂單 {order_id} requests 打單流程已完成並回傳結果")
                 else:
-                    _log(
-                        f"⏸️ 訂單 {order_id} requests 流程已停止但未取得完整結果；"
-                        "請依最後一段 diagnostics 繼續排查"
+                    failure = RuntimeError(
+                        "requests 流程已停止但未取得完整結果；請依最後一段 diagnostics 繼續排查"
                     )
+                    _log(f"⏸️ 訂單 {order_id} {failure}")
+                    results.append(_build_failure_record(row, order_id, failure))
                 continue
 
                 # ── Step 3: 運送方式分流 ──────────────
@@ -2474,7 +2772,7 @@ def run_automation(
                     page.wait_for_timeout(1000)
                     dismiss_dialogs()
 
-                    fallback_items = _iter_content_items(row, max_items=4)
+                    fallback_items = _iter_content_items(row)
                     if not fallback_items:
                         raise RuntimeError("沒有可寄送的內容物：所有商品數量皆為空白、0 或負數")
                     for item in fallback_items:
@@ -2554,7 +2852,7 @@ def run_automation(
                     except Exception:
                         pass
 
-                    fallback_items = _iter_content_items(row, max_items=4)
+                    fallback_items = _iter_content_items(row)
                     if not fallback_items:
                         raise RuntimeError("沒有可寄送的內容物：所有商品數量皆為空白、0 或負數")
                     for item in fallback_items:
@@ -2698,21 +2996,14 @@ def run_automation(
                     _log(f"⚠️ Step 9 點擊 Completed 失敗（略過）：{e}")
 
                 # ── 收集結果 ────────────────────────────
-                country_raw = _get_excel_val(row, ["收件人國家", "Country"])
-                results.append({
-                    "name": _get_excel_val(row, ["Shipping Name", "Shipping Name_1"]),
-                    "order_id": order_id,
-                    "tracking": tracking,
-                    "country": country_raw,
-                    "country_raw": country_raw,
-                    "trans_type": _get_excel_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]),
-                    "date": time.strftime("%Y-%m-%d"),
-                })
+                results.append(_build_result_record(row, order_id, tracking))
                 _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
 
             except Exception as e:
                 import traceback as _tb
                 _log(f"❌ 訂單 {order_id} 例外：{type(e).__name__}: {e}")
                 _log(f"詳細：{_tb.format_exc()}")
+                if len(results) == results_before_order:
+                    results.append(_build_failure_record(row, order_id, e))
 
     return results

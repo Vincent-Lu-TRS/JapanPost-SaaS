@@ -21,7 +21,10 @@ from job_control import (
     BatchJobRegistry,
     filter_key_log_lines,
     mark_results_completed,
+    mark_results_failed,
     mark_unfinished_orders,
+    preflight_batch_orders,
+    summarize_job_results,
     summarize_job_progress,
     update_order_status_from_log,
 )
@@ -36,10 +39,11 @@ from pending_editor import (
     expand_pending_orders_for_trans_types,
     has_zero_value_items,
     parse_shipping_name,
+    pending_order_warning_lines,
     sanitize_hscode,
 )
 from fx_rates import fetch_usd_jpy_rate
-from postal_ui_feedback import summarize_pending_read_logs
+from postal_ui_feedback import summarize_batch_results, summarize_pending_read_logs
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -271,6 +275,15 @@ def _required_id_warning_lines(df: pd.DataFrame) -> list[str]:
     return warnings
 
 
+def _pending_data_warning_lines(df: pd.DataFrame) -> list[str]:
+    warnings: list[str] = []
+    if not isinstance(df, pd.DataFrame):
+        return warnings
+    for _, row in df.iterrows():
+        warnings.extend(pending_order_warning_lines(row))
+    return warnings
+
+
 def _format_short_rate(rate: float | None, rate_date: str) -> str:
     rate_text = f"{rate:.2f}" if rate else "N/A"
     date_text = ""
@@ -474,14 +487,74 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 print(f"[LOG_ERR] {log_err}", file=sys.stderr, flush=True)
 
         try:
+            rows_for_run = df if max_rows is None else df.head(max_rows)
+            from bot.sheets import (
+                COUNTRY_CODE_MAP,
+                backfill_results,
+                get_pending_orders,
+                read_completed_order_ids,
+            )
+
+            _log("🔐 製單前重新確認 Google Sheets 完成狀態與來源快照...")
+            try:
+                completed_ids = read_completed_order_ids()
+            except Exception as preflight_error:
+                reason_text = f"無法確認完成狀態，這批未開始製單：{preflight_error}"
+                preflight_results = [
+                    {
+                        "order_id": str(order.get("order_id") or "").strip(),
+                        "status": "blocked",
+                        "reason_code": "target_read_error",
+                        "reason_text": reason_text,
+                        "message": reason_text,
+                    }
+                    for order in job.get("orders") or []
+                ]
+                job["results"] = preflight_results
+                mark_results_failed(job, preflight_results)
+                _log(f"❌ {reason_text}")
+                _JOB_REGISTRY.finish(job, "error")
+                _clear_job_lock(email)
+                return
+
+            latest_pending_df = get_pending_orders(log_cb=_log)
+            preflight_checks = preflight_batch_orders(
+                rows_for_run,
+                latest_pending_df,
+                completed_ids,
+            )
+            job["preflight_checks"] = preflight_checks
+            blocked_checks = [check for check in preflight_checks if check.get("status") != "ready"]
+            if blocked_checks:
+                preflight_results = [
+                    {
+                        "order_id": check["order_id"],
+                        "status": "blocked",
+                        "reason_code": check.get("reason_code", "source_changed"),
+                        "reason_text": check.get("reason_text", "製單前檢查未通過"),
+                        "message": check.get("reason_text", "製單前檢查未通過"),
+                    }
+                    for check in blocked_checks
+                ]
+                job["results"] = preflight_results
+                mark_results_failed(job, preflight_results)
+                _log(
+                    "🛑 製單前檢查阻擋："
+                    + ", ".join(
+                        f"{check['order_id']}({check.get('reason_code', 'unknown')})"
+                        for check in blocked_checks
+                    )
+                )
+                _JOB_REGISTRY.finish(job, "partial_failure")
+                _clear_job_lock(email)
+                return
+
             _log("🚀 任務啟動，正在載入模組...")
             _log("🧰 正在準備 Playwright Chromium 環境...")
             _install_playwright()
             from bot.automation import AUTOMATION_BUILD_ID, _prepare_batch_hs_codes, run_automation
-            from bot.sheets import COUNTRY_CODE_MAP, backfill_results
             _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
 
-            rows_for_run = df if max_rows is None else df.head(max_rows)
             _log("🔎 正在預查本批 HS Code...")
             hs_codes_by_order = _prepare_batch_hs_codes(
                 rows_for_run,
@@ -503,17 +576,66 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 headless=True,
                 precomputed_hs_codes=hs_codes_by_order,
             )
-            job["results"] = results
-            mark_results_completed(job, results)
-            if results:
-                _log(f"📋 正在回填 {len(results)} 筆至 Google Sheets...")
-                backfill_results(results, log_cb=_log)
-                _log(f"✅ 完成！共處理 {len(results)} 筆訂單。")
-                job["pending_refresh_needed"] = True
-            else:
+            if not results:
                 _log("ℹ️ 自動化完成，無新增結果。")
-                mark_unfinished_orders(job, "skipped", "無新增結果", "自動化完成但沒有產生新結果")
-            _JOB_REGISTRY.finish(job, "completed")
+                results = [
+                    {
+                        "order_id": str(order.get("order_id") or "").strip(),
+                        "status": "skipped",
+                        "reason_code": "no_result",
+                        "reason_text": "自動化完成但沒有產生新結果",
+                        "message": "自動化完成但沒有產生新結果",
+                    }
+                    for order in job.get("orders") or []
+                ]
+
+            successful_results = [
+                result
+                for result in results
+                if str(result.get("status") or "success").strip() in {"success", "completed"}
+            ]
+            failed_results = [
+                result
+                for result in results
+                if str(result.get("status") or "success").strip() not in {"success", "completed"}
+            ]
+            mark_results_failed(job, failed_results)
+            if successful_results:
+                _log(f"📋 正在回填 {len(successful_results)} 筆至 Google Sheets...")
+                backfill_outcome = backfill_results(successful_results, log_cb=_log) or {
+                    "ok": False,
+                    "written": 0,
+                    "failed": [str(result.get("order_id") or "") for result in successful_results],
+                    "error": "回填函式沒有回傳驗證結果",
+                }
+                job["backfill_outcome"] = backfill_outcome
+                if backfill_outcome.get("ok"):
+                    mark_results_completed(job, successful_results)
+                    _log(f"✅ 完成！本次實際完成 {len(successful_results)} 筆訂單。")
+                    job["pending_refresh_needed"] = True
+                else:
+                    error_text = backfill_outcome.get("error") or "Google Sheets 回填驗證失敗"
+                    for result in successful_results:
+                        result.update(
+                            {
+                                "status": "backfill_failed",
+                                "reason_code": "backfill_failed",
+                                "reason_text": error_text,
+                                "message": error_text,
+                            }
+                        )
+                    mark_results_failed(job, successful_results)
+                    _log(f"❌ {error_text}")
+            else:
+                job["backfill_outcome"] = {"ok": True, "written": 0, "failed": [], "error": ""}
+
+            job["results"] = results
+            result_summary = summarize_job_results(results)
+            terminal_status = "completed" if (
+                result_summary["completed"] == result_summary["total"]
+                and result_summary["total"] > 0
+            ) else "partial_failure"
+            _JOB_REGISTRY.finish(job, terminal_status)
             _clear_job_lock(email)
         except BaseException as e:
             err_text = tb.format_exc()
@@ -524,7 +646,21 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             except Exception:
                 pass
             try:
-                mark_unfinished_orders(job, "failed", "發生例外", f"{type(e).__name__}: {e}")
+                reason_text = f"{type(e).__name__}: {e}"
+                unfinished_results = [
+                    {
+                        "order_id": str(order.get("order_id") or "").strip(),
+                        "status": "failed",
+                        "reason_code": "job_exception",
+                        "reason_text": reason_text,
+                        "message": reason_text,
+                    }
+                    for order in (job.get("orders") or [])
+                    if order.get("status") in {"queued", "running"}
+                ]
+                job.setdefault("results", []).extend(unfinished_results)
+                mark_results_failed(job, unfinished_results)
+                mark_unfinished_orders(job, "failed", "發生例外", reason_text)
                 _JOB_REGISTRY.finish(job, "error")
             except Exception:
                 pass
@@ -1394,7 +1530,9 @@ def _render_main_app():
         df_pending_for_run = _prepare_pending_run_frame_from_state(df_pending, editable_count, rate)
     zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
     required_id_warnings = _required_id_warning_lines(df_pending_for_run)
-    done = len(job["results"]) if job else 0
+    pending_data_warnings = _pending_data_warning_lines(df_pending_for_run)
+    batch_summary = summarize_batch_results((job or {}).get("results") or [])
+    done = int(batch_summary["completed_count"])
 
     picking_tab, preview_tab, guide_tab, diagnostics_tab = st.tabs(["跨境揀貨單", "郵局待打單", "使用說明", "讀取診斷"])
 
@@ -1445,6 +1583,7 @@ def _render_main_app():
                              or selected_count == 0
                              or bool(zero_value_warnings)
                              or bool(required_id_warnings)
+                             or bool(pending_data_warnings)
                          ), width="stretch"):
                 if df_pending.empty:
                     st.warning("沒有符合條件的待打單資料")
@@ -1501,12 +1640,21 @@ def _render_main_app():
             st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
         if is_busy and required_id_warnings:
             st.error("；".join(required_id_warnings[:5]))
-        if st.session_state.get("pending_refresh_notice") and not is_busy:
-            result_count = len((job or {}).get("results") or [])
-            st.success(
-                f"製單完成：本次完成 {result_count} 筆。"
-                "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
-            )
+        if pending_data_warnings:
+            st.error("資料需要先修正：" + "；".join(pending_data_warnings[:8]))
+        if job and job.get("results") and not is_busy:
+            if batch_summary["failure_alerts"]:
+                st.warning(
+                    f"本批完成 {batch_summary['completed_count']} 筆，"
+                    f"未完成 {batch_summary['failed_count'] + batch_summary['skipped_count']} 筆。"
+                )
+                for alert in batch_summary["failure_alerts"]:
+                    st.error(alert)
+            elif st.session_state.get("pending_refresh_notice"):
+                st.success(
+                    f"製單完成：本次完成 {batch_summary['completed_count']} 筆。"
+                    "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
+                )
         if is_busy:
             if job:
                 _render_running_progress(job)
@@ -1714,8 +1862,10 @@ def _render_main_app():
                 "queued": "待機中",
                 "running": "製單中",
                 "success": "完成",
+                "completed": "完成",
                 "failed": "需排查",
                 "skipped": "略過",
+                "blocked": "未製單",
             }
             df_status = pd.DataFrame(job["orders"])
             df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
@@ -1742,6 +1892,16 @@ def _render_main_app():
             order_lookup = {str(order.get("order_id", "")): order for order in job.get("orders", [])}
             for result in job["results"]:
                 order_id = str(result.get("order_id", "")).strip()
+                result_status = str(result.get("status") or "success").strip()
+                if result_status not in {"success", "completed"}:
+                    reason = str(
+                        result.get("reason_text")
+                        or result.get("message")
+                        or result.get("reason_code")
+                        or "未知原因"
+                    ).strip()
+                    st.error(f"訂單編號 {order_id}：未製單（{reason}）")
+                    continue
                 order_state = order_lookup.get(order_id, {})
                 hs_text = str(order_state.get("hs_codes", "")).strip()
                 result_name = str(result.get("name", ""))

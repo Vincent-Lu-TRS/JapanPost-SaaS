@@ -6,7 +6,7 @@ from shipment_quantity import parse_shipment_quantity
 
 SHIPPING_COL = "郵局運送方式(複數商品請自行確認是否走小包)"
 SHIPPING_OPTIONS = ["EMS", "國際小包", "ePacket"]
-MAX_EDITOR_ITEMS = 5
+MAX_EDITOR_ITEMS = 10
 
 PENDING_SUMMARY_COLUMNS = [
     "Order No.",
@@ -38,6 +38,21 @@ EDITABLE_PENDING_COLUMNS = [
     "內容物5",
     "申告金額5",
     "數量5",
+    "內容物6",
+    "申告金額6",
+    "數量6",
+    "內容物7",
+    "申告金額7",
+    "數量7",
+    "內容物8",
+    "申告金額8",
+    "數量8",
+    "內容物9",
+    "申告金額9",
+    "數量9",
+    "內容物10",
+    "申告金額10",
+    "數量10",
     "訂單合計申告金額(JPY)",
     "HSCode",
 ]
@@ -164,6 +179,39 @@ def has_zero_value_items(row: pd.Series, max_items: int = MAX_EDITOR_ITEMS) -> l
         if content and _money_to_float(value) <= 0:
             zero_items.append(index)
     return zero_items
+
+
+def pending_order_warning_lines(row: pd.Series, max_items: int = 10) -> list[str]:
+    """Return actionable warnings that must be shown before an order is submitted."""
+    order_id = _str_value(row.get("注文番号(貼上原始資料)", "")) or "未指定訂單"
+    warnings: list[str] = []
+    raw_aggregation_warnings = {
+        value.strip()
+        for value in _str_value(row.get("_pending_warnings", "")).split(",")
+        if value.strip()
+    }
+    if "mixed_shipping_method" in raw_aggregation_warnings:
+        warnings.append(f"{order_id}: 同一訂單的運送方式不一致，請先確認")
+    if "legacy_and_numbered_item_fields" in raw_aggregation_warnings:
+        warnings.append(f"{order_id}: 同時存在新舊內容物欄位，請先確認資料來源")
+    if "item_count_exceeds_limit" in raw_aggregation_warnings:
+        warnings.append(f"{order_id}: 內容物超過日本郵政單據可處理上限，未自動截斷")
+
+    for index in range(1, max_items + 1):
+        content, value, raw_quantity = _pending_item_values(row, index)
+        if not content and not value:
+            continue
+        if not raw_quantity:
+            warnings.append(f"{order_id}: 數量{index} 空白，不能自動視為 1")
+            continue
+        try:
+            quantity = _quantity_to_float(raw_quantity, index)
+        except ValueError as exc:
+            warnings.append(f"{order_id}: 數量{index} 格式錯誤（{exc}）")
+            continue
+        if quantity <= 0:
+            warnings.append(f"{order_id}: 數量{index} 為 0 或負數，該內容物不會送出")
+    return warnings
 
 
 def build_pending_summary_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -314,6 +362,11 @@ def coerce_pending_editor_values(df: pd.DataFrame) -> pd.DataFrame:
         "申告金額3",
         "申告金額4",
         "申告金額5",
+        "申告金額6",
+        "申告金額7",
+        "申告金額8",
+        "申告金額9",
+        "申告金額10",
         "訂單合計申告金額(JPY)",
     ]:
         if column in coerced.columns:

@@ -1,5 +1,6 @@
 import sys
 import types
+import re
 import unittest
 
 import pandas as pd
@@ -30,13 +31,24 @@ class SheetsHelperTests(unittest.TestCase):
 
             def __init__(self):
                 self.updated = []
+                self.columns = {2: ["receiver"], 3: ["order"], 4: ["tracking"]}
 
-            def col_values(self, _column):
-                return ["receiver"]
+            def col_values(self, column):
+                return self.columns.get(column, ["receiver"])
 
             def batch_update(self, batch, value_input_option=None):
                 self.updated = batch
                 self.value_input_option = value_input_option
+                for update in batch:
+                    values = update["values"][0]
+                    match = re.match(r"([A-Z])(\d+):", update["range"])
+                    if not match:
+                        continue
+                    column, row_number = match.groups()
+                    row_number = int(row_number)
+                    if column == "B":
+                        self.columns[3] = ["order", *([""] * max(row_number - 2, 0)), values[1]]
+                        self.columns[4] = ["tracking", *([""] * max(row_number - 2, 0)), values[2]]
 
         class FakeSpreadsheet:
             def __init__(self, worksheet):
@@ -56,7 +68,7 @@ class SheetsHelperTests(unittest.TestCase):
         original_get_client = sheets_module._get_gspread_client
         sheets_module._get_gspread_client = lambda: FakeClient(worksheet)
         try:
-            backfill_results(
+            outcome = backfill_results(
                 [
                     {
                         "name": "Julie Rouleau",
@@ -70,6 +82,8 @@ class SheetsHelperTests(unittest.TestCase):
             sheets_module._get_gspread_client = original_get_client
 
         self.assertIn({"range": "J2:J2", "values": [["EU"]]}, worksheet.updated)
+        self.assertTrue(outcome["ok"])
+        self.assertEqual(outcome["written"], 1)
 
     def test_get_worksheet_by_gid_uses_direct_lookup(self):
         class FakeSpreadsheet:
@@ -220,6 +234,114 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(any("來源內同注文番号去重" in line for line in logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_legacy_rows_keep_first_row_without_aggregation(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "imy2038510",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局內容物": "Water Bottle TRSN9767",
+                    "郵局申告金額(USD)": "3.14",
+                    "數量集合": "1",
+                    "製單檢核": "",
+                    "Shipping Name": "Ying Chan",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+                {
+                    "注文番号(貼上原始資料)": "imy2038510",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局內容物": "Water Bottle TRSN9765",
+                    "郵局申告金額(USD)": "2.67",
+                    "數量集合": "1",
+                    "製單檢核": "",
+                    "Shipping Name": "Ying Chan",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+                {
+                    "注文番号(貼上原始資料)": "imy2038510",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "未打單",
+                    "郵局內容物": "Water Bottle TRSN9763",
+                    "郵局申告金額(USD)": "2.64",
+                    "數量集合": "1",
+                    "製單檢核": "",
+                    "Shipping Name": "Ying Chan",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                },
+            ]
+        )
+
+        result = _filter_pending_orders_dataframe(df, completed_ids=set())
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["郵局內容物"], "Water Bottle TRSN9767")
+        self.assertEqual(result.iloc[0]["郵局申告金額(USD)"], "3.14")
+        self.assertFalse(str(result.iloc[0].get("內容物1", "")).strip())
+
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
+    def test_filter_pending_orders_treats_repeated_array_formula_payload_as_one_source_row(self):
+        order_id = "\u6ce8\u6587\u756a\u53f7(\u8cbc\u4e0a\u539f\u59cb\u8cc7\u6599)"
+        status = "\u88fd\u55ae\u4e0a\u50b3\u72c0\u614b(\u8acb\u7528[\u672a\u6253\u55ae]\u6aa2\u8996\u6a21\u5f0f)"
+        amount = "\u90f5\u5c40\u7533\u544a\u91d1\u984d(USD)"
+        check = "\u88fd\u55ae\u6aa2\u6838"
+        shipping = "\u90f5\u5c40\u904b\u9001\u65b9\u5f0f(\u8907\u6578\u5546\u54c1\u8acb\u81ea\u884c\u78ba\u8a8d\u662f\u5426\u8d70\u5c0f\u5305)"
+        rows = []
+        for source_row in range(3):
+            rows.append(
+                {
+                    order_id: "imy2038510",
+                    status: "\u672a\u6253\u55ae",
+                    amount: "3.14",
+                    check: "",
+                    "Shipping Name": "Ying Chan",
+                    shipping: "ePacket",
+                    "\u5167\u5bb9\u72691": "Water Bottle TRSN9767",
+                    "\u5167\u5bb9\u72692": "Water Bottle TRSN9765",
+                    "\u5167\u5bb9\u72693": "Water Bottle TRSN9763",
+                    "\u7533\u544a\u91d1\u984d1": "3.14",
+                    "\u7533\u544a\u91d1\u984d2": "2.67",
+                    "\u7533\u544a\u91d1\u984d3": "2.64",
+                    "\u6578\u91cf1": "1",
+                    "\u6578\u91cf2": "1",
+                    "\u6578\u91cf3": "1",
+                    "_source_row_number": str(source_row + 1969),
+                }
+            )
+
+        result = _filter_pending_orders_dataframe(pd.DataFrame(rows), completed_ids=set())
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(
+            list(result.iloc[0][["\u5167\u5bb9\u72691", "\u5167\u5bb9\u72692", "\u5167\u5bb9\u72693"]]),
+            ["Water Bottle TRSN9767", "Water Bottle TRSN9765", "Water Bottle TRSN9763"],
+        )
+        self.assertEqual(list(result.iloc[0][["\u7533\u544a\u91d1\u984d1", "\u7533\u544a\u91d1\u984d2", "\u7533\u544a\u91d1\u984d3"]]), ["3.14", "2.67", "2.64"])
+        self.assertEqual(list(result.iloc[0][["\u6578\u91cf1", "\u6578\u91cf2", "\u6578\u91cf3"]]), ["1", "1", "1"])
+        self.assertTrue(
+            all(
+                not str(result.iloc[0].get(f"\u5167\u5bb9\u7269{index}", "")).strip()
+                for index in range(4, 11)
+            )
+        )
+
+    def test_filter_pending_orders_excludes_stale_source_tracking_when_target_is_missing(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "imy2036360",
+                    "製單上傳狀態(請用[未打單]檢視模式)": "LX324329616JP",
+                    "郵局申告金額(USD)": "11.57",
+                    "製單檢核": "FALSE",
+                    "Shipping Name": "David G Derrick Jr",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                }
+            ]
+        )
+
+        result = _filter_pending_orders_dataframe(df, completed_ids=set())
+
+        self.assertTrue(result.empty)
+
+    @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
     def test_filter_pending_orders_logs_completed_id_exclusions(self):
         df = pd.DataFrame(
             [
@@ -241,7 +363,7 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(any("已在目標表完成而排除" in line and "WhoWhy-Test6" in line for line in logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
-    def test_filter_pending_orders_treats_stale_source_tracking_as_pending_when_target_missing(self):
+    def test_filter_pending_orders_blocks_stale_source_tracking_when_target_missing(self):
         df = pd.DataFrame(
             [
                 {
@@ -258,7 +380,7 @@ class SheetsHelperTests(unittest.TestCase):
 
         result = _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
 
-        self.assertEqual(list(result["注文番号(貼上原始資料)"]), ["imy2036360"])
+        self.assertTrue(result.empty)
         self.assertTrue(any("來源狀態疑似快取過期" in line and "imy2036360" in line for line in logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")

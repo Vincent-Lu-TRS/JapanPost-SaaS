@@ -4,6 +4,8 @@ Google Sheets 操作模組
 - 將結果批量回填至目標表單
 """
 import os
+import hashlib
+import json
 import logging
 import re
 import time
@@ -76,6 +78,30 @@ def _shipping_priority(value: str) -> int:
     return 0
 
 
+_ITEM_COLUMN_LIMIT = 10
+
+
+def _clean_cell(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def _source_row_fingerprint(row: pd.Series) -> str:
+    payload = {
+        str(column): _clean_cell(value)
+        for column, value in row.items()
+        if not str(column).startswith("_")
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _prefer_shipping_method_rows(
     df: pd.DataFrame,
     order_id_col: str,
@@ -125,6 +151,10 @@ def _filter_pending_orders_dataframe(
     if df.empty:
         return df
 
+    df = df.copy()
+    if "_source_row_number" not in df.columns:
+        df["_source_row_number"] = [str(index) for index in range(len(df))]
+
     status_col = "製單上傳狀態(請用[未打單]檢視模式)"
     amount_col = "郵局申告金額(USD)"
     order_id_col = "注文番号(貼上原始資料)"
@@ -162,15 +192,22 @@ def _filter_pending_orders_dataframe(
     if stale_source_status_mask.any():
         stale_rows = df[stale_source_status_mask]
         _log(
-            "♻️ 來源狀態疑似快取過期，目標表未完成但來源 AU 仍是 tracking，"
-            f"改以待打單處理 {len(stale_rows)} 筆："
+            "🛑 來源狀態疑似快取過期，目標表缺少完成證據，"
+            f"阻擋自動製單 {len(stale_rows)} 筆："
             f"{_format_sample(stale_rows[order_id_col].tolist())}"
         )
 
-    status_pending_mask = (df[status_col] == "未打單") | stale_source_status_mask
+    status_pending_mask = (df[status_col] == "未打單")
+    amount_present_mask = df[amount_col] != ""
+    for index in range(1, _ITEM_COLUMN_LIMIT + 1):
+        item_amount_col = f"申告金額{index}"
+        if item_amount_col in df.columns:
+            amount_present_mask = amount_present_mask | (
+                df[item_amount_col].fillna("").astype(str).str.strip() != ""
+            )
     base_mask = (
         status_pending_mask
-        & (df[amount_col] != "")
+        & amount_present_mask
         & (df[check_col].str.upper() != "TRUE")
         & (df[shipname_col] != "")
     )
@@ -190,7 +227,8 @@ def _filter_pending_orders_dataframe(
         )
         reason_masks = [
             ("狀態不是未打單排除", ~status_pending_mask),
-            ("申告金額空白排除", df[amount_col] == ""),
+            ("來源 tracking 但目標缺少完成證據，阻擋", stale_source_status_mask),
+            ("申告金額空白排除", ~amount_present_mask),
             ("製單檢核 TRUE 排除", df[check_col].str.upper() == "TRUE"),
             ("Shipping Name 空白排除", df[shipname_col] == ""),
         ]
@@ -259,6 +297,21 @@ def _last_non_empty_row_sample(df: pd.DataFrame, order_id_col: str, limit: int =
     return ", ".join(ids[-limit:])
 
 
+def read_completed_order_ids(client: gspread.Client | None = None) -> set[str]:
+    """Read the target sheet completion authority, failing closed on errors."""
+    client = client or _get_gspread_client()
+    spreadsheet = client.open_by_key(TARGET_SHEET_ID)
+    worksheet = _get_worksheet_by_gid(spreadsheet, TARGET_GID)
+    if worksheet is None:
+        raise RuntimeError(f"找不到目標表單 GID {TARGET_GID}")
+    values = worksheet.col_values(3)
+    return {
+        _clean_cell(value)
+        for value in values[1:]
+        if _clean_cell(value)
+    }
+
+
 def get_pending_orders(log_cb=None) -> pd.DataFrame:
     """
     從來源表單取得待打單清單，並執行雙重過濾防重製：
@@ -308,6 +361,8 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
                 header.append(col)
 
         df = pd.DataFrame(all_values[1:], columns=header)
+        df["_source_row_number"] = [str(row_number) for row_number in range(2, len(df) + 2)]
+        df["_source_fingerprint"] = df.apply(_source_row_fingerprint, axis=1)
         _log(f"📊 來源原始筆數：{len(df)}")
         _log(
             "🧾 API 讀到的來源末端注文番号："
@@ -315,24 +370,16 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         )
 
         # ── 🔥 雙重過濾：即時讀取目標表單已完成單號 ──────
-        completed_ids: set[str] | None = None
         try:
             target_started_at = time.perf_counter()
-            sh_target = client.open_by_key(TARGET_SHEET_ID)
-            ws_target = _get_worksheet_by_gid(sh_target, TARGET_GID)
-            if ws_target:
-                completed_col_c = ws_target.col_values(3)  # C 欄 = 注文番号
-                completed_ids = {
-                    str(v).strip()
-                    for v in completed_col_c[1:]  # 跳過標題
-                    if str(v).strip()
-                }
-                _log(
-                    "⏱️ 目標表 C 欄讀取完成："
-                    f"{len(completed_ids)} 個完成單號，耗時 {time.perf_counter() - target_started_at:.1f}s"
-                )
+            completed_ids = read_completed_order_ids(client)
+            _log(
+                "⏱️ 目標表 C 欄讀取完成："
+                f"{len(completed_ids)} 個完成單號，耗時 {time.perf_counter() - target_started_at:.1f}s"
+            )
         except Exception as e:
-            _log(f"⚠️ 無法讀取目標表單（跳過雙重過濾）: {e}")
+            _log(f"❌ 無法讀取目標表單，已停止本次待製單讀取（fail-closed）: {e}")
+            return pd.DataFrame()
 
         df_filtered = _filter_pending_orders_dataframe(
             df,
@@ -365,7 +412,7 @@ def backfill_results(results: list[dict], log_cb=None):
 
     if not results:
         _log("ℹ️ 無需回填（results 為空）")
-        return
+        return {"ok": True, "written": 0, "failed": [], "error": ""}
 
     try:
         client = _get_gspread_client()
@@ -375,7 +422,12 @@ def backfill_results(results: list[dict], log_cb=None):
         )
         if not ws:
             _log(f"❌ 找不到目標表單 GID {TARGET_GID}")
-            return
+            return {
+                "ok": False,
+                "written": 0,
+                "failed": [str(r.get("order_id") or "") for r in results],
+                "error": f"找不到目標表單 GID {TARGET_GID}",
+            }
 
         # 找最後一列
         col_b = ws.col_values(2)
@@ -400,10 +452,33 @@ def backfill_results(results: list[dict], log_cb=None):
             })
 
         ws.batch_update(batch, value_input_option="USER_ENTERED")
-        _log(f"🚀 回填完成：{len(results)} 筆")
+        written_order_ids = ws.col_values(3)
+        written_tracking = ws.col_values(4)
+        written_pairs = {
+            (_clean_cell(order_id), _clean_cell(tracking))
+            for order_id, tracking in zip(written_order_ids[1:], written_tracking[1:])
+            if _clean_cell(order_id)
+        }
+        missing = [
+            str(result.get("order_id") or "")
+            for result in results
+            if (_clean_cell(result.get("order_id")), _clean_cell(result.get("tracking"))) not in written_pairs
+        ]
+        if missing:
+            error = "回填後讀回驗證失敗：" + ", ".join(missing[:8])
+            _log(f"❌ {error}")
+            return {"ok": False, "written": len(results), "failed": missing, "error": error}
+        _log(f"🚀 回填完成並驗證：{len(results)} 筆")
+        return {"ok": True, "written": len(results), "failed": [], "error": ""}
 
     except Exception as e:
         _log(f"❌ 回填失敗: {e}")
+        return {
+            "ok": False,
+            "written": 0,
+            "failed": [str(r.get("order_id") or "") for r in results],
+            "error": str(e),
+        }
 
 
 def load_sheet_values(spreadsheet_id: str, sheet_name: str) -> list[list[str]]:

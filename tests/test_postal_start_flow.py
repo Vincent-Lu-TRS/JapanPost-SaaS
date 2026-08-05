@@ -67,6 +67,24 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn('st.session_state["job_launching_started_at"] = time.time()', app_source)
         self.assertNotIn('elif reason == "batch_running":\n                        st.session_state["job_launching"] = True', app_source)
 
+    def test_start_job_rechecks_target_and_source_before_automation(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("read_completed_order_ids", app_source)
+        self.assertIn("preflight_batch_orders", app_source)
+        self.assertIn("target_read_error", app_source)
+        self.assertIn("source_changed", app_source)
+        self.assertIn("latest_pending_df", app_source)
+
+    def test_completion_count_comes_from_structured_results_and_failure_alerts(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("summarize_batch_results", app_source)
+        self.assertIn('completed_count', app_source)
+        self.assertIn('failure_alerts', app_source)
+        self.assertIn('backfill_outcome.get("ok")', app_source)
+        self.assertNotIn('done = len(job["results"]) if job else 0', app_source)
+
 
 if __name__ == "__main__":
     unittest.main()

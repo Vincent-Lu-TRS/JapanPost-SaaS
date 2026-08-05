@@ -30,8 +30,11 @@ from bot.automation import (
     _build_m061100_print_payload,
     _build_m061101_completed_payload,
     _build_result_record,
+    _build_failure_record,
     _build_struts_submit,
     _choose_label_flow_command,
+    _classify_address_error,
+    _diagnose_address_payload,
     _extract_preferred_submit_command,
     _extract_pdf_download_url,
     _extract_submit_command_for_label,
@@ -41,6 +44,8 @@ from bot.automation import (
     _format_addr_to_bean_name,
     _prepare_batch_hs_codes,
     _prepare_addr_to_bean_recipient_fields,
+    _select_bilingual_english_address_segment,
+    _select_preferred_recipient_name,
     _split_addr_to_bean_address_lines,
     _resolve_addr_country_value,
     _validate_required_hs_codes,
@@ -86,6 +91,35 @@ class AutomationHtmlTests(unittest.TestCase):
         row = {"Shipping Name": "kim sang woo (PCCC:P210006411542)"}
 
         self.assertEqual(_format_addr_to_bean_name(row, "imy2036430"), "kim sang woo imy2036430")
+
+    def test_select_preferred_recipient_name_removes_parenthesized_thai_alias(self):
+        name = (
+            "Teerapan (\u0e18\u0e35\u0e23\u0e1e\u0e31\u0e19\u0e18\u0e38\u0e4c) "
+            "Kaewkong (\u0e41\u0e01\u0e49\u0e27\u0e04\u0e07)"
+        )
+
+        selected = _select_preferred_recipient_name(name)
+
+        self.assertEqual(selected, "Teerapan Kaewkong")
+
+    def test_select_preferred_recipient_name_keeps_ascii_parenthetical_alias(self):
+        self.assertEqual(
+            _select_preferred_recipient_name("John (Johnny) Doe"),
+            "John (Johnny) Doe",
+        )
+
+    def test_format_recipient_name_uses_latin_name_before_order_id(self):
+        row = {
+            "Shipping Name": (
+                "Teerapan (\u0e18\u0e35\u0e23\u0e1e\u0e31\u0e19\u0e18\u0e38\u0e4c) "
+                "Kaewkong (\u0e41\u0e01\u0e49\u0e27\u0e04\u0e07)"
+            )
+        }
+
+        self.assertEqual(
+            _format_addr_to_bean_name(row, "imy2038490"),
+            "Teerapan Kaewkong imy2038490",
+        )
 
     def test_split_address_lines_keeps_address_2_and_3_within_japan_post_limits(self):
         address = (
@@ -163,6 +197,102 @@ class AutomationHtmlTests(unittest.TestCase):
     def test_split_address_lines_rejects_unrepresentable_overflow(self):
         with self.assertRaisesRegex(ValueError, "日本郵局收件地址過長"):
             _split_addr_to_bean_address_lines("A" * 197)
+
+    def test_diagnose_address_payload_separates_thai_and_length_evidence(self):
+        diagnostics = _diagnose_address_payload(
+            "กรุงเทพมหานคร " + "A" * 180,
+            "Bangkok",
+        )
+
+        self.assertGreater(diagnostics["raw_chars"], 180)
+        self.assertGreater(diagnostics["normalized_width"], 80)
+        self.assertGreater(diagnostics["thai_codepoints"], 0)
+        self.assertTrue(diagnostics["capacity_exceeded"])
+
+    def test_select_bilingual_english_address_segment_removes_duplicate_city(self):
+        raw = (
+            "\u0e04\u0e2d\u0e19\u0e42\u0e14\u0e28\u0e38\u0e20\u0e32\u0e25\u0e31\u0e22 1577 \u0e0a\u0e31\u0e49\u0e19 25 \u0e01\u0e23\u0e38\u0e07\u0e40\u0e17\u0e1e\u0e2f 10160\u201a "
+            "Supalai Verada Condo\u201a Phasi Charoen Station\u201a Room 1577\u201a "
+            "25th Floor\u201a Building B\u201a Petchkasem Road\u201a Bang Wa Subdistrict\u201a "
+            "Phasi Charoen District\u201a Bangkok 10160"
+        )
+        city = "Bang Wa Subdistrict\u201a Phasi Charoen District\u201a Bangkok"
+
+        selected = _select_bilingual_english_address_segment(raw, city, "10160")
+
+        self.assertIn("Supalai Verada Condo", selected)
+        self.assertIn("Petchkasem Road", selected)
+        self.assertNotIn("Bang Wa Subdistrict", selected)
+        self.assertNotIn("\u0e04\u0e2d\u0e19\u0e42\u0e14", selected)
+
+    def test_select_bilingual_address_segment_fails_closed_without_strong_overlap(self):
+        raw = "\u0e01\u0e23\u0e38\u0e07\u0e40\u0e17\u0e1e 10160\u201a Main Street, London"
+
+        self.assertEqual(
+            _select_bilingual_english_address_segment(raw, "Bangkok", "10160"),
+            raw,
+        )
+
+    def test_prepare_bilingual_address_can_be_packed_with_long_city(self):
+        raw = (
+            "\u0e04\u0e2d\u0e19\u0e42\u0e14\u0e28\u0e38\u0e20\u0e32\u0e25\u0e31\u0e22 1577 \u0e0a\u0e31\u0e49\u0e19 25 \u0e01\u0e23\u0e38\u0e07\u0e40\u0e17\u0e1e\u0e2f 10160\u201a "
+            "Supalai Verada Condo\u201a Phasi Charoen Station\u201a Room 1577\u201a "
+            "25th Floor\u201a Building B\u201a Petchkasem Road\u201a Bang Wa Subdistrict\u201a "
+            "Phasi Charoen District\u201a Bangkok 10160"
+        )
+        city = "Bang Wa Subdistrict\u201a Phasi Charoen District\u201a Bangkok"
+        fields = _prepare_addr_to_bean_recipient_fields(
+            {"Shipping Street": raw, "Shipping City": city, "Shipping Zip": "10160"}
+        )
+
+        lines = _split_addr_to_bean_address_lines(fields["address_line"], city)
+        combined = " ".join(lines.values())
+        self.assertIn("Supalai Verada Condo", combined)
+        self.assertIn("Bang Wa Subdistrict", combined)
+        for key, limit in (("addrToBean.add1", 80), ("addrToBean.add2", 80), ("addrToBean.add3", 36)):
+            self.assertLessEqual(sum(1 if ord(char) < 128 else 2 for char in lines[key]), limit)
+
+    def test_classify_address_error_distinguishes_length_and_remote_character_rejection(self):
+        self.assertEqual(
+            _classify_address_error(ValueError("日本郵局收件地址過長：超過容量")),
+            "address_too_long",
+        )
+        self.assertEqual(
+            _classify_address_error(
+                RuntimeError("M060505 validation"),
+                response_text="地址過長，請重新輸入",
+                status_code=200,
+            ),
+            "address_too_long",
+        )
+        self.assertEqual(
+            _classify_address_error(
+                RuntimeError("M060505 rejected"),
+                response_text="Invalid character in address field",
+                status_code=200,
+            ),
+            "address_invalid_character",
+        )
+        self.assertEqual(
+            _classify_address_error(
+                RuntimeError("M060505 rejected"),
+                response_text="Thai characters are not supported",
+                status_code=200,
+            ),
+            "address_invalid_character",
+        )
+
+    def test_build_failure_record_keeps_order_and_reason_for_frontend_alert(self):
+        result = _build_failure_record(
+            {"注文番号(貼上原始資料)": "imy2038490", "Shipping Name": "Receiver"},
+            "imy2038490",
+            ValueError("日本郵局收件地址過長：超過容量"),
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["order_id"], "imy2038490")
+        self.assertEqual(result["reason_code"], "address_too_long")
+        self.assertIn("地址過長", result["reason_text"])
 
     def test_with_base_href_inserts_base_inside_head(self):
         html = "<html><head><title>Main</title></head><body>Create New Labels</body></html>"
@@ -1698,6 +1828,9 @@ class AutomationHtmlTests(unittest.TestCase):
         row = {
             "Shipping Name": "Klas Eklof",
             "收件人國家": "UNITED STATES OF AMERICA",
+            "內容物1": "Water Bottle TRSN9767",
+            "申告金額1": "3.14",
+            "數量1": "1",
         }
 
         result = _build_result_record(row, "WhoWhy1566", "EN521206692JP")
@@ -1707,7 +1840,28 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(result["tracking"], "EN521206692JP")
         self.assertEqual(result["country"], "UNITED STATES OF AMERICA")
         self.assertEqual(result["country_raw"], "UNITED STATES OF AMERICA")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["items_expected"], 1)
+        self.assertEqual(result["items_submitted"], 1)
         self.assertRegex(result["date"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_playwright_success_path_uses_structured_result_record(self):
+        from pathlib import Path
+
+        source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(encoding="utf-8")
+        collection_start = source.index("# ── 收集結果")
+        collection_end = source.index("except Exception as e:", collection_start)
+        collection_block = source[collection_start:collection_end]
+
+        self.assertIn("results.append(_build_result_record(row, order_id, tracking))", collection_block)
+        self.assertNotIn("results.append({", collection_block)
+
+    def test_playwright_item_paths_do_not_drop_items_after_four(self):
+        from pathlib import Path
+
+        source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("_iter_content_items(row, max_items=4)", source)
 
     def test_run_automation_only_uses_playwright_html_injection_for_failure_snapshot(self):
         from pathlib import Path

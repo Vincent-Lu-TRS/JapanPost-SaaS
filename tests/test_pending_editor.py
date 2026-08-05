@@ -20,6 +20,7 @@ from pending_editor import (
     expand_pending_orders_for_trans_types,
     has_zero_value_items,
     parse_shipping_name,
+    pending_order_warning_lines,
     sanitize_hscode,
 )
 
@@ -169,6 +170,22 @@ class PendingEditorTests(unittest.TestCase):
                 row = pd.Series({"內容物1": "Item", "申告金額1": "1", "數量1": quantity})
                 with self.assertRaisesRegex(ValueError, "內容物1.*數量格式錯誤"):
                     calculate_total_value_usd(row)
+
+    def test_pending_order_warning_lines_explain_blank_quantity_and_mixed_shipping(self):
+        row = pd.Series(
+            {
+                "注文番号(貼上原始資料)": "imy2038510",
+                "內容物1": "Water Bottle TRSN9767",
+                "申告金額1": "3.14",
+                "數量1": "",
+                "_pending_warnings": "mixed_shipping_method",
+            }
+        )
+
+        warnings = pending_order_warning_lines(row)
+
+        self.assertTrue(any("數量1" in warning and "空白" in warning for warning in warnings))
+        self.assertTrue(any("運送方式不一致" in warning for warning in warnings))
 
     def test_sanitize_hscode_keeps_digits_only(self):
         self.assertEqual(sanitize_hscode("9404.90"), "940490")
