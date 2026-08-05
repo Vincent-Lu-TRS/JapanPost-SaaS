@@ -13,3 +13,12 @@ def import_module_with_retry(module_name: str) -> ModuleType:
         sys.modules.pop(module_name, None)
         importlib.invalidate_caches()
         return importlib.import_module(module_name)
+    except AttributeError as exc:
+        if (
+            str(exc) != "'NoneType' object has no attribute '__dict__'"
+            or module_name in sys.modules
+        ):
+            raise
+        sys.modules.pop(module_name, None)
+        importlib.invalidate_caches()
+        return importlib.import_module(module_name)

@@ -1545,9 +1545,8 @@ def _render_main_app():
     picking_tab, preview_tab, guide_tab, diagnostics_tab = st.tabs(["跨境揀貨單", "郵局待打單", "使用說明", "讀取診斷"])
 
     with picking_tab:
-        from features.picking_labels import render_picking_label_tab
-
-        render_picking_label_tab()
+        picking_labels_module = import_module_with_retry("features.picking_labels")
+        picking_labels_module.render_picking_label_tab()
 
     with preview_tab:
         toolbar_info_cols = st.columns([1.65, .95, 1.05, 1.08, 2.0], gap="small", vertical_alignment="center")
@@ -2397,9 +2396,8 @@ PDF 會上傳至指定 Google Drive 資料夾。
                 st.code("\n".join(visible_pending_logs), language="text")
         else:
             st.info("目前沒有待製單讀取診斷資料。")
-        from features.picking_labels import render_picking_label_diagnostics_panel
-
-        render_picking_label_diagnostics_panel()
+        picking_labels_module = import_module_with_retry("features.picking_labels")
+        picking_labels_module.render_picking_label_diagnostics_panel()
 
     if is_busy:
         time.sleep(2)
