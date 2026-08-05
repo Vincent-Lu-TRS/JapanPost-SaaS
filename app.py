@@ -17,17 +17,18 @@ import threading
 import tempfile
 import streamlit as st
 import pandas as pd
-from job_control import (
-    BatchJobRegistry,
-    filter_key_log_lines,
-    mark_results_completed,
-    mark_results_failed,
-    mark_unfinished_orders,
-    preflight_batch_orders,
-    summarize_job_results,
-    summarize_job_progress,
-    update_order_status_from_log,
-)
+from app_imports import import_module_with_retry
+
+_job_control = import_module_with_retry("job_control")
+BatchJobRegistry = _job_control.BatchJobRegistry
+filter_key_log_lines = _job_control.filter_key_log_lines
+mark_results_completed = _job_control.mark_results_completed
+mark_results_failed = _job_control.mark_results_failed
+mark_unfinished_orders = _job_control.mark_unfinished_orders
+preflight_batch_orders = _job_control.preflight_batch_orders
+summarize_job_results = _job_control.summarize_job_results
+summarize_job_progress = _job_control.summarize_job_progress
+update_order_status_from_log = _job_control.update_order_status_from_log
 from pending_editor import (
     SHIPPING_COL,
     SHIPPING_OPTIONS,
