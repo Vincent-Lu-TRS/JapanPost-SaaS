@@ -471,65 +471,6 @@ def _summary_label(label: str) -> str:
     return f'<div class="summary-label select-summary-label">{html.escape(label)}</div>'
 
 
-# TEMPORARY UI VERIFICATION HOOK: remove after the production-screen check.
-def _start_postal_mock_job(email: str, mode: str) -> tuple[bool, str]:
-    """Run a memory-only terminal result through the normal job-result UI path."""
-    mode = str(mode or "").strip().lower()
-    if mode not in {"success", "failure"}:
-        return False, "unsupported_mock_mode"
-    fake_order_id = f"postal-mock-{mode}-{int(time.time())}"
-    fake_df = pd.DataFrame(
-        [
-            {
-                "order_id": fake_order_id,
-                "name": "Mock Recipient",
-                "country": "UNITED STATES OF AMERICA",
-                "trans_type": "ePacket",
-                "total_usd": "3.14",
-                "total_jpy": "495",
-            }
-        ]
-    )
-    ok, job, reason = _JOB_REGISTRY.start(email, fake_df, None)
-    if not ok or job is None:
-        return False, reason
-
-    def _run_mock() -> None:
-        time.sleep(0.5)
-        result = {
-            "order_id": fake_order_id,
-            "name": "Mock Recipient",
-            "country": "UNITED STATES OF AMERICA",
-            "country_raw": "UNITED STATES OF AMERICA",
-            "trans_type": "ePacket",
-            "tracking": "LX000000001JP",
-            "items_expected": 1,
-            "items_submitted": 1,
-        }
-        if mode == "success":
-            result.update({"status": "success"})
-            mark_results_completed(job, [result])
-            job["pending_refresh_needed"] = True
-            terminal_status = "completed"
-        else:
-            result.update(
-                {
-                    "status": "failed",
-                    "reason_code": "mock_failure",
-                    "reason_text": "模擬製單錯誤（地址欄位過長）",
-                    "message": "模擬製單錯誤（地址欄位過長）",
-                }
-            )
-            mark_results_failed(job, [result])
-            terminal_status = "partial_failure"
-        job["logs"].append(f"[MOCK] postal_mock={mode} terminal result ready")
-        job["results"] = [result]
-        _JOB_REGISTRY.finish(job, terminal_status)
-
-    threading.Thread(target=_run_mock, daemon=True).start()
-    return True, ""
-
-
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
     ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
     if not ok or job is None:
@@ -1519,17 +1460,6 @@ def _render_main_app():
         unsafe_allow_html=True,
     )
 
-    mock_mode = str(st.query_params.get("postal_mock", "") or "").strip().lower()
-    if mock_mode in {"success", "failure"} and st.session_state.get("postal_mock_last_mode") != mock_mode:
-        mock_ok, mock_reason = _start_postal_mock_job(email, mock_mode)
-        if mock_ok:
-            st.session_state["postal_mock_last_mode"] = mock_mode
-            st.session_state["job_launching"] = True
-            st.session_state["job_launching_started_at"] = time.time()
-            st.rerun()
-        else:
-            st.error(f"Mock 製單啟動失敗：{mock_reason}")
-
     job = _get_job(email)
     is_running = job is not None and job.get("status") == "running"
     launch_lock_active = _job_lock_is_active(email)
@@ -1607,8 +1537,6 @@ def _render_main_app():
     pending_data_warnings = _pending_data_warning_lines(df_pending_for_run)
     batch_summary = summarize_batch_results((job or {}).get("results") or [])
     done = int(batch_summary["completed_count"])
-    if mock_mode in {"success", "failure"}:
-        st.info(f"Mock 驗證模式：{mock_mode}；不會連線日本郵政或寫入 Google Sheets。")
 
     picking_tab, preview_tab, guide_tab, diagnostics_tab = st.tabs(["跨境揀貨單", "郵局待打單", "使用說明", "讀取診斷"])
 

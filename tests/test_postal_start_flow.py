@@ -95,13 +95,6 @@ class PostalStartFlowTests(unittest.TestCase):
         )
         self.assertIn('_JOB_REGISTRY = _get_job_registry()', app_source)
 
-    def test_temporary_postal_mock_modes_are_available_for_ui_verification(self):
-        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-
-        self.assertIn("def _start_postal_mock_job", app_source)
-        self.assertIn('"postal_mock"', app_source)
-        self.assertIn('"success", "failure"', app_source)
-
 
 if __name__ == "__main__":
     unittest.main()
