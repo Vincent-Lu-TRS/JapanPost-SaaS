@@ -90,10 +90,10 @@ class PostalStartFlowTests(unittest.TestCase):
 
         self.assertIn(
             '@st.cache_resource(show_spinner=False)\n'
-            'def _get_job_registry()',
+            'def _get_job_registry(cache_version: str = _JOB_REGISTRY_CACHE_VERSION)',
             app_source,
         )
-        self.assertIn('_JOB_REGISTRY = _get_job_registry()', app_source)
+        self.assertIn('_JOB_REGISTRY = _get_job_registry(_JOB_REGISTRY_CACHE_VERSION)', app_source)
 
 
 if __name__ == "__main__":

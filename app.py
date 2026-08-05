@@ -92,12 +92,15 @@ def _install_playwright():
 
 
 # ── 全域任務追蹤器（跨 Streamlit 重繪保留同一份結果）──────
+_JOB_REGISTRY_CACHE_VERSION = "2026-08-05-postal-ui"
+
+
 @st.cache_resource(show_spinner=False)
-def _get_job_registry() -> BatchJobRegistry:
+def _get_job_registry(cache_version: str = _JOB_REGISTRY_CACHE_VERSION) -> BatchJobRegistry:
     return BatchJobRegistry()
 
 
-_JOB_REGISTRY = _get_job_registry()
+_JOB_REGISTRY = _get_job_registry(_JOB_REGISTRY_CACHE_VERSION)
 
 
 def _job_lock_path(email: str) -> Path:
