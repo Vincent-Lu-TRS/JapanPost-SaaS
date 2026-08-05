@@ -85,6 +85,16 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn('backfill_outcome.get("ok")', app_source)
         self.assertNotIn('done = len(job["results"]) if job else 0', app_source)
 
+    def test_job_registry_is_cached_across_streamlit_reruns(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            '@st.cache_resource(show_spinner=False)\n'
+            'def _get_job_registry()',
+            app_source,
+        )
+        self.assertIn('_JOB_REGISTRY = _get_job_registry()', app_source)
+
 
 if __name__ == "__main__":
     unittest.main()

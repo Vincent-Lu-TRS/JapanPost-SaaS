@@ -91,9 +91,13 @@ def _install_playwright():
         return False
 
 
-# ── 全域任務追蹤器 ──────────────────────────────────────
-if "_JOB_REGISTRY" not in globals():
-    _JOB_REGISTRY = BatchJobRegistry()
+# ── 全域任務追蹤器（跨 Streamlit 重繪保留同一份結果）──────
+@st.cache_resource(show_spinner=False)
+def _get_job_registry() -> BatchJobRegistry:
+    return BatchJobRegistry()
+
+
+_JOB_REGISTRY = _get_job_registry()
 
 
 def _job_lock_path(email: str) -> Path:
