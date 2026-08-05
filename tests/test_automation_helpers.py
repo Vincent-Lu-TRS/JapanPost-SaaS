@@ -249,7 +249,7 @@ class AutomationHtmlTests(unittest.TestCase):
         combined = " ".join(lines.values())
         self.assertIn("Supalai Verada Condo", combined)
         self.assertIn("Bang Wa Subdistrict", combined)
-        for key, limit in (("addrToBean.add1", 80), ("addrToBean.add2", 80), ("addrToBean.add3", 36)):
+        for key, limit in (("addrToBean.add1", 40), ("addrToBean.add2", 80), ("addrToBean.add3", 36)):
             self.assertLessEqual(sum(1 if ord(char) < 128 else 2 for char in lines[key]), limit)
 
     def test_classify_address_error_distinguishes_length_and_remote_character_rejection(self):

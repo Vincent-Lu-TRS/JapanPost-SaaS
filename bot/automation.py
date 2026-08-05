@@ -23,7 +23,7 @@ import pandas as pd
 
 from shipment_quantity import parse_shipment_quantity
 
-AUTOMATION_BUILD_ID = "2026-08-05-array-formula-address-normalization"
+AUTOMATION_BUILD_ID = "2026-08-05-m060505-address1-width-fix"
 
 from .drive import DRIVE_FOLDER_ID, upload_file_to_drive, upload_pdf
 from .gemini_helper import predict_hs_code
@@ -89,6 +89,15 @@ _JAPAN_POST_PUNCTUATION_MAP = str.maketrans({
     "\u2014": "-",
     "\uff0c": ",",
 })
+
+# M060505 uses different width limits for the three address fields.  In
+# particular, Address 1 is shorter than Address 2; treating all fields as an
+# 80-unit bucket passes local validation but can be rejected by Japan Post.
+JAPAN_POST_ADDRESS_WIDTHS = {
+    "addrToBean.add1": 40,
+    "addrToBean.add2": 80,
+    "addrToBean.add3": 36,
+}
 
 
 def _normalize_japan_post_address_text(value: str) -> str:
@@ -293,9 +302,15 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
     if not recipient_id:
         if _japan_post_text_width(city_text) > 36:
             combined = " ".join(part for part in [address_without_id, city_text] if part)
-            add1, overflow = _split_text_at_limit(combined, 80)
-            add2, overflow = _split_text_at_limit(overflow, 80)
-            add3, remaining = _split_text_at_limit(overflow, 36)
+            add1, overflow = _split_text_at_limit(
+                combined, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add1"]
+            )
+            add2, overflow = _split_text_at_limit(
+                overflow, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add2"]
+            )
+            add3, remaining = _split_text_at_limit(
+                overflow, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add3"]
+            )
             if remaining:
                 raise ValueError(
                     "日本郵局收件地址過長：正規化後仍超過 Address 1/2/3 可用容量"
@@ -305,9 +320,13 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
                 "addrToBean.add2": add2,
                 "addrToBean.add3": add3,
             }
-        add2, overflow = _split_text_at_limit(address_without_id, 80)
+        add2, overflow = _split_text_at_limit(
+            address_without_id, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add2"]
+        )
         add3_source = " ".join(part for part in [overflow, city_text] if part)
-        add3, remaining = _split_text_at_limit(add3_source, 36)
+        add3, remaining = _split_text_at_limit(
+            add3_source, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add3"]
+        )
         if not remaining:
             return {
                 "addrToBean.add1": "",
@@ -315,10 +334,16 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
                 "addrToBean.add3": add3,
             }
 
-        add1, overflow = _split_text_at_limit(address_without_id, 80)
-        add2, overflow = _split_text_at_limit(overflow, 80)
+        add1, overflow = _split_text_at_limit(
+            address_without_id, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add1"]
+        )
+        add2, overflow = _split_text_at_limit(
+            overflow, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add2"]
+        )
         add3_source = " ".join(part for part in [overflow, city_text] if part)
-        add3, remaining = _split_text_at_limit(add3_source, 36)
+        add3, remaining = _split_text_at_limit(
+            add3_source, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add3"]
+        )
         if remaining:
             raise ValueError(
                 "日本郵局收件地址過長：正規化後仍超過 Address 1/2/3 可用容量"
@@ -340,13 +365,19 @@ def _split_addr_to_bean_address_lines(address_line: str, city: str = "") -> dict
             "addrToBean.add3": add3,
         }
 
-    add1, overflow = _split_text_at_limit(address_without_id, 80)
-    add2, overflow = _split_text_at_limit(overflow, 80)
+    add1, overflow = _split_text_at_limit(
+        address_without_id, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add1"]
+    )
+    add2, overflow = _split_text_at_limit(
+        overflow, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add2"]
+    )
     if overflow:
         raise ValueError(
             "日本郵局收件地址過長：保留 PCCC／PRC ID 後超過 Address 1/2 可用容量"
         )
-    add3, remaining = _split_text_at_limit(recipient_id, 36)
+    add3, remaining = _split_text_at_limit(
+        recipient_id, JAPAN_POST_ADDRESS_WIDTHS["addrToBean.add3"]
+    )
     if remaining:
         raise ValueError("日本郵局收件地址過長：PCCC／PRC ID 超過 Address 3 容量")
     return {
@@ -2256,7 +2287,7 @@ def run_automation(
                 f"markers={marker_summary}; "
                 f"forms={_summarize_forms(resp.text)}; "
                 f"errors={_summarize_error_text(resp.text)}; "
-                f"field_context={_summarize_field_context(resp.text, ['addrToBean.sortNum', 'addrToBean.add2', 'addrToBean.add3'])}"
+                f"field_context={_summarize_field_context(resp.text, ['addrToBean.sortNum', 'addrToBean.add1', 'addrToBean.add2', 'addrToBean.add3'])}"
             )
             if resp.status_code >= 400:
                 reason_code = _classify_address_error(
@@ -2269,6 +2300,16 @@ def run_automation(
                     reason_code,
                 )
             response_error = _summarize_error_text(resp.text)
+            address_field_context = _summarize_field_context(
+                resp.text,
+                [
+                    "addrToBean.nam",
+                    "addrToBean.add1",
+                    "addrToBean.add2",
+                    "addrToBean.add3",
+                    "addrToBean.postal",
+                ],
+            )
             response_reason_code = _classify_address_error(
                 response_text=response_error,
                 status_code=resp.status_code,
@@ -2288,6 +2329,18 @@ def run_automation(
                     "⚠️ M060505 回應仍停留在收件人頁，可能有欄位驗證錯誤；"
                     f"reason_code={_classify_address_error(response_text=response_error)}"
                 )
+            if "M060505" in resp.url or "addrToBean" in resp.text:
+                remote_context = f"{response_error} {address_field_context}"
+                remote_reason_code = _classify_address_error(
+                    response_text=remote_context,
+                    status_code=resp.status_code,
+                )
+                if "Input is too long" in remote_context or remote_reason_code == "address_too_long":
+                    raise AddressValidationError(
+                        "[address_too_long] M060505 收件資訊超過日本郵政欄位上限："
+                        f"{address_field_context}",
+                        "address_too_long",
+                    )
             return resp, country_raw, country_code
 
         def submit_m060800_item_via_requests(
