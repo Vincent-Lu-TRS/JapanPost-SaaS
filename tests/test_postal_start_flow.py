@@ -79,6 +79,53 @@ class PostalStartFlowTests(unittest.TestCase):
             app_source,
         )
 
+    def test_v2_preview_tab_is_separate_from_v1_and_preserves_order_contract(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("郵局待打單（新版測試）", app_source)
+        self.assertIn("with postal_v2_tab:", app_source)
+        self.assertIn('with preview_tab:', app_source)
+        for marker in [
+            "Name",
+            "TransType",
+            "追加",
+            "PRC ID",
+            "PCCC",
+            "Description",
+            "HSCode",
+            "Value",
+            "Quantity",
+        ]:
+            self.assertIn(marker, app_source)
+        self.assertIn('"No."', app_source)
+        self.assertNotIn("內容品名（僅顯示）", app_source)
+
+    def test_v2_rate_is_secondary_and_v2_operation_panel_keeps_original_controls(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("format_secondary_rate_badge", app_source)
+        self.assertIn("postal-v2-rate-badge", app_source)
+        self.assertIn("postal-v2-operation-panel", app_source)
+        for marker in ["最大處理", "開始製單", "重新讀取", "全部恢復預設資料"]:
+            self.assertIn(marker, app_source)
+        self.assertIn("藍框：可編輯", app_source)
+
+    def test_v2_uses_scoped_flat_dark_palette_and_preserves_job_feedback_hooks(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn(".postal-v2-", app_source)
+        self.assertIn("#0A0D13", app_source)
+        self.assertIn("#5275A8", app_source)
+        self.assertNotIn("linear-gradient", app_source)
+        self.assertNotIn("radial-gradient", app_source)
+        for marker in [
+            "_render_blocking_running_guard",
+            "failure_alerts",
+            "詳細除錯日誌",
+            "summarize_batch_results",
+        ]:
+            self.assertIn(marker, app_source)
+
     def test_job_launching_state_locks_ui_until_running_job_is_visible(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 

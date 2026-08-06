@@ -49,6 +49,12 @@ from postal_ui_feedback import (
     summarize_batch_results,
     summarize_pending_read_logs,
 )
+from postal_ui_v2 import (
+    apply_batch_selection,
+    build_v2_item_display_frame,
+    format_secondary_rate_badge,
+    restore_v2_item_frame,
+)
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -418,6 +424,643 @@ def _prepare_pending_run_frame_from_state(
     return expand_pending_orders_for_trans_types(selected, extra_trans_types)
 
 
+def _v2_reset_key_for(order_id: str) -> str:
+    return f"pending_v2_reset_{order_id}"
+
+
+def _v2_reset_version(order_id: str) -> int:
+    return int(st.session_state.get(_v2_reset_key_for(order_id), 0))
+
+
+def _v2_reset_order_editor(order_id: str) -> None:
+    st.session_state[_v2_reset_key_for(order_id)] = _v2_reset_version(order_id) + 1
+    _v2_selected_by_order_state()[order_id] = True
+
+
+def _v2_reset_all_order_editors(df: pd.DataFrame, editable_count: int) -> None:
+    for position, (_, row) in enumerate(df.iloc[:editable_count].iterrows()):
+        order_id = _order_id_for_position(row, position)
+        if order_id:
+            _v2_reset_order_editor(order_id)
+
+
+def _v2_name_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_v2_name_{position}_{order_id}_{reset_version}"
+
+
+def _v2_prc_id_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_v2_prc_id_{position}_{order_id}_{reset_version}"
+
+
+def _v2_pccc_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_v2_pccc_{position}_{order_id}_{reset_version}"
+
+
+def _v2_selected_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_v2_selected_{position}_{order_id}_{reset_version}"
+
+
+def _v2_item_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_v2_items_{position}_{order_id}_{reset_version}"
+
+
+def _v2_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_v2_trans_{position}_{order_id}_{reset_version}"
+
+
+def _v2_extra_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
+    return f"pending_v2_extra_trans_{position}_{order_id}_{reset_version}"
+
+
+def _v2_selected_by_order_state() -> dict[str, bool]:
+    selected_by_order = st.session_state.get("pending_v2_selected_by_order")
+    if not isinstance(selected_by_order, dict):
+        selected_by_order = {}
+        st.session_state["pending_v2_selected_by_order"] = selected_by_order
+    return selected_by_order
+
+
+def _v2_is_order_selected(order_id: str) -> bool:
+    return bool(_v2_selected_by_order_state().get(order_id, True))
+
+
+def _sync_v2_order_selected_from_widget(order_id: str, widget_key: str) -> None:
+    _v2_selected_by_order_state()[order_id] = bool(st.session_state.get(widget_key, True))
+
+
+def _initialize_v2_order_selected_widget(order_id: str, widget_key: str) -> None:
+    selected_by_order = _v2_selected_by_order_state()
+    if order_id not in selected_by_order:
+        selected_by_order[order_id] = bool(st.session_state.get(widget_key, True))
+    st.session_state[widget_key] = bool(selected_by_order.get(order_id, True))
+
+
+def _sync_visible_v2_order_selection_from_widgets(df_pending: pd.DataFrame, editable_count: int) -> None:
+    selected_by_order = _v2_selected_by_order_state()
+    for position in range(editable_count):
+        row = df_pending.iloc[position]
+        order_id = _order_id_for_position(row, position)
+        reset_version = _v2_reset_version(order_id)
+        widget_key = _v2_selected_key_for(position, order_id, reset_version)
+        if widget_key in st.session_state:
+            selected_by_order[order_id] = bool(st.session_state.get(widget_key))
+
+
+def _v2_order_ids(df_pending: pd.DataFrame) -> list[str]:
+    return [
+        _order_id_for_position(df_pending.iloc[position], position)
+        for position in range(len(df_pending))
+    ]
+
+
+def _v2_selected_source_indices_from_state(df_pending: pd.DataFrame) -> list[object]:
+    selected_indices: list[object] = []
+    for position, source_index in enumerate(df_pending.index):
+        row = df_pending.iloc[position]
+        order_id = _order_id_for_position(row, position)
+        if _v2_is_order_selected(order_id):
+            selected_indices.append(source_index)
+    return selected_indices
+
+
+def _v2_extra_trans_types_by_index_from_state(
+    df_pending: pd.DataFrame,
+    editable_count: int,
+) -> dict[object, list[str]]:
+    extra_trans_types: dict[object, list[str]] = {}
+    for position, source_index in enumerate(df_pending.index[:editable_count]):
+        row = df_pending.iloc[position]
+        order_id = _order_id_for_position(row, position)
+        reset_version = _v2_reset_version(order_id)
+        extra_key = _v2_extra_trans_key_for(position, order_id, reset_version)
+        selected = st.session_state.get(extra_key, "無")
+        if isinstance(selected, str):
+            extra_trans_types[source_index] = [] if selected == "無" else [selected]
+        elif isinstance(selected, (list, tuple)):
+            extra_trans_types[source_index] = [str(value) for value in selected]
+    return extra_trans_types
+
+
+def _build_pending_run_frame_from_v2_state(
+    df_pending: pd.DataFrame,
+    editable_count: int,
+    usd_jpy_rate: float | None,
+) -> pd.DataFrame:
+    edited_summary_rows: list[dict[str, str]] = []
+    edited_items_by_position: dict[int, pd.DataFrame] = {}
+    for position in range(editable_count):
+        row = df_pending.iloc[position]
+        order_id = _order_id_for_position(row, position)
+        country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+        parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
+        default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
+        reset_version = _v2_reset_version(order_id)
+        item_key = _v2_item_key_for(position, order_id, reset_version)
+        item_frame = build_v2_item_display_frame(build_pending_item_frame(row))
+        edited_display_frame = _apply_data_editor_state(item_frame, item_key)
+        edited_items_by_position[position] = restore_v2_item_frame(edited_display_frame)
+        trans_key = _v2_trans_key_for(position, order_id, reset_version)
+        name_key = _v2_name_key_for(position, order_id, reset_version)
+        prc_id_key = _v2_prc_id_key_for(position, order_id, reset_version)
+        pccc_key = _v2_pccc_key_for(position, order_id, reset_version)
+        _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
+        edited_name = st.session_state.get(name_key, parsed_name["clean_name"])
+        edited_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
+        edited_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
+        edited_summary_rows.append(
+            {
+                "Order No.": order_id,
+                "Name": compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc),
+                "Country": country,
+                "TransType": st.session_state.get(trans_key, default_trans_type),
+                "TotalValue(USD)": "",
+                "TotalValue(JPY)": "",
+            }
+        )
+    if not edited_summary_rows:
+        edited = df_pending.copy()
+    else:
+        edited = apply_pending_order_editor_values(
+            df_pending,
+            pd.DataFrame(edited_summary_rows),
+            edited_items_by_position,
+            usd_jpy_rate=usd_jpy_rate,
+        )
+    selected_indices = _v2_selected_source_indices_from_state(df_pending)
+    if not selected_indices:
+        return edited.iloc[0:0].copy()
+    selected = edited.loc[selected_indices].copy()
+    return expand_pending_orders_for_trans_types(
+        selected,
+        _v2_extra_trans_types_by_index_from_state(df_pending, editable_count),
+    )
+
+
+def _render_postal_pending_v2(
+    *,
+    email: str,
+    df_pending: pd.DataFrame,
+    pending_logs: list[str],
+    rate: float | None,
+    rate_date: str,
+    rate_source: str,
+    job: dict | None,
+    is_running: bool,
+    is_launching: bool,
+    is_busy: bool,
+    pending_count: int,
+    done: int,
+    batch_summary: dict,
+    pending_manual_reload_requested: bool,
+    pending_read_error: str,
+) -> None:
+    """Render the isolated v2 postal page using the existing job pipeline."""
+    st.markdown('<span class="postal-v2-page-marker"></span>', unsafe_allow_html=True)
+    editable_count = min(len(df_pending), 20)
+    if not is_busy and not df_pending.empty:
+        _sync_visible_v2_order_selection_from_widgets(df_pending, editable_count)
+
+    if is_running and job:
+        selected_order_ids = {
+            str(order.get("order_id", "")).strip()
+            for order in (job.get("orders") or [])
+            if str(order.get("order_id", "")).strip()
+        }
+        selected_count = len(selected_order_ids)
+        df_pending_for_run = df_pending
+    elif df_pending.empty:
+        selected_count = 0
+        df_pending_for_run = df_pending
+    else:
+        selected_count = sum(_v2_is_order_selected(order_id) for order_id in _v2_order_ids(df_pending))
+        df_pending_for_run = _build_pending_run_frame_from_v2_state(df_pending, editable_count, rate)
+
+    zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
+    required_id_warnings = _required_id_warning_lines(df_pending_for_run)
+    pending_data_warnings = _pending_data_warning_lines(df_pending_for_run)
+
+    with st.container():
+        left_panel, right_panel = st.columns([3.05, 1.2], gap="medium", vertical_alignment="top")
+
+        with right_panel:
+            with st.container(border=True):
+                st.markdown('<span class="postal-v2-operation-panel"></span>', unsafe_allow_html=True)
+                rate_cols = st.columns([1.0, 1.35], gap="small", vertical_alignment="center")
+                with rate_cols[0]:
+                    st.markdown('<div class="postal-v2-panel-heading">匯率與進度</div>', unsafe_allow_html=True)
+                with rate_cols[1]:
+                    st.markdown(
+                        '<div class="postal-v2-rate-badge">'
+                        f'{html.escape(format_secondary_rate_badge(rate, rate_date))}'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                metric_cols = st.columns(3, gap="small", vertical_alignment="center")
+                metric_values = [
+                    ("待製單", pending_count, "postal-v2-metric-pending"),
+                    ("已選取", selected_count, "postal-v2-metric-selected"),
+                    ("本次完成", done, "postal-v2-metric-completed"),
+                ]
+                for column, (label, value, class_name) in zip(metric_cols, metric_values):
+                    with column:
+                        st.markdown(
+                            f'<div class="postal-v2-metric {class_name}">'
+                            f'<span>{label}</span><strong>{value}</strong></div>',
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown('<div class="postal-v2-section-heading">選取操作</div>', unsafe_allow_html=True)
+                batch_action_cols = st.columns(2, gap="small")
+                current_order_ids = _v2_order_ids(df_pending)
+                with batch_action_cols[0]:
+                    select_all_requested = st.button(
+                        "選取全部",
+                        type="primary",
+                        key="postal_v2_select_all",
+                        width="stretch",
+                        disabled=is_busy or df_pending.empty,
+                    )
+                with batch_action_cols[1]:
+                    clear_all_requested = st.button(
+                        "清除全部",
+                        key="postal_v2_clear_all",
+                        width="stretch",
+                        disabled=is_busy or df_pending.empty,
+                    )
+                if select_all_requested:
+                    st.session_state["pending_v2_selected_by_order"] = apply_batch_selection(
+                        _v2_selected_by_order_state(), current_order_ids, "select_all"
+                    )
+                    st.rerun()
+                if clear_all_requested:
+                    st.session_state["pending_v2_selected_by_order"] = apply_batch_selection(
+                        _v2_selected_by_order_state(), current_order_ids, "clear_all"
+                    )
+                    st.rerun()
+                st.markdown(
+                    f'<div class="postal-v2-selection-count"><strong>{selected_count} / {pending_count}</strong> 筆已選取</div>',
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown('<div class="postal-v2-panel-divider"></div>', unsafe_allow_html=True)
+                max_rows_input = st.number_input(
+                    "最大處理",
+                    min_value=0,
+                    max_value=500,
+                    value=20,
+                    step=1,
+                    disabled=is_busy,
+                    key="postal_v2_max_rows",
+                )
+                max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+                start_requested = st.button(
+                    "開始製單",
+                    type="primary",
+                    width="stretch",
+                    key="postal_v2_start_job",
+                    disabled=(
+                        is_busy
+                        or pending_count == 0
+                        or selected_count == 0
+                        or bool(zero_value_warnings)
+                        or bool(required_id_warnings)
+                        or bool(pending_data_warnings)
+                    ),
+                )
+                reload_requested = st.button(
+                    "重新讀取",
+                    width="stretch",
+                    key="postal_v2_reload_pending",
+                    disabled=is_busy,
+                )
+                reset_all_requested = st.button(
+                    "全部恢復預設資料",
+                    width="stretch",
+                    key="postal_v2_reset_all_pending",
+                    disabled=is_busy or df_pending.empty,
+                )
+
+                if reload_requested:
+                    st.session_state.pop("last_pending_df", None)
+                    st.session_state.pop("last_pending_logs", None)
+                    st.session_state.pop("pending_refresh_notice", None)
+                    st.session_state.pop("pending_selected_by_order", None)
+                    st.session_state.pop("pending_v2_selected_by_order", None)
+                    st.session_state["pending_manual_reload_requested"] = True
+                    st.rerun()
+                if reset_all_requested and not df_pending.empty:
+                    st.session_state.pop("pending_v2_selected_by_order", None)
+                    _v2_reset_all_order_editors(df_pending, editable_count)
+                    st.rerun()
+
+                if start_requested:
+                    if df_pending.empty:
+                        st.warning("沒有符合條件的待打單資料")
+                    elif df_pending_for_run.empty:
+                        st.warning("目前未選取任何訂單")
+                    else:
+                        ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
+                        if ok:
+                            st.session_state["job_launching"] = True
+                            st.session_state["job_launching_started_at"] = time.time()
+                            if hasattr(st, "toast"):
+                                st.toast("已啟動自動製單")
+                            st.rerun()
+                        elif reason == "batch_running":
+                            st.error("同一批製單已在執行中，已阻止重複啟動。")
+                        else:
+                            st.error("任務執行中，請稍候")
+
+                if pending_manual_reload_requested and not is_busy:
+                    if pending_read_error:
+                        st.warning(f"重新讀取失敗：{pending_read_error}")
+                    else:
+                        read_summary = st.session_state.get("last_pending_read_summary") or {}
+                        st.success(
+                            "重新讀取完成："
+                            f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
+                            f"耗時 {read_summary.get('elapsed', '-')}。"
+                        )
+                if not rate and not df_pending.empty:
+                    st.warning(
+                        "暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，"
+                        f"TotalValue(JPY) 會保留來源預設值。{rate_source}"
+                    )
+                if zero_value_warnings:
+                    st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
+                if required_id_warnings:
+                    st.error("；".join(required_id_warnings[:5]))
+                if pending_data_warnings:
+                    st.error("資料需要先修正：" + "；".join(pending_data_warnings[:8]))
+
+                st.markdown(
+                    '<div class="postal-v2-legend">'
+                    '<span class="postal-v2-legend-editable">藍框：可編輯</span>'
+                    '<span class="postal-v2-legend-readonly">灰字：僅顯示／系統計算</span>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    '<div class="postal-v2-current-value-note">開始製單時採用目前畫面內容</div>',
+                    unsafe_allow_html=True,
+                )
+
+        with left_panel:
+            st.markdown('<div class="postal-v2-list-heading">待製單訂單</div>', unsafe_allow_html=True)
+            if df_pending.empty:
+                st.info("目前沒有待製單資料。")
+            elif is_busy:
+                running_orders = pd.DataFrame((job or {}).get("orders") or [])
+                if not running_orders.empty:
+                    run_cols = [
+                        "position",
+                        "order_id",
+                        "recipient",
+                        "country",
+                        "trans_type",
+                        "total_usd",
+                        "total_jpy",
+                    ]
+                    run_cols = [column for column in run_cols if column in running_orders.columns]
+                    running_preview = running_orders[run_cols].rename(
+                        columns={
+                            "position": "#",
+                            "order_id": "注文番号",
+                            "recipient": "收件人",
+                            "country": "國家",
+                            "trans_type": "TransType",
+                            "total_usd": "USD",
+                            "total_jpy": "JPY",
+                        }
+                    )
+                    st.caption("本次送出製單")
+                    st.dataframe(running_preview, hide_index=True, width="stretch")
+                else:
+                    st.info("製單任務啟動中，正在建立執行狀態。")
+                if job:
+                    _render_running_progress(job)
+            else:
+                edited_summary_rows: list[dict[str, str]] = []
+                edited_items_by_position: dict[int, pd.DataFrame] = {}
+                for position in range(editable_count):
+                    row = df_pending.iloc[position]
+                    order_id = _order_id_for_position(row, position)
+                    country = str(row.get("收件人國家", row.get("Country", ""))).strip()
+                    kind = country_kind(country)
+                    parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
+                    default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
+                    reset_version = _v2_reset_version(order_id)
+                    item_key = _v2_item_key_for(position, order_id, reset_version)
+                    item_frame = build_v2_item_display_frame(build_pending_item_frame(row))
+                    summary_item_frame = restore_v2_item_frame(_apply_data_editor_state(item_frame, item_key))
+                    trans_key = _v2_trans_key_for(position, order_id, reset_version)
+                    name_key = _v2_name_key_for(position, order_id, reset_version)
+                    prc_id_key = _v2_prc_id_key_for(position, order_id, reset_version)
+                    pccc_key = _v2_pccc_key_for(position, order_id, reset_version)
+                    selected_key = _v2_selected_key_for(position, order_id, reset_version)
+                    extra_trans_key = _v2_extra_trans_key_for(position, order_id, reset_version)
+                    _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
+                    pending_trans = st.session_state.get(trans_key, default_trans_type)
+                    pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
+                    pending_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
+                    pending_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
+                    composed_name_preview = compose_shipping_name(
+                        pending_name,
+                        country,
+                        pending_prc_id,
+                        pending_pccc,
+                    )
+                    preview_df = apply_pending_order_editor_values(
+                        df_pending.iloc[[position]],
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Order No.": order_id,
+                                    "Name": composed_name_preview,
+                                    "Country": country,
+                                    "TransType": pending_trans,
+                                    "TotalValue(USD)": "",
+                                    "TotalValue(JPY)": "",
+                                }
+                            ]
+                        ),
+                        {0: summary_item_frame},
+                        usd_jpy_rate=rate,
+                    )
+                    summary_row = build_pending_summary_frame(preview_df).iloc[0]
+
+                    with st.container(border=True):
+                        st.markdown('<span class="postal-v2-card-marker"></span>', unsafe_allow_html=True)
+                        info_cols = st.columns(
+                            [.58, 2.25, 1.55, .86, .86, 1.0],
+                            gap="small",
+                            vertical_alignment="center",
+                        )
+                        with info_cols[0]:
+                            _initialize_v2_order_selected_widget(order_id, selected_key)
+                            st.checkbox(
+                                "製單",
+                                key=selected_key,
+                                on_change=_sync_v2_order_selected_from_widget,
+                                args=(order_id, selected_key),
+                            )
+                        with info_cols[1]:
+                            st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
+                        with info_cols[2]:
+                            st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
+                        with info_cols[3]:
+                            st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
+                        with info_cols[4]:
+                            st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
+
+                        if kind in {"china", "korea"}:
+                            action_cols = st.columns(
+                                [1.42, 1.2, 1.2, 1.35, 1.65, .9],
+                                gap="small",
+                                vertical_alignment="center",
+                            )
+                        else:
+                            action_cols = st.columns(
+                                [1.42, 1.2, 1.2, 2.45, .9],
+                                gap="small",
+                                vertical_alignment="center",
+                            )
+                        with action_cols[0]:
+                            edited_name = st.text_input("Name", value=pending_name, key=name_key)
+                        with action_cols[1]:
+                            trans_type = st.selectbox(
+                                "TransType",
+                                options=SHIPPING_OPTIONS,
+                                index=SHIPPING_OPTIONS.index(default_trans_type)
+                                if default_trans_type in SHIPPING_OPTIONS
+                                else 0,
+                                key=trans_key,
+                            )
+                        extra_options = ["無"] + SHIPPING_OPTIONS
+                        if st.session_state.get(extra_trans_key, "無") not in extra_options:
+                            st.session_state[extra_trans_key] = "無"
+                        if extra_trans_key not in st.session_state:
+                            st.session_state[extra_trans_key] = "無"
+                        with action_cols[2]:
+                            st.selectbox("追加", options=extra_options, key=extra_trans_key)
+                        edited_prc_id = pending_prc_id
+                        edited_pccc = pending_pccc
+                        if kind == "china":
+                            with action_cols[3]:
+                                edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
+                        elif kind == "korea":
+                            with action_cols[3]:
+                                edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
+                        with action_cols[-1]:
+                            if st.button(
+                                "恢復預設",
+                                key=f"postal_v2_reset_order_{position}_{order_id}_{reset_version}",
+                                width="stretch",
+                            ):
+                                _v2_reset_order_editor(order_id)
+                                st.rerun()
+
+                        edited_summary_rows.append(
+                            {
+                                "Order No.": order_id,
+                                "Name": compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc),
+                                "Country": country,
+                                "TransType": trans_type,
+                                "TotalValue(USD)": "",
+                                "TotalValue(JPY)": "",
+                            }
+                        )
+                        zero_items = has_zero_value_items(row)
+                        if zero_items:
+                            st.error(
+                                "Value is 0 for "
+                                + ", ".join(f"Content{i}" for i in zero_items)
+                                + ". Please edit before starting."
+                            )
+                        edited_display_frame = st.data_editor(
+                            item_frame,
+                            hide_index=True,
+                            width="stretch",
+                            num_rows="fixed",
+                            disabled=["No."],
+                            column_config={
+                                "No.": st.column_config.TextColumn("No.", width=54),
+                                "Description": st.column_config.TextColumn("品名 / 描述", width="large"),
+                                "HSCode": st.column_config.TextColumn("HS Code", width=120),
+                                "Value": st.column_config.TextColumn("申報價值（USD）", width=120),
+                                "Quantity": st.column_config.TextColumn("數量", width=90),
+                            },
+                            key=item_key,
+                        )
+                        edited_items_by_position[position] = restore_v2_item_frame(edited_display_frame)
+
+                if len(df_pending) > editable_count:
+                    st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
+
+        if job and job.get("results") and not is_busy:
+            if batch_summary["failure_alerts"]:
+                st.warning(
+                    f"本批完成 {batch_summary['completed_count']} 筆，"
+                    f"未完成 {batch_summary['failed_count'] + batch_summary['skipped_count']} 筆。"
+                )
+                for alert in batch_summary["failure_alerts"]:
+                    st.error(alert)
+            elif st.session_state.get("pending_refresh_notice"):
+                st.success(
+                    f"製單完成：本次完成 {batch_summary['completed_count']} 筆。"
+                    "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
+                )
+
+        if job and job.get("orders"):
+            st.markdown('<div class="postal-v2-status-heading">製單狀態</div>', unsafe_allow_html=True)
+            status_label = {
+                "queued": "待機中",
+                "running": "製單中",
+                "success": "完成",
+                "completed": "完成",
+                "failed": "需排查",
+                "skipped": "略過",
+                "blocked": "未製單",
+            }
+            df_status = pd.DataFrame(job["orders"])
+            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
+            df_status = df_status.rename(
+                columns={
+                    "position": "#",
+                    "order_id": "注文番号",
+                    "recipient": "收件人",
+                    "country": "國家",
+                    "trans_type": "TransType",
+                    "status": "狀態",
+                    "stage": "階段",
+                    "tracking_no": "貨運單號",
+                    "hs_codes": "HSCode",
+                    "message": "訊息",
+                }
+            )
+            if "HSCode" not in df_status.columns:
+                df_status["HSCode"] = ""
+            show_cols = [
+                "#",
+                "注文番号",
+                "收件人",
+                "國家",
+                "TransType",
+                "狀態",
+                "階段",
+                "貨運單號",
+                "HSCode",
+                "訊息",
+            ]
+            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
+
+        if job and job.get("logs") and batch_summary["failure_alerts"]:
+            with st.expander("詳細除錯日誌", expanded=True):
+                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
+                st.code("\n".join(job["logs"][-200:]), language="text")
+
+
 def _render_running_progress(job: dict) -> None:
     progress = summarize_job_progress(job)
     total = progress["total"]
@@ -775,13 +1418,13 @@ def _render_main_app():
             --erp-surface: #15171b;
             --erp-surface-2: #1d2026;
             --erp-surface-3: #101722;
-            --erp-border: rgba(251, 146, 60, 0.24);
+            --erp-border: rgba(82, 117, 168, 0.34);
             --erp-border-soft: rgba(148, 163, 184, 0.18);
             --erp-text: #f8fafc;
             --erp-muted: #cbd5e1;
             --erp-dim: #94a3b8;
-            --erp-accent: #f59e0b;
-            --erp-accent-2: #ea580c;
+            --erp-accent: #5275A8;
+            --erp-accent-2: #456A9F;
             --erp-danger: #ef4444;
             --control-h: 36px;
             --row-h: 38px;
@@ -791,9 +1434,7 @@ def _render_main_app():
         }
         * { box-sizing: border-box; }
         .stApp {
-            background:
-                radial-gradient(circle at 8% 4%, rgba(180, 83, 9, 0.24), transparent 30rem),
-                linear-gradient(135deg, var(--erp-bg-warm) 0%, var(--erp-bg) 45%, #11100e 100%);
+            background: var(--erp-bg);
             color: var(--erp-text);
         }
         .block-container {
@@ -804,7 +1445,7 @@ def _render_main_app():
         div[data-testid="stHorizontalBlock"] { gap: var(--row-gap); }
         hr { margin: 0 0 .02rem 0; border-color: rgba(148, 163, 184, 0.12); }
         h1, h2, h3, h4, h5, h6 { color: var(--erp-text); letter-spacing: 0; }
-        h3 { color: #fff7ed; margin-bottom: .18rem; }
+        h3 { color: var(--erp-text); margin-bottom: .18rem; }
         div[data-testid="stHeading"] { margin-bottom: .08rem; }
         p, label, .stMarkdown, [data-testid="stCaptionContainer"] { color: var(--erp-muted); }
         div[data-testid="stCaptionContainer"] { color: var(--erp-dim); }
@@ -846,7 +1487,7 @@ def _render_main_app():
             background: rgba(24, 24, 27, 0.78);
         }
         .stButton > button:hover {
-            border-color: rgba(245, 158, 11, 0.62);
+            border-color: rgba(82, 117, 168, 0.72);
             background: rgba(39, 39, 42, 0.95);
         }
         div[data-testid="stButton"],
@@ -942,8 +1583,8 @@ def _render_main_app():
         }
         .guide-note {
             border-left: 3px solid var(--erp-accent);
-            background: rgba(245, 158, 11, 0.08);
-            color: #fde68a;
+            background: rgba(82, 117, 168, 0.12);
+            color: #b8caea;
             padding: .72rem .9rem;
             margin: .8rem 0 1.1rem;
             border-radius: 0 8px 8px 0;
@@ -959,7 +1600,7 @@ def _render_main_app():
         }
         .toolbar-chip,
         .field-inline-label {
-            border: 1px solid rgba(251, 146, 60, 0.22);
+            border: 1px solid rgba(82, 117, 168, 0.3);
             border-radius: var(--control-radius);
             background: rgba(15, 23, 42, 0.7);
             color: var(--erp-text);
@@ -1020,7 +1661,7 @@ def _render_main_app():
             overflow: hidden;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker) {
-            border: 1px solid rgba(251, 146, 60, 0.17) !important;
+            border: 1px solid rgba(82, 117, 168, 0.24) !important;
             border-radius: 12px !important;
             background: rgba(19, 21, 25, 0.96);
             margin-bottom: .62rem;
@@ -1028,7 +1669,7 @@ def _render_main_app():
             padding: .46rem .62rem .52rem .62rem !important;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.order-card-marker):hover {
-            border-color: rgba(245, 158, 11, 0.42) !important;
+            border-color: rgba(82, 117, 168, 0.62) !important;
             background: rgba(23, 25, 30, 0.96);
         }
         .order-card {
@@ -1040,7 +1681,7 @@ def _render_main_app():
             box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
         }
         .order-card:hover {
-            border-color: rgba(245, 158, 11, 0.42);
+            border-color: rgba(82, 117, 168, 0.62);
             background: rgba(23, 25, 30, 0.96);
         }
         .order-card-header {
@@ -1125,7 +1766,7 @@ def _render_main_app():
             margin-bottom: .2rem;
         }
         .running-panel {
-            border: 1px solid rgba(251, 146, 60, 0.32);
+            border: 1px solid rgba(82, 117, 168, 0.4);
             background: rgba(15, 23, 42, 0.72);
             border-radius: 8px;
             padding: .55rem .7rem;
@@ -1138,7 +1779,7 @@ def _render_main_app():
             line-height: 1.2;
         }
         .running-detail {
-            color: #fbbf24;
+            color: #9bb7df;
             font-weight: 700;
             font-size: .86rem;
             line-height: 1.25;
@@ -1158,7 +1799,7 @@ def _render_main_app():
         }
         .running-guard-box {
             width: min(560px, calc(100vw - 32px));
-            border: 1px solid rgba(251, 146, 60, 0.48);
+            border: 1px solid rgba(82, 117, 168, 0.58);
             background: rgba(15, 23, 42, 0.96);
             border-radius: 8px;
             padding: 1rem 1.25rem;
@@ -1171,7 +1812,7 @@ def _render_main_app():
             line-height: 1.2;
         }
         .running-guard-text {
-            color: #fbbf24;
+            color: #9bb7df;
             font-size: .95rem;
             font-weight: 750;
             margin-top: .42rem;
@@ -1212,7 +1853,7 @@ def _render_main_app():
         .select-summary-label { margin-bottom: .02rem; }
         div[data-baseweb="select"] > div {
             background: rgba(15, 23, 42, 0.96);
-            border-color: rgba(251, 146, 60, 0.26);
+            border-color: rgba(82, 117, 168, 0.34);
             min-height: var(--control-h);
             height: var(--control-h);
             border-radius: var(--control-radius);
@@ -1223,14 +1864,14 @@ def _render_main_app():
             font-weight: 700;
         }
         .rate-caption {
-            color: #fde68a;
+            color: #b8caea;
             font-size: .78rem;
             text-align: right;
             padding-top: .42rem;
             white-space: nowrap;
         }
         .stButton > button[kind="primary"] {
-            background: #c2410c;
+            background: #5275A8;
             border-color: var(--erp-accent-2);
         }
         div[data-testid="stDataEditor"] {
@@ -1259,7 +1900,7 @@ def _render_main_app():
         }
         div[data-testid="stNumberInput"] input {
             background: rgba(15, 23, 42, 0.96) !important;
-            border-color: rgba(251, 146, 60, 0.26) !important;
+            border-color: rgba(82, 117, 168, 0.34) !important;
             color: var(--erp-text) !important;
             min-height: var(--control-h);
             height: var(--control-h);
@@ -1301,7 +1942,7 @@ def _render_main_app():
         }
         div[data-testid="stTextInput"] input {
             background: rgba(15, 23, 42, 0.96) !important;
-            border-color: rgba(251, 146, 60, 0.26) !important;
+            border-color: rgba(82, 117, 168, 0.34) !important;
             color: var(--erp-text) !important;
             min-height: var(--control-h);
             height: var(--control-h);
@@ -1479,6 +2120,187 @@ def _render_main_app():
                 padding: .5rem .5rem .55rem .5rem !important;
             }
         }
+
+        /* Isolated postal pending UI v2: flat dark surfaces and restrained blue edit cues. */
+        .postal-v2-page-marker,
+        .postal-v2-operation-panel,
+        .postal-v2-card-marker {
+            display: none;
+        }
+        .postal-v2-panel-heading,
+        .postal-v2-section-heading,
+        .postal-v2-list-heading,
+        .postal-v2-status-heading {
+            color: #e8eaf0;
+            font-weight: 750;
+            line-height: 1.2;
+        }
+        .postal-v2-panel-heading {
+            font-size: .86rem;
+        }
+        .postal-v2-section-heading,
+        .postal-v2-list-heading {
+            font-size: 1rem;
+            margin: .55rem 0 .42rem;
+        }
+        .postal-v2-status-heading {
+            font-size: 1.08rem;
+            margin: .9rem 0 .42rem;
+        }
+        .postal-v2-rate-badge {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-align: right;
+            color: #9bb7df;
+            border: 1px solid #3a4152;
+            background: #0A0D13;
+            border-radius: 8px;
+            padding: .32rem .48rem;
+            font-size: .72rem;
+            font-variant-numeric: tabular-nums;
+        }
+        .postal-v2-metric {
+            min-height: 4.05rem;
+            padding: .42rem .24rem .26rem;
+            border-right: 1px solid rgba(58, 65, 82, .82);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: .16rem;
+        }
+        .postal-v2-metric:last-child {
+            border-right: 0;
+        }
+        .postal-v2-metric span {
+            color: #8b93a7;
+            font-size: .78rem;
+            white-space: nowrap;
+        }
+        .postal-v2-metric strong {
+            color: #5275A8;
+            font-size: 1.7rem;
+            font-weight: 850;
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+        .postal-v2-metric-pending strong { color: #6f8fbe; }
+        .postal-v2-metric-selected strong { color: #5275A8; }
+        .postal-v2-metric-completed strong { color: #5bbd80; }
+        .postal-v2-selection-count {
+            color: #8b93a7;
+            font-size: .82rem;
+            text-align: right;
+            padding: .28rem .1rem .05rem;
+            font-variant-numeric: tabular-nums;
+        }
+        .postal-v2-selection-count strong {
+            color: #5275A8;
+            font-size: 1.28rem;
+            font-weight: 850;
+        }
+        .postal-v2-panel-divider {
+            border-top: 1px solid #262b36;
+            margin: .64rem 0 .56rem;
+        }
+        .postal-v2-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: .35rem .7rem;
+            border-top: 1px solid #262b36;
+            margin-top: .7rem;
+            padding-top: .62rem;
+            font-size: .76rem;
+        }
+        .postal-v2-legend-editable,
+        .postal-v2-legend-readonly {
+            white-space: nowrap;
+        }
+        .postal-v2-legend-editable { color: #5275A8; }
+        .postal-v2-legend-readonly { color: #8b93a7; }
+        .postal-v2-current-value-note {
+            color: #8b93a7;
+            font-size: .75rem;
+            line-height: 1.35;
+            margin-top: .56rem;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel) {
+            border: 1px solid #262b36 !important;
+            border-radius: 12px !important;
+            background: #0A0D13 !important;
+            padding: .65rem .7rem .72rem !important;
+            min-width: 0;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) {
+            border: 1px solid #262b36 !important;
+            border-radius: 12px !important;
+            background: #0A0D13 !important;
+            margin-bottom: .62rem;
+            padding: .46rem .62rem .52rem !important;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025), 0 10px 24px rgba(0, 0, 0, .16);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker):hover {
+            border-color: #3f5f8f !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel) .stButton > button[kind="primary"],
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .stButton > button[kind="primary"] {
+            background: #5275A8 !important;
+            border-color: #5275A8 !important;
+            color: #f5f7f9 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel) .stButton > button:hover,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .stButton > button:hover {
+            border-color: #6f91c2 !important;
+            background: #456A9F !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel) div[data-testid="stNumberInput"] input,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-testid="stTextInput"] input,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-baseweb="select"] > div {
+            background: #0A0D13 !important;
+            border-color: #5275A8 !important;
+            color: #e8eaf0 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-testid="stTextInput"] label,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-testid="stSelectbox"] label,
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel) div[data-testid="stNumberInput"] label {
+            color: #7f9bc7 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-testid="stDataEditor"] {
+            border-color: #5275A8 !important;
+            background: #0A0D13 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-testid="stDataEditor"] [role="columnheader"] {
+            background: #171a21 !important;
+            color: #a8b5ca !important;
+            border-color: rgba(82, 117, 168, .42) !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-testid="stDataEditor"] [role="gridcell"] {
+            background: #0A0D13 !important;
+            color: #e8eaf0 !important;
+            border-color: rgba(82, 117, 168, .48) !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-label {
+            color: #8b93a7 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-value {
+            color: #e8eaf0 !important;
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
+            color: #5275A8 !important;
+        }
+        @media (max-width: 900px) {
+            .postal-v2-rate-badge {
+                font-size: .68rem;
+            }
+            .postal-v2-metric {
+                min-height: 3.55rem;
+            }
+            .postal-v2-metric strong {
+                font-size: 1.46rem;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1571,7 +2393,9 @@ def _render_main_app():
     batch_summary = summarize_batch_results((job or {}).get("results") or [])
     done = int(batch_summary["completed_count"])
 
-    picking_tab, preview_tab, guide_tab, diagnostics_tab = st.tabs(["跨境揀貨單", "郵局待打單", "使用說明", "讀取診斷"])
+    picking_tab, preview_tab, postal_v2_tab, guide_tab, diagnostics_tab = st.tabs(
+        ["跨境揀貨單", "郵局待打單", "郵局待打單（新版測試）", "使用說明", "讀取診斷"]
+    )
 
     with picking_tab:
         picking_labels_module = import_module_with_retry("features.picking_labels")
@@ -1910,6 +2734,25 @@ def _render_main_app():
             with st.expander("🔧 詳細除錯日誌", expanded=True):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
                 st.code("\n".join(job["logs"][-200:]), language="text")
+    with postal_v2_tab:
+        _render_postal_pending_v2(
+            email=email,
+            df_pending=df_pending,
+            pending_logs=pending_logs,
+            rate=rate,
+            rate_date=rate_date,
+            rate_source=rate_source,
+            job=job,
+            is_running=is_running,
+            is_launching=is_launching,
+            is_busy=is_busy,
+            pending_count=pending_count,
+            done=done,
+            batch_summary=batch_summary,
+            pending_manual_reload_requested=pending_manual_reload_requested,
+            pending_read_error=pending_read_error,
+        )
+
     with guide_tab:
         st.markdown("# Cross-Border製單系統使用說明")
         st.markdown(
