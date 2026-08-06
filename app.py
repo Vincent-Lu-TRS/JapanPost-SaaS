@@ -807,7 +807,6 @@ def _render_postal_pending_v2(
                 )
 
         with left_panel:
-            st.markdown('<div class="postal-v2-list-heading">待製單訂單</div>', unsafe_allow_html=True)
             if df_pending.empty:
                 st.info("目前沒有待製單資料。")
             elif is_busy:
@@ -893,7 +892,7 @@ def _render_postal_pending_v2(
                     with st.container(border=True):
                         st.markdown('<span class="postal-v2-card-marker"></span>', unsafe_allow_html=True)
                         info_cols = st.columns(
-                            [.58, 2.25, 1.55, .86, .86, 1.0],
+                            [.58, 1.75, 2.45, .86, .86, 1.0],
                             gap="small",
                             vertical_alignment="center",
                         )
@@ -915,22 +914,24 @@ def _render_postal_pending_v2(
                             st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
 
                         if kind in {"china", "korea"}:
+                            # Keep both select columns at 1.8 (1.5x the previous 1.2 ratio)
+                            # while retaining room for country-specific ID fields.
                             action_cols = st.columns(
-                                [1.42, 1.2, 1.2, 1.35, 1.65, .9],
+                                [1.2, 1.8, 1.8, 1.1, 1.2, .7],
                                 gap="small",
                                 vertical_alignment="center",
                             )
                         else:
                             action_cols = st.columns(
-                                [1.42, 1.2, 1.2, 2.45, .9],
+                                [1.42, 1.8, 1.8, 1.25, .9],
                                 gap="small",
                                 vertical_alignment="center",
                             )
                         with action_cols[0]:
-                            edited_name = st.text_input("Name", value=pending_name, key=name_key)
+                            edited_name = st.text_input("姓名", value=pending_name, key=name_key)
                         with action_cols[1]:
                             trans_type = st.selectbox(
-                                "TransType",
+                                "寄送方式",
                                 options=SHIPPING_OPTIONS,
                                 index=SHIPPING_OPTIONS.index(default_trans_type)
                                 if default_trans_type in SHIPPING_OPTIONS
@@ -943,7 +944,7 @@ def _render_postal_pending_v2(
                         if extra_trans_key not in st.session_state:
                             st.session_state[extra_trans_key] = "無"
                         with action_cols[2]:
-                            st.selectbox("追加", options=extra_options, key=extra_trans_key)
+                            st.selectbox("追加製作", options=extra_options, key=extra_trans_key)
                         edited_prc_id = pending_prc_id
                         edited_pccc = pending_pccc
                         if kind == "china":
@@ -1109,7 +1110,12 @@ def _summary_cell(label: str, value: str) -> str:
 
 
 def _native_info(label: str, value: str) -> str:
-    label_class = "native-info-order" if label == "Order No." else "native-info-standard"
+    if label == "Order No.":
+        label_class = "native-info-order"
+    elif label == "Country":
+        label_class = "native-info-country"
+    else:
+        label_class = "native-info-standard"
     return (
         f'<div class="native-info {label_class}">'
         f'<span class="native-info-label">{html.escape(label)}</span>'
@@ -2230,7 +2236,7 @@ def _render_main_app():
             border: 1px solid #262b36 !important;
             border-radius: 12px !important;
             background: #0A0D13 !important;
-            padding: .65rem .7rem .72rem !important;
+            padding: .65rem .7rem 1.12rem !important;
             min-width: 0;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) {
@@ -2286,6 +2292,10 @@ def _render_main_app():
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-value {
             color: #e8eaf0 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-country .native-info-value {
+            overflow: visible;
+            text-overflow: clip;
         }
         div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
             background-color: #5275A8 !important;

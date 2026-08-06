@@ -110,6 +110,41 @@ class PostalStartFlowTests(unittest.TestCase):
             self.assertIn(marker, app_source)
         self.assertIn("藍框：可編輯", app_source)
 
+    def test_v2_labels_and_order_card_layout_match_latest_ui_contract(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            '<div class="postal-v2-list-heading">待製單訂單</div>',
+            app_source,
+        )
+        self.assertIn('st.text_input("姓名", value=pending_name, key=name_key)', app_source)
+        self.assertIn('                                "寄送方式",', app_source)
+        self.assertIn('st.selectbox("追加製作", options=extra_options, key=extra_trans_key)', app_source)
+        self.assertIn(
+            '[.58, 1.75, 2.45, .86, .86, 1.0],',
+            app_source,
+        )
+        self.assertIn(
+            '[1.2, 1.8, 1.8, 1.1, 1.2, .7],',
+            app_source,
+        )
+        self.assertIn(
+            '[1.42, 1.8, 1.8, 1.25, .9],',
+            app_source,
+        )
+        self.assertIn(
+            'padding: .65rem .7rem 1.12rem !important;',
+            app_source,
+        )
+        self.assertIn(
+            '.postal-v2-card-marker) .native-info-value {',
+            app_source,
+        )
+        self.assertIn(
+            'native-info-country .native-info-value',
+            app_source,
+        )
+
     def test_v2_uses_scoped_flat_dark_palette_and_preserves_job_feedback_hooks(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         config_source = (ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")
