@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 USD_JPY_ENDPOINTS = (
+    "https://api.exchangerate-api.com/v4/latest/USD",
     "https://api.frankfurter.dev/v2/rates?base=USD&quotes=JPY",
     "https://api.frankfurter.dev/v1/latest?base=USD&symbols=JPY",
     "https://api.frankfurter.app/latest?from=USD&to=JPY",
