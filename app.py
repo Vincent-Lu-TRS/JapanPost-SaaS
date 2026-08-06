@@ -21,7 +21,6 @@ from app_imports import import_module_with_retry
 
 _job_control = import_module_with_retry("job_control")
 BatchJobRegistry = _job_control.BatchJobRegistry
-filter_key_log_lines = _job_control.filter_key_log_lines
 mark_results_completed = _job_control.mark_results_completed
 mark_results_failed = _job_control.mark_results_failed
 mark_unfinished_orders = _job_control.mark_unfinished_orders
@@ -44,7 +43,12 @@ from pending_editor import (
     sanitize_hscode,
 )
 from fx_rates import fetch_usd_jpy_rate
-from postal_ui_feedback import summarize_batch_results, summarize_pending_read_logs
+from postal_ui_feedback import (
+    completed_order_ids,
+    filter_pending_orders_after_batch,
+    summarize_batch_results,
+    summarize_pending_read_logs,
+)
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -880,18 +884,24 @@ def _render_main_app():
         }
         .toolbar-text {
             min-height: var(--control-h);
+            width: 100%;
+            min-width: 0;
             display: flex;
             align-items: center;
+            flex-wrap: wrap;
+            gap: .25rem .36rem;
             color: var(--erp-text);
             font-size: 1.22rem;
             font-weight: 700;
+            line-height: 1.1;
             white-space: nowrap;
+            overflow-wrap: anywhere;
         }
         .toolbar-text span {
             color: var(--erp-accent);
             font-size: 1.05rem;
             font-weight: 800;
-            margin-right: .22rem;
+            margin-right: 0;
         }
         .toolbar-muted {
             color: var(--erp-muted);
@@ -902,23 +912,33 @@ def _render_main_app():
             display: inline-flex;
             align-items: baseline;
             gap: .28rem;
+            width: 100%;
+            min-width: 0;
+            max-width: 100%;
+            flex-wrap: wrap;
         }
         .toolbar-count strong {
             color: var(--erp-text);
             font-size: 2.1rem;
             font-weight: 900;
             line-height: 1;
+            white-space: nowrap;
         }
         .toolbar-rate {
             display: inline-flex;
             align-items: baseline;
             gap: .36rem;
+            width: 100%;
+            min-width: 0;
+            max-width: 100%;
+            flex-wrap: wrap;
         }
         .toolbar-rate strong {
             color: var(--erp-text);
             font-size: 1.28rem;
             font-weight: 850;
             line-height: 1;
+            white-space: nowrap;
         }
         .guide-note {
             border-left: 3px solid var(--erp-accent);
@@ -1391,9 +1411,9 @@ def _render_main_app():
                 white-space: normal;
             }
             .toolbar-text {
-                align-items: flex-start;
-                line-height: 1.2;
-                min-height: auto;
+                align-items: center;
+                line-height: 1.1;
+                min-height: var(--control-h);
             }
             .toolbar-count {
                 align-items: center;
@@ -1516,9 +1536,18 @@ def _render_main_app():
                     pending_read_error = str(e)
                     st.warning(f"無法讀取 Google Sheets：{e}")
 
-    rate, rate_date, rate_source = None, "", ""
-    if not df_pending.empty:
-        rate, rate_date, rate_source = _load_usd_jpy_rate()
+    if not is_busy and job and job.get("results"):
+        filtered_pending = filter_pending_orders_after_batch(df_pending, job["results"])
+        if len(filtered_pending) != len(df_pending):
+            df_pending = filtered_pending
+            st.session_state["last_pending_df"] = df_pending
+            selected_by_order = st.session_state.get("pending_selected_by_order")
+            if isinstance(selected_by_order, dict):
+                for order_id in completed_order_ids(job["results"]):
+                    selected_by_order.pop(order_id, None)
+
+    pending_count = len(df_pending)
+    rate, rate_date, rate_source = _load_usd_jpy_rate()
     editable_count = min(len(df_pending), 20)
     if not is_busy and not df_pending.empty:
         _sync_visible_order_selection_from_widgets(df_pending, editable_count)
@@ -1549,7 +1578,7 @@ def _render_main_app():
         picking_labels_module.render_picking_label_tab()
 
     with preview_tab:
-        toolbar_info_cols = st.columns([1.65, .95, 1.05, 1.08, 2.0], gap="small", vertical_alignment="center")
+        toolbar_info_cols = st.columns([1.75, 1, 1, 1], gap="medium", vertical_alignment="center")
         with toolbar_info_cols[0]:
             st.markdown(
                 f'<div class="toolbar-text toolbar-rate"><span>匯率</span><strong>{html.escape(_format_short_rate(rate, rate_date))}</strong></div>',
@@ -1687,7 +1716,6 @@ def _render_main_app():
             elif not is_busy:
                 edited_summary_rows: list[dict[str, str]] = []
                 edited_items_by_position: dict[int, pd.DataFrame] = {}
-                job_order_by_id = {str(order.get("order_id", "")): order for order in (job or {}).get("orders", [])}
                 for position in range(editable_count):
                     row = df_pending.iloc[position]
                     order_id = _order_id_for_position(row, position)
@@ -1823,21 +1851,6 @@ def _render_main_app():
                             },
                             key=item_key,
                         )
-                        sent_order = job_order_by_id.get(order_id)
-                        if sent_order and sent_order.get("status") == "success":
-                            hs_text = str(sent_order.get("hs_codes", "")).strip()
-                            st.markdown(
-                                '<div class="sent-compact">'
-                                f'已製單｜Name {html.escape(edited_name)}'
-                                + (f'｜PRC ID {html.escape(edited_prc_id)}' if kind == "china" and edited_prc_id else '')
-                                + (f'｜PCCC {html.escape(edited_pccc)}' if kind == "korea" and edited_pccc else '')
-                                + f'｜TransType {html.escape(trans_type)}'
-                                f'｜HS {html.escape(hs_text)}｜USD {html.escape(str(summary_row["TotalValue(USD)"]))}'
-                                f'｜JPY {html.escape(str(summary_row["TotalValue(JPY)"]))}'
-                                '</div>',
-                                unsafe_allow_html=True,
-                            )
-
                 edited_df = apply_pending_order_editor_values(
                     df_pending,
                     pd.DataFrame(edited_summary_rows),
@@ -1893,59 +1906,10 @@ def _render_main_app():
             show_cols = ["#", "注文番号", "收件人", "國家", "TransType", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
             st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
 
-        if job and job.get("results"):
-            st.divider()
-            st.subheader("✅ 本次製單結果")
-            order_lookup = {str(order.get("order_id", "")): order for order in job.get("orders", [])}
-            for result in job["results"]:
-                order_id = str(result.get("order_id", "")).strip()
-                result_status = str(result.get("status") or "success").strip()
-                if result_status not in {"success", "completed"}:
-                    reason = str(
-                        result.get("reason_text")
-                        or result.get("message")
-                        or result.get("reason_code")
-                        or "未知原因"
-                    ).strip()
-                    st.error(f"訂單編號 {order_id}：未製單（{reason}）")
-                    continue
-                order_state = order_lookup.get(order_id, {})
-                hs_text = str(order_state.get("hs_codes", "")).strip()
-                result_name = str(result.get("name", ""))
-                parsed_result_name = parse_shipping_name(result_name)
-                result_country = str(order_state.get("country", ""))
-                result_kind = country_kind(result_country)
-                st.markdown(
-                    '<div class="sent-compact">'
-                    f'已製單｜Name {html.escape(parsed_result_name["clean_name"] or result_name)}'
-                    + (f'｜PRC ID {html.escape(parsed_result_name["prc_id"])}' if result_kind == "china" and parsed_result_name["prc_id"] else '')
-                    + (f'｜PCCC {html.escape(parsed_result_name["pccc"])}' if result_kind == "korea" and parsed_result_name["pccc"] else '')
-                    + (f'｜TransType {html.escape(str(order_state.get("trans_type", "")))}' if order_state.get("trans_type") else '')
-                    + f'｜Tracking {html.escape(str(result.get("tracking", "")))}'
-                    + (f'｜HS {html.escape(hs_text)}' if hs_text else '')
-                    + (f'｜USD {html.escape(str(order_state.get("total_usd", "")))}' if order_state.get("total_usd") else '')
-                    + (f'｜JPY {html.escape(str(order_state.get("total_jpy", "")))}' if order_state.get("total_jpy") else '')
-                    + '</div>',
-                    unsafe_allow_html=True,
-                )
-
-        if job and job.get("logs"):
-            st.divider()
-            st.subheader("📄 執行日誌")
-            log_lines = job["logs"]
-            key_lines = filter_key_log_lines(log_lines)
-            log_text = "\n".join(key_lines) if key_lines else "\n".join(log_lines[-20:])
-            st.text_area(
-                "執行日誌內容",
-                value=log_text,
-                height=220,
-                disabled=True,
-                key="log_area",
-                label_visibility="hidden",
-            )
-            if len(key_lines) != len(log_lines):
-                with st.expander("🔧 詳細除錯日誌"):
-                    st.code("\n".join(log_lines[-200:]), language="text")
+        if job and job.get("logs") and batch_summary["failure_alerts"]:
+            with st.expander("🔧 詳細除錯日誌", expanded=True):
+                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
+                st.code("\n".join(job["logs"][-200:]), language="text")
     with guide_tab:
         st.markdown("# Cross-Border製單系統使用說明")
         st.markdown(

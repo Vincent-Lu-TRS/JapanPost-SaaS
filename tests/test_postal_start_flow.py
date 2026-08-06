@@ -38,12 +38,46 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertLess(start_body.index("_install_playwright()"), start_body.index("from bot.automation import"))
         self.assertNotIn("\n_install_playwright()\ninit_auth_state(_cm)", app_source)
 
-    def test_fx_rate_load_is_skipped_until_pending_orders_exist(self):
+    def test_fx_rate_load_is_ready_before_pending_orders_exist(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
-        self.assertIn("rate, rate_date, rate_source = None, \"\", \"\"", app_source)
-        self.assertIn("if not df_pending.empty:\n        rate, rate_date, rate_source = _load_usd_jpy_rate()", app_source)
-        self.assertNotIn("\n    rate, rate_date, rate_source = _load_usd_jpy_rate()\n    editable_count", app_source)
+        self.assertIn(
+            'pending_count = len(df_pending)\n    rate, rate_date, rate_source = _load_usd_jpy_rate()\n    editable_count',
+            app_source,
+        )
+        self.assertNotIn(
+            "if not df_pending.empty:\n        rate, rate_date, rate_source = _load_usd_jpy_rate()",
+            app_source,
+        )
+
+    def test_completed_pending_rows_are_filtered_before_editor_state_is_built(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("filter_pending_orders_after_batch", app_source)
+        self.assertIn('st.session_state["last_pending_df"] = df_pending', app_source)
+
+    def test_successful_batch_hides_redundant_result_and_execution_log_sections(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertNotIn('st.subheader("✅ 本次製單結果")', app_source)
+        self.assertNotIn('st.subheader("📄 執行日誌")', app_source)
+        self.assertNotIn('st.text_area(\n                "執行日誌內容"', app_source)
+
+    def test_detailed_debug_log_is_only_rendered_for_failed_batches(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'if job and job.get("logs") and batch_summary["failure_alerts"]:',
+            app_source,
+        )
+
+    def test_toolbar_summary_uses_four_columns_without_spacer(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'toolbar_info_cols = st.columns([1.75, 1, 1, 1], gap="medium", vertical_alignment="center")',
+            app_source,
+        )
 
     def test_job_launching_state_locks_ui_until_running_job_is_visible(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

@@ -1,6 +1,12 @@
 import unittest
 
-from postal_ui_feedback import summarize_batch_results, summarize_pending_read_logs
+import pandas as pd
+
+from postal_ui_feedback import (
+    filter_pending_orders_after_batch,
+    summarize_batch_results,
+    summarize_pending_read_logs,
+)
 
 
 class PostalUiFeedbackTests(unittest.TestCase):
@@ -52,6 +58,37 @@ class PostalUiFeedbackTests(unittest.TestCase):
 
         self.assertEqual(summary["completed_count"], 1)
         self.assertEqual(summary["failure_alerts"], [])
+
+    def test_completed_orders_are_removed_from_cached_pending_view(self):
+        pending = pd.DataFrame(
+            {
+                "order_id": ["ok-1", "failed-1", "untouched-1"],
+                "Shipping Name": ["A", "B", "C"],
+            }
+        )
+        visible = filter_pending_orders_after_batch(
+            pending,
+            [
+                {"order_id": "ok-1", "status": "completed"},
+                {"order_id": "failed-1", "status": "failed"},
+            ],
+        )
+
+        self.assertEqual(visible["order_id"].tolist(), ["failed-1", "untouched-1"])
+        self.assertEqual(pending["order_id"].tolist(), ["ok-1", "failed-1", "untouched-1"])
+
+    def test_non_completed_results_do_not_change_pending_view(self):
+        pending = pd.DataFrame({"注文番号(貼上原始資料)": ["blocked-1", "retry-1"]})
+
+        visible = filter_pending_orders_after_batch(
+            pending,
+            [
+                {"order_id": "blocked-1", "status": "blocked"},
+                {"order_id": "retry-1", "status": "backfill_failed"},
+            ],
+        )
+
+        self.assertEqual(visible["注文番号(貼上原始資料)"].tolist(), ["blocked-1", "retry-1"])
 
 
 if __name__ == "__main__":

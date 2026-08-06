@@ -3,6 +3,57 @@ from __future__ import annotations
 
 import re
 
+import pandas as pd
+
+
+_PENDING_ORDER_ID_COLUMNS = (
+    "注文番号(貼上原始資料)",
+    "注文番号(貼上原始資料)_1",
+    "order_id",
+    "Order No.",
+)
+
+
+def completed_order_ids(results: list[dict] | None) -> set[str]:
+    """Return order IDs that were actually completed in a batch."""
+    completed_statuses = {"success", "completed"}
+    return {
+        str(result.get("order_id") or "").strip()
+        for result in results or []
+        if str(result.get("status") or "").strip() in completed_statuses
+        and str(result.get("order_id") or "").strip()
+    }
+
+
+def filter_pending_orders_after_batch(
+    pending: pd.DataFrame,
+    results: list[dict] | None,
+) -> pd.DataFrame:
+    """Hide successfully completed rows from the cached pending-order view.
+
+    This is a presentation-layer filter only.  The input frame is not mutated,
+    and failed/skipped rows remain visible so they can be reviewed or retried.
+    """
+    if not isinstance(pending, pd.DataFrame) or pending.empty:
+        return pending
+
+    completed_ids = completed_order_ids(results)
+    if not completed_ids:
+        return pending
+
+    order_id_columns = [
+        column for column in _PENDING_ORDER_ID_COLUMNS if column in pending.columns
+    ]
+    if not order_id_columns:
+        return pending
+
+    order_ids = pd.Series("", index=pending.index, dtype="object")
+    for column in order_id_columns:
+        values = pending[column].fillna("").astype(str).str.strip()
+        order_ids = order_ids.mask(order_ids == "", values)
+
+    return pending.loc[~order_ids.isin(completed_ids)].copy()
+
 
 def summarize_batch_results(results: list[dict] | None) -> dict[str, object]:
     """Return authoritative counts and user-facing alerts for a completed job."""
