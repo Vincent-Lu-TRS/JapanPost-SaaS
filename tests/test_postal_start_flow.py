@@ -137,6 +137,10 @@ class PostalStartFlowTests(unittest.TestCase):
             app_source,
         )
         self.assertIn(
+            'div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .postal-v2-operation-panel)',
+            app_source,
+        )
+        self.assertIn(
             '.postal-v2-card-marker) .native-info-value {',
             app_source,
         )

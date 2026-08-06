@@ -2232,7 +2232,9 @@ def _render_main_app():
             line-height: 1.35;
             margin-top: .56rem;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel) {
+        /* Streamlit exposes bordered containers as either wrapper test id depending on runtime version. */
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel),
+        div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .postal-v2-operation-panel) {
             border: 1px solid #262b36 !important;
             border-radius: 12px !important;
             background: #0A0D13 !important;
@@ -2293,7 +2295,8 @@ def _render_main_app():
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-value {
             color: #e8eaf0 !important;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-country .native-info-value {
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-country .native-info-value,
+        div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .postal-v2-card-marker) .native-info-country .native-info-value {
             overflow: visible;
             text-overflow: clip;
         }
