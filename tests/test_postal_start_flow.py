@@ -112,10 +112,14 @@ class PostalStartFlowTests(unittest.TestCase):
 
     def test_v2_uses_scoped_flat_dark_palette_and_preserves_job_feedback_hooks(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        config_source = (ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")
 
         self.assertIn(".postal-v2-", app_source)
         self.assertIn("#0A0D13", app_source)
         self.assertIn("#5275A8", app_source)
+        self.assertIn('[data-baseweb="tab-highlight"]', app_source)
+        self.assertIn('primaryColor = "#5275A8"', config_source)
+        self.assertNotIn("#EA580C", config_source)
         self.assertNotIn("linear-gradient", app_source)
         self.assertNotIn("radial-gradient", app_source)
         for marker in [

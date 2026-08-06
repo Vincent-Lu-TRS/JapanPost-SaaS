@@ -2287,6 +2287,9 @@ def _render_main_app():
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .native-info-value {
             color: #e8eaf0 !important;
         }
+        div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+            background-color: #5275A8 !important;
+        }
         div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
             color: #5275A8 !important;
         }
