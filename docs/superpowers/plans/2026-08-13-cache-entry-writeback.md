@@ -882,6 +882,7 @@ def _apply_pending_result(
     *,
     is_busy: bool,
     allow_dirty_reset: bool = False,
+    job=None,
 ) -> bool:
     if result.data is None or not may_apply_pending_snapshot(
         is_busy=is_busy,
@@ -900,10 +901,10 @@ Implement `_mark_pending_editor_dirty()` as `st.session_state["pending_editor_di
 
 Keep the overwrite rules explicit:
 
-- Automatic and periodic refresh call `_apply_pending_result(..., allow_dirty_reset=False)`; dirty edits remain on screen while the shared snapshot refreshes in the background.
-- The ordinary “重新讀取” button also uses `allow_dirty_reset=False`; it updates the shared snapshot but does not silently discard in-progress edits.
-- “全部恢復預設資料” is an explicit discard intent. It calls `_refresh_source("pending", force=True)`, then `_apply_pending_result(..., allow_dirty_reset=True)`, and only after that call returns `True` sets `pending_editor_dirty=False` and clears the v2 widget/editor keys. This bypasses only the dirty gate, never the `is_busy` gate.
-- Successful job completion obtains a force result and calls `_apply_pending_result(..., allow_dirty_reset=True)` because the submitted editor state is no longer authoritative; clear the dirty flag only after successful apply.
+- Automatic and periodic refresh call `_apply_pending_result(..., allow_dirty_reset=False, job=job)`; dirty edits remain on screen while the shared snapshot refreshes in the background.
+- The ordinary “重新讀取” button also uses `allow_dirty_reset=False, job=job`; it updates the shared snapshot but does not silently discard in-progress edits.
+- “全部恢復預設資料” is an explicit discard intent. It calls `_refresh_source("pending", force=True)`, then `_apply_pending_result(..., allow_dirty_reset=True, job=job)`, and only after that call returns `True` sets `pending_editor_dirty=False` and clears the v2 widget/editor keys. This bypasses only the dirty gate, never the `is_busy` gate.
+- Successful job completion obtains a force result and calls `_apply_pending_result(..., allow_dirty_reset=True, job=job)` because the submitted editor state is no longer authoritative; clear the dirty flag only after successful apply.
 - Picking periodic apply calls `apply_picking_payload(..., preserve_selection=True)`; manual force refresh and successful label generation use `preserve_selection=False`.
 
 Add direct gate tests in `tests/test_refresh_cache.py`:
@@ -931,13 +932,13 @@ At the start of `_render_main_app()`, call both sources independently so one fai
 
 ```python
 @st.fragment(run_every="20m")
-def _active_refresh_tick(*, is_busy: bool) -> None:
+def _active_refresh_tick(*, is_busy: bool, job) -> None:
     pending = _refresh_source("pending", force=False)
     picking = _refresh_source("picking", force=False)
     pending_changed = pending.status.loaded_at != st.session_state.get("pending_applied_at")
     picking_changed = picking.status.loaded_at != st.session_state.get("picking_applied_at")
     changed = False
-    if pending_changed and _apply_pending_result(pending, is_busy=is_busy):
+    if pending_changed and _apply_pending_result(pending, is_busy=is_busy, job=job):
         st.session_state["pending_applied_at"] = pending.status.loaded_at
         changed = True
     if picking_changed and picking.data is not None:
@@ -952,7 +953,13 @@ def _active_refresh_tick(*, is_busy: bool) -> None:
         st.rerun()
 ```
 
-The first full run applies both results before rendering and stores `*_applied_at`, so the fragment’s initial call does not cause a rerun loop. Manual buttons call `force=True` and never clear prior data before a successful result.
+The first full run gets the current job from `_JOB_REGISTRY.get(email)`, passes that
+same object to `_apply_pending_result(..., job=job)`, applies both results before
+rendering, and stores `*_applied_at`, so the fragment's initial call does not cause a
+rerun loop. Invoke `_active_refresh_tick(is_busy=is_busy, job=job)`. Pass the same
+current job through the v2 renderer so manual refresh, restore-default, and
+post-completion apply calls all use `job=job`. Manual buttons call `force=True` and
+never clear prior data before a successful result.
 
 - [ ] **Step 6: Use human-readable refresh status without exposing internals**
 
@@ -1229,6 +1236,14 @@ def test_preflight_accepts_production_japanese_shipping_column(self):
     checks = preflight_batch_orders(selected, latest, _completion())
     self.assertEqual(checks[0]["status"], "ready")
 
+def test_shipment_package_key_accepts_job_state_mapping(self):
+    state = {
+        "order_id": "ORDER-1",
+        "trans_type": "AIR",
+        "shipment_role": "additional",
+    }
+    self.assertEqual(shipment_package_key(state), ("ORDER-1", "AIR", "additional"))
+
 def test_preflight_allows_explicit_additional_when_legacy_order_completed(self):
     checks = preflight_batch_orders(
         _selected_packages(("AIR", "additional")),
@@ -1236,6 +1251,17 @@ def test_preflight_allows_explicit_additional_when_legacy_order_completed(self):
         _completion("ORDER-1"),
     )
     self.assertEqual(checks[0]["status"], "ready")
+
+def test_completed_primary_does_not_block_ready_additional_from_execution(self):
+    selected = _selected_packages(("EMS", "primary"), ("AIR", "additional"))
+    checks = preflight_batch_orders(selected, _latest_order(), _completion("ORDER-1"))
+    ready, already_completed, hard_blocked = partition_preflight_rows(selected, checks)
+    self.assertEqual(ready["TransType"].tolist(), ["AIR"])
+    self.assertEqual(
+        [(item["trans_type"], item["shipment_role"], item["status"]) for item in already_completed],
+        [("EMS", "primary", "completed")],
+    )
+    self.assertEqual(hard_blocked, [])
 
 def test_preflight_blocks_duplicate_additional_package_key(self):
     checks = preflight_batch_orders(
@@ -1330,7 +1356,7 @@ the same sanitized string that Python logging receives.
 Run:
 
 ```powershell
-python -m unittest tests.test_job_control tests.test_postal_ui_feedback tests.test_sheets_helpers tests.test_postal_start_flow -v
+python -m unittest tests.test_safe_logging tests.test_automation_helpers tests.test_job_control tests.test_postal_ui_feedback tests.test_sheets_helpers tests.test_postal_start_flow -v
 ```
 
 Expected: FAIL because completion is still a `set[str]` and preflight deduplicates by order ID.
@@ -1428,29 +1454,43 @@ Do not recover progress by parsing free-form log text. Add `status_cb` events at
 three authoritative carrier transitions:
 
 ```python
+event_package = {
+    "order_id": order_id,
+    "trans_type": _get_excel_val(
+        row,
+        ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType"],
+    ),
+    "shipment_role": str(row.get("_shipment_role") or "primary").strip().lower(),
+}
 if status_cb:
-    status_cb({"event": "order_started", "row_index": row_idx})
+    status_cb({
+        "event": "order_started",
+        **event_package,
+    })
 # after a tracking-bearing result is appended
 if status_cb:
     status_cb({
         "event": "order_completed",
-        "row_index": row_idx,
+        **event_package,
         "tracking": tracking,
     })
 # in the per-order exception path
 if status_cb:
     status_cb({
         "event": "order_failed",
-        "row_index": row_idx,
+        **event_package,
         "error_type": type(exc).__name__,
     })
 ```
 
-In `job_control.py`, add `update_order_status_from_event(job, event)`. It locates the
-order by the submitted zero-based `row_index`, updates running/completed/failed stage,
-and stores tracking only for `order_completed`. Reject unknown events and invalid
-indexes without logging their payload. Add unit tests for all three events using a
-primary/additional two-row job. In `app.py`, expose it through the existing
+In `job_control.py`, add `update_order_status_from_event(job, event)`. It normalizes
+the event's `(order_id, trans_type, shipment_role)` with the same package-key rules,
+locates that exact submitted package, updates running/completed/failed stage, and
+stores tracking only for `order_completed`. Reject unknown events and unmatched keys
+without logging their payload. Add unit tests for all three events using a
+primary/additional two-row job whose DataFrame index is deliberately non-contiguous
+(`index=[10, 42]`); assert the additional event updates only the additional package.
+In `app.py`, expose it through the existing
 retry-protected binding:
 
 ```python
@@ -1514,6 +1554,30 @@ def shipment_package_key(row) -> PackageKey:
     if role not in {"primary", "additional"}:
         raise ValueError("invalid_shipment_role")
     return order_id, trans_type, role
+```
+
+First extend the existing `_row_value(row, columns, default="")` so it supports both
+`pd.Series` and `Mapping` inputs. For a Series, retain the current `column in
+row.index` path; for a Mapping, use `column in row` and `row.get(column)`. This is
+required because preflight consumes DataFrame rows while refresh/UI completion logic
+consumes `job["orders"]` dictionaries. The mapping test above must pass before adding
+the UI helpers. Import `Mapping` from `collections.abc` rather than from `typing` for
+the runtime `isinstance` check.
+
+```python
+def _row_value(row, columns, default=""):
+    if isinstance(row, pd.Series):
+        available = row.index
+    elif isinstance(row, Mapping):
+        available = row
+    else:
+        return default
+    for column in columns:
+        if column in available:
+            value = row.get(column)
+            if pd.notna(value) and str(value).strip():
+                return str(value).strip()
+    return default
 ```
 
 Extend `_mark_order(...)` with a `shipment_role=""` argument and require both the
@@ -1609,6 +1673,46 @@ explicit additional with a non-empty, different transport is not blocked merely
 because the order ID exists. Preserve all existing `source_changed` and
 `source_indicates_done_target_missing` tests alongside the new package tests.
 
+Add `partition_preflight_rows(selected_df, checks)` to `job_control.py`. It returns
+`(ready_df, already_completed_results, hard_blocked_checks)`:
+
+- `ready_df` contains only rows whose matching check status is `ready`, preserving
+  their original columns and row order;
+- each `already_completed` check becomes a result built from its matching row with
+  `order_id`, normalized transport, normalized shipment role, `status="completed"`,
+  `reason_code="already_completed"`, and blank tracking;
+- every other non-ready status is hard-blocked.
+
+In `_start_job()`, replace the current “any non-ready means return” consumer with:
+
+```python
+ready_rows, already_results, hard_blocked_checks = partition_preflight_rows(
+    rows_for_run, preflight_checks
+)
+if hard_blocked_checks:
+    # existing safe aggregate blocked handling and terminal failure
+    ...
+results = list(already_results)
+mark_results_completed(job, already_results)
+if not ready_rows.empty:
+    results.extend(run_automation(ready_rows, ..., log_cb=_log, status_cb=_status))
+```
+
+All downstream status logic operates on `results`, but define writeback candidates
+exactly as successful results with a non-empty `tracking` value. Pass only that list
+to `backfill_results`; do not send `already_results` with blank tracking into the
+writeback classifier. Failed automation results still go directly to
+`mark_results_failed`.
+`already_completed` is an accepted terminal package state, not a batch-wide error.
+This makes the normal UI expansion (primary plus explicit additional) executable
+when the primary already exists in the legacy target.
+
+For Task 6's intermediate commit, if `writeback_candidates` is empty, skip
+`backfill_results`, summarize the already-completed/failed results, and finish the
+job directly. If candidates exist, retain the existing all-or-nothing outcome
+handling for those candidates only. Task 8 replaces that interim mapping with
+per-item outcomes. This keeps every task independently green.
+
 Keep the existing `_start_job()` consumer contract: every check must contain `order_id`, `status`, `reason_code`, and `reason_text`. Replace its blocked log payload with aggregate-only text so it no longer prints full order IDs:
 
 ```python
@@ -1691,7 +1795,21 @@ when removing pending rows and `fully_completed_order_ids(job["orders"],
 job["results"])` when clearing selection. Extend `_apply_pending_result(..., job=None)`:
 before assigning a refreshed DataFrame, call
 `preserve_incomplete_submitted_orders(current_session_df, refreshed_df,
-job["orders"], job["results"])`. This session-level merge is necessary because the
+job["orders"], job["results"])`. Implement the assignment as:
+
+```python
+refreshed_df = result.data.dataframe.copy(deep=True)
+if job:
+    refreshed_df = preserve_incomplete_submitted_orders(
+        st.session_state.get("last_pending_df", pd.DataFrame()),
+        refreshed_df,
+        job.get("orders"),
+        job.get("results"),
+    )
+st.session_state["last_pending_df"] = refreshed_df
+```
+
+This session-level merge is necessary because the
 shared Google Sheet loader only knows legacy order-level completion and cannot infer
 an unfilled additional-package intent. Do not hide an order when any submitted
 package is missing from results or is `backfill_failed`, including after a periodic
@@ -1713,6 +1831,22 @@ def test_refresh_does_not_hide_primary_success_with_additional_conflict(self):
     ]
     merged = preserve_incomplete_submitted_orders(existing, refreshed, submitted, results)
     self.assertEqual(merged["注文番号(貼上原始資料)"].tolist(), ["ORDER-1"])
+```
+
+Add a wiring contract to `tests/test_postal_start_flow.py` so the pure regression
+cannot pass while production callers omit the job:
+
+```python
+def test_all_pending_snapshot_apply_paths_pass_current_job(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    self.assertIn("def _active_refresh_tick(*, is_busy: bool, job)", source)
+    self.assertIn("_active_refresh_tick(is_busy=is_busy, job=job)", source)
+    self.assertIn("preserve_incomplete_submitted_orders(", source)
+    for marker in (
+        "allow_dirty_reset=False, job=job",
+        "allow_dirty_reset=True, job=job",
+    ):
+        self.assertIn(marker, source)
 ```
 
 - [ ] **Step 5: Run tests and commit**
@@ -2590,8 +2724,10 @@ def apply_writeback_outcome(job, candidates, outcome):
 ```
 
 Before the initial call, assign `job["results"] = results`; then call
-`terminal_status = apply_writeback_outcome(job, successful_results,
-backfill_outcome)` and `_JOB_REGISTRY.finish(job, terminal_status)`. Remove the old
+`terminal_status = apply_writeback_outcome(job, writeback_candidates,
+backfill_outcome)` and `_JOB_REGISTRY.finish(job, terminal_status)`. Here
+`writeback_candidates` is the tracking-bearing list defined in Task 6, so legacy
+`already_completed` results are never remapped or written. Remove the old
 all-or-nothing mapping. `mark_results_completed()` receives only verified items and
 `mark_results_failed()` only failed items. Update the failed-order stage mapping for
 `status == "backfill_failed"` to `回填待確認`, never `未製單`.
