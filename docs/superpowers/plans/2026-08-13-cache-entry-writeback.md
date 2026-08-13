@@ -32,8 +32,10 @@
 - Modify `bot/sheets.py`: completion authority、四欄判斷、grid 擴列、逐包裹分類、寫入與讀回重試。
 - Modify `job_control.py`: 以 package key 執行 preflight，不再用注文番号跳過同批追加運單。
 - Modify `postal_ui_feedback.py`: 只有同注文番号的全部包裹成功才從畫面移除，並修正回填失敗文案。
+- Create `safe_logging.py`: 只允許計數、耗時、安全 reason code、例外類型與列範圍進入製單／回填日誌。
 - Create `tests/fake_gspread.py`: 有 row limit、擴列、部分寫入與 stale readback 能力的共用 fake。
 - Create `tests/test_refresh_cache.py`: 快取核心測試。
+- Create `tests/test_safe_logging.py`: 證明完整注文番号、tracking、姓名與 raw exception 不會進入日誌。
 - Modify既有測試：`tests/test_picking_labels.py`、`tests/test_postal_start_flow.py`、`tests/test_postal_ui_v2_app.py`、`tests/test_pending_editor.py`、`tests/test_automation_helpers.py`、`tests/test_sheets_helpers.py`、`tests/test_job_control.py`、`tests/test_postal_ui_feedback.py`、`tests/test_postal_mock_e2e.py`。
 
 ### Task 1: Establish baseline and protect existing files
@@ -534,9 +536,20 @@ def test_periodic_fragment_runs_every_twenty_minutes(self):
 def test_periodic_picking_refresh_preserves_user_selection(self):
     source = PICKING_PATH.read_text(encoding="utf-8")
     self.assertIn("preserve_selection=True", source)
+
+def test_pending_edit_widgets_mark_the_snapshot_dirty(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    renderer = source[source.index("def _render_postal_pending_v2"):source.index("def _render_main_app")]
+    for key_marker in ("name_key", "trans_key", "extra_trans_key", "prc_id_key", "pccc_key", "items_key"):
+        self.assertRegex(renderer, rf"{key_marker}[\s\S]*?on_change=_mark_pending_editor_dirty")
+
+def test_snapshot_apply_is_blocked_while_busy_or_dirty(self):
+    self.assertFalse(_may_apply_pending_snapshot(is_busy=True, editor_dirty=False))
+    self.assertFalse(_may_apply_pending_snapshot(is_busy=False, editor_dirty=True))
+    self.assertTrue(_may_apply_pending_snapshot(is_busy=False, editor_dirty=False))
 ```
 
-In `tests/test_postal_ui_v2_app.py`, inject fake refresh results and assert the page renders without manually seeding a reload flag.
+In `tests/test_postal_ui_v2_app.py`, patch `app._refresh_source` before `AppTest.from_file(...).run()`. Return `RefreshResult(PendingPayload(frame.copy(), ()), fresh_status)` for `pending` and an empty `PickingPayload` result for `picking`; do not seed `pending_manual_reload_requested`. Assert the `待製郵便運單` tab contains the synthetic order and `重新讀取` button.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -591,12 +604,15 @@ def _refresh_source(source: str, *, force: bool) -> RefreshResult:
 Add helpers with a single authoritative gate:
 
 ```python
-def _may_apply_pending_snapshot(*, is_busy: bool) -> bool:
-    return not is_busy and not st.session_state.get("pending_editor_dirty", False)
+def _may_apply_pending_snapshot(*, is_busy: bool, editor_dirty: bool) -> bool:
+    return not is_busy and not editor_dirty
 
 
 def _apply_pending_result(result: RefreshResult[PendingPayload], *, is_busy: bool) -> bool:
-    if result.data is None or not _may_apply_pending_snapshot(is_busy=is_busy):
+    if result.data is None or not _may_apply_pending_snapshot(
+        is_busy=is_busy,
+        editor_dirty=st.session_state.get("pending_editor_dirty", False),
+    ):
         return False
     st.session_state["last_pending_df"] = result.data.dataframe.copy(deep=True)
     st.session_state["last_pending_logs"] = list(result.data.logs)
@@ -605,7 +621,7 @@ def _apply_pending_result(result: RefreshResult[PendingPayload], *, is_busy: boo
     return True
 ```
 
-All editable postal widgets call `_mark_pending_editor_dirty`, which sets `pending_editor_dirty=True`. Manual force refresh, “全部恢復預設資料”, and successful job completion clear it only after a successful apply. Picking periodic apply calls `apply_picking_payload(..., preserve_selection=True)`; manual force refresh and successful label generation may use `preserve_selection=False`.
+Implement `_mark_pending_editor_dirty()` as `st.session_state["pending_editor_dirty"] = True`. Pass `on_change=_mark_pending_editor_dirty` to the v2 name, primary transport, additional transport, PRC ID, PCCC, and item `st.data_editor` widgets at the current renderer positions. Manual force refresh and “全部恢復預設資料” clear the flag only after a successful `_apply_pending_result`; successful job completion sets `pending_refresh_needed=True`, obtains a force result, applies it, and then clears the flag. Picking periodic apply calls `apply_picking_payload(..., preserve_selection=True)`; manual force refresh and successful label generation use `preserve_selection=False`.
 
 - [ ] **Step 5: Replace manual-only initial load and add the active-session fragment**
 
@@ -705,12 +721,20 @@ Extend the existing duplicate-trans-type test and result record test:
 
 ```python
 def test_expand_pending_orders_marks_primary_and_additional_roles(self):
-    expanded = expand_pending_orders_for_trans_types(self.one_order(), ["EMS", "航空便"])
+    source = pd.DataFrame([{SHIPPING_COL: "EMS", "注文番号(貼上原始資料)": "ORDER-1"}], index=[10])
+    expanded = expand_pending_orders_for_trans_types(source, {10: ["航空便"]})
     self.assertEqual(expanded["_shipment_role"].tolist(), ["primary", "additional"])
 
 def test_build_result_record_preserves_shipment_role(self):
-    row = self.success_row(_shipment_role="additional")
-    result = _build_result_record(row, tracking="TRACK-2")
+    row = {
+        "Shipping Name": "Receiver",
+        "收件人國家": "UNITED STATES OF AMERICA",
+        "內容物1": "Item",
+        "申告金額1": "1.00",
+        "數量1": "1",
+        "_shipment_role": "additional",
+    }
+    result = _build_result_record(row, order_id="ORDER-1", tracking="TRACK-2")
     self.assertEqual(result["shipment_role"], "additional")
 ```
 
@@ -731,14 +755,31 @@ In `pending_editor.py`:
 ```python
 SHIPMENT_ROLE_COLUMN = "_shipment_role"
 
-# Before expanding rows:
-primary = row.copy()
-primary[SHIPMENT_ROLE_COLUMN] = "primary"
-
-# For each explicitly requested extra transport:
-additional = row.copy()
-additional["TransType"] = extra_trans_type
-additional[SHIPMENT_ROLE_COLUMN] = "additional"
+def expand_pending_orders_for_trans_types(df, extra_trans_types_by_index):
+    rows = []
+    for source_index, row in df.iterrows():
+        primary_trans_type = _str_value(row.get(SHIPPING_COL, ""))
+        primary = row.copy()
+        primary[SHIPMENT_ROLE_COLUMN] = "primary"
+        rows.append(primary)
+        seen = {primary_trans_type}
+        for trans_type in extra_trans_types_by_index.get(source_index, []):
+            trans_type = _str_value(trans_type)
+            if not trans_type or trans_type in seen:
+                continue
+            additional = row.copy()
+            additional[SHIPPING_COL] = trans_type
+            additional[SHIPMENT_ROLE_COLUMN] = "additional"
+            rows.append(additional)
+            seen.add(trans_type)
+    if not rows:
+        empty = df.copy()
+        empty[SHIPMENT_ROLE_COLUMN] = pd.Series(dtype="object")
+        return empty
+    output_columns = [*df.columns]
+    if SHIPMENT_ROLE_COLUMN not in output_columns:
+        output_columns.append(SHIPMENT_ROLE_COLUMN)
+    return pd.DataFrame(rows, columns=output_columns).reset_index(drop=True)
 ```
 
 In `bot/automation.py`, extend `_build_result_record`:
@@ -766,6 +807,7 @@ Expected: provenance tests and all existing editor/automation tests PASS.
 ### Task 6: Make preflight package-aware without weakening legacy safety
 
 **Files:**
+- Create: `safe_logging.py`
 - Modify: `bot/sheets.py`
 - Modify: `job_control.py`
 - Modify: `postal_ui_feedback.py`
@@ -774,6 +816,7 @@ Expected: provenance tests and all existing editor/automation tests PASS.
 - Modify: `tests/test_postal_ui_feedback.py`
 - Modify: `tests/test_sheets_helpers.py`
 - Modify: `tests/test_postal_start_flow.py`
+- Create: `tests/test_safe_logging.py`
 
 - [ ] **Step 1: Write RED tests for package-aware authority and preflight**
 
@@ -822,6 +865,47 @@ def test_all_packages_completed_hides_order(self):
     self.assertTrue(filter_pending_orders_after_batch(pending, results).empty)
 ```
 
+Create `tests/test_safe_logging.py` with a captured callback:
+
+```python
+import unittest
+from pathlib import Path
+
+from safe_logging import safe_log_event
+
+ROOT = Path(__file__).resolve().parents[1]
+APP_PATH = ROOT / "app.py"
+SHEETS_PATH = ROOT / "bot" / "sheets.py"
+
+
+class SafeLoggingTests(unittest.TestCase):
+    def test_safe_event_allows_only_aggregate_fields(self):
+        logs = []
+        safe_log_event(logs.append, "preflight_blocked", count=2, reason="source_changed")
+        self.assertEqual(logs, ["preflight_blocked count=2 reason=source_changed"])
+
+    def test_safe_event_rejects_identifier_fields(self):
+        with self.assertRaises(ValueError):
+            safe_log_event(lambda _: None, "blocked", order_id="ORDER-SECRET")
+
+    def test_safe_event_never_serializes_raw_exception(self):
+        logs = []
+        error = RuntimeError("ORDER-SECRET TRACK-SECRET Receiver Name")
+        safe_log_event(logs.append, "job_exception", error_type=type(error).__name__)
+        combined = "\n".join(logs)
+        self.assertEqual(combined, "job_exception error_type=RuntimeError")
+        self.assertNotIn("ORDER-SECRET", combined)
+        self.assertNotIn("TRACK-SECRET", combined)
+        self.assertNotIn("Receiver Name", combined)
+
+    def test_postal_flow_source_removes_identifier_and_raw_exception_logs(self):
+        app_source = APP_PATH.read_text(encoding="utf-8")
+        sheet_source = SHEETS_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("API 讀到的來源末端注文番号", sheet_source)
+        self.assertNotIn("tb.format_exc()", app_source[app_source.index("def _start_job"):app_source.index("def _render_main_app")])
+        self.assertNotIn("check['order_id']", app_source[app_source.index("def _start_job"):app_source.index("def _render_main_app")])
+```
+
 - [ ] **Step 2: Run focused tests and verify RED**
 
 Run:
@@ -833,6 +917,35 @@ python -m unittest tests.test_job_control tests.test_postal_ui_feedback tests.te
 Expected: FAIL because completion is still a `set[str]` and preflight deduplicates by order ID.
 
 - [ ] **Step 3: Add stable authority and package key contracts**
+
+First create `safe_logging.py`:
+
+```python
+from __future__ import annotations
+
+_ALLOWED_FIELDS = {"count", "seconds", "reason", "error_type", "first_row", "last_row"}
+
+
+def safe_log_event(log_cb, event: str, **fields) -> None:
+    if log_cb is None:
+        return
+    unknown = set(fields) - _ALLOWED_FIELDS
+    if unknown:
+        raise ValueError(f"unsafe log fields: {','.join(sorted(unknown))}")
+    parts = [event]
+    for key in sorted(fields):
+        value = fields[key]
+        if key in {"count", "first_row", "last_row"}:
+            value = int(value)
+        elif key == "seconds":
+            value = f"{float(value):.1f}"
+        else:
+            value = str(value).replace(" ", "_")
+        parts.append(f"{key}={value}")
+    log_cb(" ".join(parts))
+```
+
+Run `python -m unittest tests.test_safe_logging -v`; expected PASS after the module exists.
 
 In `bot/sheets.py`:
 
@@ -885,34 +998,67 @@ Update `preflight_batch_orders(selected_df, latest_pending_df, completion)` by r
 seen: set[PackageKey] = set()
 primary_transport_by_order: dict[str, str] = {}
 checks = []
+
+def add_check(row_index, order_id, status, reason_code, reason_text):
+    checks.append(
+        {
+            "row_index": row_index,
+            "order_id": order_id,
+            "status": status,
+            "reason_code": reason_code,
+            "reason_text": reason_text,
+        }
+    )
+
 for row_index, row in selected_df.iterrows():
+    order_id = _row_value(row, ORDER_ID_COLUMNS)
     try:
         package_key = shipment_package_key(row)
     except ValueError:
-        checks.append({"row_index": row_index, "status": "blocked", "reason": "invalid_shipment_role"})
+        add_check(row_index, order_id, "blocked", "invalid_shipment_role", "追加製單識別無效")
         continue
     order_id, trans_type, role = package_key
     if not order_id or not trans_type:
-        checks.append({"row_index": row_index, "status": "blocked", "reason": "missing_package_identity"})
+        add_check(row_index, order_id, "blocked", "missing_package_identity", "缺少注文番号或運送方式")
         continue
     if package_key in seen:
-        checks.append({"row_index": row_index, "status": "blocked", "reason": "duplicate_package_request"})
+        add_check(row_index, order_id, "blocked", "duplicate_package_request", "同一包裹要求重複")
         continue
     if role == "primary":
         primary_transport_by_order[order_id] = trans_type
         if order_id in completion.legacy_order_ids:
-            checks.append({"row_index": row_index, "status": "blocked", "reason": "already_completed"})
+            add_check(row_index, order_id, "already_completed", "already_completed", "目標表已有完成紀錄")
             seen.add(package_key)
             continue
     elif trans_type == primary_transport_by_order.get(order_id):
-        checks.append({"row_index": row_index, "status": "blocked", "reason": "additional_transport_matches_primary"})
+        add_check(row_index, order_id, "blocked", "additional_transport_matches_primary", "追加運送方式與原始運單相同")
         seen.add(package_key)
         continue
     seen.add(package_key)
-    checks.append({"row_index": row_index, "status": "ready", "reason": ""})
+    add_check(row_index, order_id, "ready", "", "")
 ```
 
 If an additional row appears before its primary row, precompute `primary_transport_by_order` from all explicit primary rows before the validation loop. An explicit additional with a non-empty, different TransType is not blocked merely because the order ID exists.
+
+Keep the existing `_start_job()` consumer contract: every check must contain `order_id`, `status`, `reason_code`, and `reason_text`. Replace its blocked log payload with aggregate-only text so it no longer prints full order IDs:
+
+```python
+from collections import Counter
+from safe_logging import safe_log_event
+
+reason_counts = Counter(check["reason_code"] for check in blocked_checks)
+for reason, count in sorted(reason_counts.items()):
+    safe_log_event(_log, "preflight_blocked", count=count, reason=reason)
+```
+
+Replace `_start_job()` raw exception and traceback logging with:
+
+```python
+safe_log_event(_log, "job_exception", error_type=type(e).__name__)
+reason_text = "系統處理失敗；詳細識別資料未寫入日誌"
+```
+
+Do not print `tb.format_exc()` to stderr in this workflow. In `bot/sheets.py`, remove the source-tail order sample log and replace raw exception strings in `get_pending_orders()` with `safe_log_event(log_cb, "pending_read_failed", error_type=type(exc).__name__)`. Keep counts and elapsed seconds, but never log complete order IDs, tracking numbers, names, row payloads, or exception messages.
 
 - [ ] **Step 4: Make UI filtering depend on all submitted packages**
 
@@ -962,10 +1108,10 @@ Use `fully_completed_order_ids()` when removing pending rows or clearing selecti
 Run:
 
 ```powershell
-python -m unittest tests.test_job_control tests.test_postal_ui_feedback tests.test_sheets_helpers tests.test_postal_start_flow -v
+python -m unittest tests.test_safe_logging tests.test_job_control tests.test_postal_ui_feedback tests.test_sheets_helpers tests.test_postal_start_flow -v
 python -m py_compile app.py bot/sheets.py job_control.py postal_ui_feedback.py
 git diff --check
-git add -- app.py bot/sheets.py job_control.py postal_ui_feedback.py tests/test_job_control.py tests/test_postal_ui_feedback.py tests/test_sheets_helpers.py tests/test_postal_start_flow.py
+git add -- safe_logging.py app.py bot/sheets.py job_control.py postal_ui_feedback.py tests/test_safe_logging.py tests/test_job_control.py tests/test_postal_ui_feedback.py tests/test_sheets_helpers.py tests/test_postal_start_flow.py
 git commit -m "fix: preserve package-level postal preflight state"
 ```
 
@@ -1287,15 +1433,34 @@ def test_batch_update_partial_write_reports_per_item_outcomes(self):
     )
     self.assertEqual(outcome["items"][0]["status"], "written")
     self.assertIn(outcome["items"][1]["status"], {"partial_write", "write_failed"})
+
+
+def test_initial_sheet_read_failure_returns_item_outcomes(self):
+    client = self.make_client([], row_count=2)
+    client.worksheet.col_values = lambda column: (_ for _ in ()).throw(PermissionError("ORDER-SECRET"))
+    logs = []
+    outcome = backfill_results(
+        [result("ORDER-SECRET", "TRACK-SECRET")],
+        client=client,
+        log_cb=logs.append,
+    )
+    self.assertFalse(outcome["ok"])
+    self.assertEqual(outcome["items"][0]["status"], "write_failed")
+    self.assertEqual(outcome["items"][0]["reason_code"], "writeback_permission_denied")
+    self.assertNotIn("ORDER-SECRET", "\n".join(logs))
+    self.assertNotIn("TRACK-SECRET", "\n".join(logs))
 ```
 
 Each case asserts the per-input status, safe reason, target row, aggregate counts, and whether a write call was allowed.
 
 - [ ] **Step 5: Implement classification, write, and readback retry with a compatible return shape**
 
-Keep the existing positional arguments and add injectable test controls. Implement the following helpers and orchestration; `_country_code_from_raw` remains the existing country conversion helper:
+Keep the existing positional arguments and add injectable test controls. Implement the following helpers and orchestration; country conversion must call the repo's existing `resolve_country_code(country_raw, COUNTRY_CODE_MAP)`:
 
 ```python
+from safe_logging import safe_log_event
+
+
 def _get_target_worksheet(*, client):
     spreadsheet = client.open_by_key(TARGET_SHEET_ID)
     return spreadsheet.get_worksheet_by_id(int(TARGET_GID))
@@ -1423,10 +1588,43 @@ def backfill_results(
     readback_attempts: int = 3,
     readback_delay_seconds: float = 0.5,
 ) -> dict:
-    client = client or _get_gspread_client()
-    worksheet = _get_target_worksheet(client=client)
-    columns = _read_writeback_columns(worksheet)
-    classified, immediate_items = _classify_writeback_records(results, columns)
+    def all_failed(reason_code):
+        items = [
+            _outcome_item(
+                index,
+                result,
+                status="write_failed",
+                reason_code=reason_code,
+            )
+            for index, result in enumerate(results)
+        ]
+        return {
+            "ok": False,
+            "written": 0,
+            "existing": 0,
+            "failed": [reason_code] * len(items),
+            "error": reason_code,
+            "items": items,
+        }
+
+    if not results:
+        return {"ok": True, "written": 0, "existing": 0, "failed": [], "error": "", "items": []}
+
+    try:
+        client = client or _get_gspread_client()
+        worksheet = _get_target_worksheet(client=client)
+        columns = _read_writeback_columns(worksheet)
+        classified, immediate_items = _classify_writeback_records(results, columns)
+    except Exception as exc:
+        reason_code = _safe_sheet_error_code(exc)
+        safe_log_event(
+            log_cb,
+            "writeback_initialization_failed",
+            count=len(results),
+            reason=reason_code,
+        )
+        return all_failed(reason_code)
+
     next_row = _last_used_writeback_row(columns) + 1
 
     expected_by_row = {}
@@ -1437,7 +1635,8 @@ def backfill_results(
             candidate["name"],
             candidate["order_id"],
             candidate["tracking"],
-            _country_code_from_raw(candidate["country_raw"]),
+            resolve_country_code(candidate["country_raw"], COUNTRY_CODE_MAP)
+            or str(candidate["country_raw"]).strip(),
         )
 
     if expected_by_row:
@@ -1565,6 +1764,20 @@ def test_backfill_failed_copy_says_label_exists(self):
     message = build_result_feedback([{"status": "backfill_failed"}])
     self.assertIn("運單已產生，但資料回填未完成", message)
     self.assertNotIn("未製單", message)
+
+def test_writeback_retry_candidates_require_existing_tracking(self):
+    results = [
+        {"status": "backfill_failed", "order_id": "ORDER-1", "tracking": "TRACK-1"},
+        {"status": "backfill_failed", "order_id": "ORDER-2", "tracking": ""},
+        {"status": "failed", "order_id": "ORDER-3", "tracking": "TRACK-3"},
+    ]
+    self.assertEqual(writeback_retry_candidates(results), [results[0]])
+
+def test_retry_path_calls_backfill_and_never_carrier_automation(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    retry_block = source[source.index("def _retry_writeback_results"):source.index("def _render_postal_pending_v2")]
+    self.assertIn("backfill_results(", retry_block)
+    self.assertNotIn("run_automation(", retry_block)
 ```
 
 - [ ] **Step 2: Run focused tests and verify RED**
@@ -1604,7 +1817,34 @@ Call `mark_results_completed()` only with verified items and `mark_results_faile
 
 - [ ] **Step 4: Add same-process safe retry and explicit restart boundary**
 
-When a result has a tracking number and `backfill_failed`, the UI retry action invokes `backfill_results()` with the stored result and never calls `run_automation()` again. If the process/session no longer holds that result, display: `運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。` No automatic carrier retry is allowed.
+Add to `job_control.py`:
+
+```python
+def writeback_retry_candidates(results):
+    return [
+        result
+        for result in (results or [])
+        if str(result.get("status") or "").lower() == "backfill_failed"
+        and str(result.get("tracking") or "").strip()
+    ]
+```
+
+Extract the Step 3 mapping loop into `_apply_writeback_items(successful_results, outcome)` so both initial writeback and retry use the identical status mapping. Add to `app.py` before `_render_postal_pending_v2`:
+
+```python
+def _retry_writeback_results(job):
+    candidates = writeback_retry_candidates((job or {}).get("results"))
+    if not candidates:
+        return {
+            "ok": False,
+            "message": "運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。",
+        }
+    outcome = backfill_results(candidates)
+    _apply_writeback_items(candidates, outcome)
+    return {"ok": outcome["ok"], "message": "回填已完成" if outcome["ok"] else "仍有資料需要確認"}
+```
+
+In the existing v2 result/status area, render `st.button("重新回填資料", key="pending_v2_retry_writeback")` only when `writeback_retry_candidates(job.get("results"))` is non-empty; on click call `_retry_writeback_results(job)` and rerun. This path must not import or invoke `run_automation`. If the process/session no longer holds a tracking-bearing result, show the exact manual-recovery message above. No automatic carrier retry is allowed.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -1649,7 +1889,29 @@ def test_v1_renderer_and_session_keys_are_removed(self):
         self.assertIn(marker, source)
 ```
 
-Extend AppTest to assert four exact tabs and the preserved controls: `選取全部`, `清除全部`, `開始製單`, `重新讀取`, `全部恢復預設資料`.
+Extend AppTest with exact assertions:
+
+```python
+def test_only_postal_entry_keeps_current_controls_and_selection_flow(self):
+    at = self.run_app_with_pending_rows(2)
+    self.assertEqual([tab.label for tab in at.tabs], ["跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷"])
+    visible_text = "\n".join(str(element) for element in at)
+    self.assertNotIn("郵局待打單（新版測試）", visible_text)
+    for label in ("選取全部", "清除全部", "開始製單", "重新讀取", "全部恢復預設資料"):
+        self.assertIn(label, visible_text)
+    self.assertFalse(at.exception)
+
+def test_operational_postal_tab_does_not_add_technical_widgets(self):
+    at = self.run_app_with_pending_rows(1)
+    postal = at.tabs[1]
+    rendered = "\n".join(str(element) for element in postal)
+    for forbidden in ("TTL", "row_count", "cache lock", "error_code"):
+        self.assertNotIn(forbidden, rendered)
+    self.assertEqual(len(postal.metric), 0)
+    self.assertEqual(len(postal.json), 0)
+```
+
+Reuse the existing selection/clear/restore interactions in `tests/test_postal_ui_v2_app.py`; after each click assert checkbox state and edited name/item values match the pre-change expectations. Do not update CSS snapshots or widget labels except the tab title and approved refresh messages.
 
 - [ ] **Step 2: Run focused UI tests and verify RED**
 
