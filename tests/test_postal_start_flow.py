@@ -8,6 +8,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PostalStartFlowTests(unittest.TestCase):
+    def test_target_read_failure_preserves_package_identity_for_every_order_state(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        failure_block = app_source[
+            app_source.index("except Exception as preflight_error:"):
+            app_source.index("latest_pending_df = get_pending_orders(")
+        ]
+
+        self.assertIn(
+            '"trans_type": str(order.get("trans_type") or "").strip()',
+            failure_block,
+        )
+        self.assertIn(
+            '"shipment_role": str(order.get("shipment_role") or "primary").strip()',
+            failure_block,
+        )
+
     def test_protected_pending_snapshot_does_not_repeat_rerun_after_picking_applies(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         tree = ast.parse(app_source)

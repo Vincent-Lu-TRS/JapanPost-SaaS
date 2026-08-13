@@ -1394,6 +1394,8 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 preflight_results = [
                     {
                         "order_id": str(order.get("order_id") or "").strip(),
+                        "trans_type": str(order.get("trans_type") or "").strip(),
+                        "shipment_role": str(order.get("shipment_role") or "primary").strip(),
                         "status": "blocked",
                         "reason_code": "target_read_error",
                         "reason_text": reason_text,
