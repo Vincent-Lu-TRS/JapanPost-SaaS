@@ -3,7 +3,9 @@ import unittest
 import pandas as pd
 
 from postal_ui_feedback import (
+    completed_package_keys,
     filter_pending_orders_after_batch,
+    fully_completed_order_ids,
     summarize_batch_results,
     summarize_pending_read_logs,
 )
@@ -89,6 +91,47 @@ class PostalUiFeedbackTests(unittest.TestCase):
         )
 
         self.assertEqual(visible["注文番号(貼上原始資料)"].tolist(), ["blocked-1", "retry-1"])
+
+    def test_mixed_package_outcomes_keep_order_visible_until_every_submitted_package_completes(self):
+        pending = pd.DataFrame({"order_id": ["mixed-1", "all-ok-1"]})
+        results = [
+            {"order_id": "mixed-1", "trans_type": "EMS", "shipment_role": "primary", "status": "completed"},
+            {"order_id": "mixed-1", "trans_type": "ePacket", "shipment_role": "additional", "status": "backfill_failed"},
+            {"order_id": "all-ok-1", "trans_type": "EMS", "shipment_role": "primary", "status": "completed"},
+            {"order_id": "all-ok-1", "trans_type": "ePacket", "shipment_role": "additional", "status": "completed"},
+        ]
+
+        self.assertEqual(
+            completed_package_keys(results),
+            {
+                ("mixed-1", "EMS", "primary"),
+                ("all-ok-1", "EMS", "primary"),
+                ("all-ok-1", "ePacket", "additional"),
+            },
+        )
+        self.assertEqual(fully_completed_order_ids(results), {"all-ok-1"})
+        visible = filter_pending_orders_after_batch(pending, results)
+        self.assertEqual(visible["order_id"].tolist(), ["mixed-1"])
+
+    def test_missing_additional_result_keeps_order_visible_and_duplicate_tracking_is_legal(self):
+        pending = pd.DataFrame({"order_id": ["missing-1"]})
+        submitted = [
+            {"order_id": "missing-1", "trans_type": "EMS", "shipment_role": "primary"},
+            {"order_id": "missing-1", "trans_type": "ePacket", "shipment_role": "additional"},
+        ]
+        results = [
+            {
+                "order_id": "missing-1",
+                "trans_type": "EMS",
+                "shipment_role": "primary",
+                "tracking": "LX123456789JP",
+                "status": "completed",
+            }
+        ]
+
+        visible = filter_pending_orders_after_batch(pending, results, submitted_packages=submitted)
+
+        self.assertEqual(visible["order_id"].tolist(), ["missing-1"])
 
 
 if __name__ == "__main__":

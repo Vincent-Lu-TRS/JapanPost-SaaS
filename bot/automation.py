@@ -22,6 +22,7 @@ from datetime import date
 import pandas as pd
 
 from shipment_quantity import parse_shipment_quantity
+from safe_logging import redact_operational_log
 
 AUTOMATION_BUILD_ID = "2026-08-05-m060505-address1-width-fix"
 
@@ -521,7 +522,11 @@ def _build_result_record(row, order_id: str, tracking: str) -> dict:
 
 def _build_failure_record(row, order_id: str, error: Exception, status: str = "failed") -> dict:
     reason_code = getattr(error, "reason_code", "") or _classify_address_error(error)
-    reason_text = str(error or "未知錯誤").strip() or "未知錯誤"
+    reason_text = {
+        "address_too_long": "日本郵局收件地址過長",
+        "address_invalid_character": "日本郵局收件地址含無效字元",
+        "address_remote_rejected": "日本郵局拒絕收件地址",
+    }.get(reason_code, "製單流程失敗，請查看安全診斷")
     items_expected = len(_iter_content_items(row))
     return {
         "name": _row_val(row, ["Shipping Name", "Shipping Name_1"]),
@@ -1572,6 +1577,7 @@ def run_automation(
     df: pd.DataFrame,
     max_rows: int | None = None,
     log_cb=None,
+    status_cb=None,
     headless: bool = True,
     precomputed_hs_codes: dict[str, dict[str, str]] | None = None,
 ) -> list[dict]:
@@ -1582,18 +1588,55 @@ def run_automation(
         df        : 待打單 DataFrame（來自 sheets.get_pending_orders）
         max_rows  : 最多處理幾筆（None = 全部）
         log_cb    : 進度回呼函數 (str -> None)
+        status_cb : package-qualified 狀態事件回呼函數 (dict -> None)
         headless  : 是否以 headless 模式執行（生產環境固定 True）
         precomputed_hs_codes: 預先查好的 HS Code，避免重複呼叫 AI
 
     Returns:
         結果清單；成功項目包含 tracking，失敗項目包含 status、reason_code、reason_text。
     """
-    def _log(msg: str):
-        if log_cb:
-            log_cb(msg)
-        logging.info(msg)
-
     rows = df if max_rows is None else df.head(max_rows)
+    sensitive_columns = [
+        column
+        for column in rows.columns
+        if re.search(
+            r"order|注文番号|name|receiver|email|phone|address|tracking|內容物|郵遞|郵便|電話",
+            str(column),
+            flags=re.IGNORECASE,
+        )
+    ]
+    sensitive_values = tuple(
+        _clean(value)
+        for column in sensitive_columns
+        for value in rows[column].tolist()
+        if _clean(value)
+    )
+
+    def _log(msg: str):
+        safe_message = redact_operational_log(msg, sensitive_values=sensitive_values)
+        if log_cb:
+            log_cb(safe_message)
+        logging.info("%s", safe_message)
+
+    def _emit_status(event_type: str, row, row_index: int, **fields) -> None:
+        if status_cb is None:
+            return
+        payload = {
+            "event": event_type,
+            "order_id": _row_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1", "order_id"]),
+            "trans_type": _row_val(
+                row,
+                ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"],
+            ),
+            "shipment_role": _shipment_role(row),
+            "row_index": row_index,
+        }
+        payload.update(fields)
+        try:
+            status_cb(payload)
+        except Exception:
+            _log("status_callback_failed")
+
     for _, row in rows.iterrows():
         _shipment_role(row)
 
@@ -2722,7 +2765,7 @@ def run_automation(
                 fname = _sanitize_filename(
                     f"{content_name}_{order_id}_{tracking_for_name}_{ship_name}.pdf"
                 )
-                upload_pdf(pdf_bytes, fname, log_cb=log_cb)
+                upload_pdf(pdf_bytes, fname, log_cb=_log)
                 pdf_uploaded = True
                 _log(f"✅ PDF 已透過 requests 取得並上傳：{fname}")
             completed = False
@@ -2757,13 +2800,14 @@ def run_automation(
                 "completed": completed,
             }
 
-        for row_idx, row in rows.iterrows():
+        for row_index, (_, row) in enumerate(rows.iterrows()):
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
             package_qualifier = _shipment_log_qualifier(row)
             _log(
-                f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}） "
+                f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_index}） "
                 f"{package_qualifier}"
             )
+            _emit_status("order_started", row, row_index)
 
             tracking = "ERROR"
             results_before_order = len(results)
@@ -2828,6 +2872,12 @@ def run_automation(
                                 if print_result.get("tracking") and print_result.get("pdf_uploaded"):
                                     tracking = print_result["tracking"]
                                     results.append(_build_result_record(row, order_id, tracking))
+                                    _emit_status(
+                                        "label_created",
+                                        row,
+                                        row_index,
+                                        tracking=tracking,
+                                    )
                                     _log(
                                         f"📌 訂單 {order_id} 完成，貨運單號：{tracking} "
                                         f"{package_qualifier}"
@@ -2840,6 +2890,12 @@ def run_automation(
                     )
                     _log(f"⏸️ 訂單 {order_id} {failure} {package_qualifier}")
                     results.append(_build_failure_record(row, order_id, failure))
+                    _emit_status(
+                        "order_failed",
+                        row,
+                        row_index,
+                        reason_code="no_result",
+                    )
                 continue
 
                 # ── Step 3: 運送方式分流 ──────────────
@@ -2873,7 +2929,7 @@ def run_automation(
 
                         # EU → Gemini HS Code
                         if is_eu:
-                            hs = predict_hs_code(pkg, log_cb=log_cb)
+                            hs = predict_hs_code(pkg, log_cb=_log)
                             if hs:
                                 # 嘗試帶 .value 後綴變體
                                 for hs_sel in [
@@ -2947,7 +3003,7 @@ def run_automation(
                         safe_fill("input[name='itemBean.num.value']", num, label="parcel_num")
 
                         if is_eu:
-                            hs = predict_hs_code(pkg, log_cb=log_cb)
+                            hs = predict_hs_code(pkg, log_cb=_log)
                             if hs:
                                 for hs_sel in [
                                     "input[name='itemBean.hsCode']",
@@ -3061,7 +3117,7 @@ def run_automation(
                     fname = _sanitize_filename(
                         f"{content_name}_{order_id}_{tracking}_{ship_name}.pdf"
                     )
-                    upload_pdf(pdf_content, fname, log_cb=log_cb)
+                    upload_pdf(pdf_content, fname, log_cb=_log)
 
                 # ── Step 9: 點擊 Completed 返回首頁 ────
                 try:
@@ -3079,16 +3135,27 @@ def run_automation(
 
                 # ── 收集結果 ────────────────────────────
                 results.append(_build_result_record(row, order_id, tracking))
+                _emit_status(
+                    "label_created",
+                    row,
+                    row_index,
+                    tracking=tracking,
+                )
                 _log(
                     f"📌 訂單 {order_id} 完成，貨運單號：{tracking} "
                     f"{package_qualifier}"
                 )
 
             except Exception as e:
-                import traceback as _tb
-                _log(f"❌ 訂單 {order_id} 例外：{type(e).__name__}: {e}")
-                _log(f"詳細：{_tb.format_exc()}")
+                _log(f"order_failed error_type={type(e).__name__}")
                 if len(results) == results_before_order:
-                    results.append(_build_failure_record(row, order_id, e))
+                    failure_record = _build_failure_record(row, order_id, e)
+                    results.append(failure_record)
+                    _emit_status(
+                        "order_failed",
+                        row,
+                        row_index,
+                        reason_code=failure_record["reason_code"],
+                    )
 
     return results

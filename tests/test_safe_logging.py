@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from safe_logging import redact_operational_log, safe_log_event
 
@@ -92,6 +93,21 @@ class SafeLoggingTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, session_logs[0])
             self.assertNotIn(secret, rendered_log)
+
+    def test_automation_and_sheets_redact_at_source_boundaries(self):
+        root = Path(__file__).parents[1]
+        automation_source = root.joinpath("bot", "automation.py").read_text(encoding="utf-8")
+        sheets_source = root.joinpath("bot", "sheets.py").read_text(encoding="utf-8")
+
+        self.assertIn("redact_operational_log", automation_source)
+        self.assertIn("safe_message = redact_operational_log", automation_source)
+        self.assertNotIn("logging.info(msg)", automation_source)
+        self.assertNotIn("format_exc()", automation_source)
+        run_body = automation_source.split("def run_automation(", 1)[1]
+        self.assertNotIn("log_cb=log_cb", run_body)
+        self.assertIn("safe_message = redact_operational_log", sheets_source)
+        self.assertNotIn('error = "回填後讀回驗證失敗：" + ", ".join(missing[:8])', sheets_source)
+        self.assertNotIn('"error": str(e)', sheets_source)
 
 
 if __name__ == "__main__":

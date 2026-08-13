@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 import gspread
@@ -22,6 +23,12 @@ SOURCE_SHEET_ID = "1HDndg8GU35v6ft02pcOcfvABVt_J3rtCLfMuXWi14KM"
 SOURCE_GID = "605188303"
 TARGET_SHEET_ID = "1QJFFW7aWGpYX3W5nPW_HgUnVWk9AtggFvYow14BRW8U"
 TARGET_GID = "465870894"
+
+
+@dataclass(frozen=True)
+class CompletionAuthority:
+    legacy_order_ids: frozenset[str]
+    exact_pairs: frozenset[tuple[str, str]]
 
 SCOPES = [
     "https://spreadsheets.google.com/feeds",
@@ -333,19 +340,34 @@ def _get_worksheet_by_gid(spreadsheet, gid: str):
         return None
 
 
-def read_completed_order_ids(client: gspread.Client | None = None) -> set[str]:
-    """Read the target sheet completion authority, failing closed on errors."""
+def read_completion_authority(
+    client: gspread.Client | None = None,
+) -> CompletionAuthority:
+    """Read legacy order IDs and verified order/tracking pairs from target C:D."""
     client = client or _get_gspread_client()
     spreadsheet = client.open_by_key(TARGET_SHEET_ID)
     worksheet = _get_worksheet_by_gid(spreadsheet, TARGET_GID)
     if worksheet is None:
-        raise RuntimeError(f"找不到目標表單 GID {TARGET_GID}")
-    values = worksheet.col_values(3)
-    return {
-        _clean_cell(value)
-        for value in values[1:]
-        if _clean_cell(value)
-    }
+        raise RuntimeError("target worksheet unavailable")
+    values = worksheet.get("C:D")
+    legacy_order_ids: set[str] = set()
+    exact_pairs: set[tuple[str, str]] = set()
+    for row in values[1:]:
+        order_id = _clean_cell(row[0]) if row else ""
+        tracking = _clean_cell(row[1]) if len(row) > 1 else ""
+        if order_id:
+            legacy_order_ids.add(order_id)
+        if order_id and tracking:
+            exact_pairs.add((order_id, tracking))
+    return CompletionAuthority(
+        legacy_order_ids=frozenset(legacy_order_ids),
+        exact_pairs=frozenset(exact_pairs),
+    )
+
+
+def read_completed_order_ids(client: gspread.Client | None = None) -> set[str]:
+    """Compatibility view of the legacy order-level completion authority."""
+    return set(read_completion_authority(client).legacy_order_ids)
 
 
 def _pending_read_failure(exc: Exception, log_cb, *, strict: bool) -> pd.DataFrame:
@@ -475,11 +497,24 @@ def backfill_results(results: list[dict], log_cb=None):
     將成功打單結果批量回填至目標表單 GID 465870894。
     每筆結果格式：{"name", "order_id", "tracking", "country_raw", "date"}
     """
+    sensitive_values = tuple(
+        value
+        for result in results or []
+        for value in (
+            result.get("order_id"),
+            result.get("tracking"),
+            result.get("name"),
+            result.get("country_raw"),
+        )
+        if _clean_cell(value)
+    )
+
     def _log(msg):
+        safe_message = redact_operational_log(msg, sensitive_values=sensitive_values)
         if log_cb:
-            log_cb(msg)
+            log_cb(safe_message)
         else:
-            logging.info(msg)
+            logging.info("%s", safe_message)
 
     if not results:
         _log("ℹ️ 無需回填（results 為空）")
@@ -492,12 +527,16 @@ def backfill_results(results: list[dict], log_cb=None):
             (w for w in sh.worksheets() if str(w.id) == TARGET_GID), None
         )
         if not ws:
-            _log(f"❌ 找不到目標表單 GID {TARGET_GID}")
+            safe_log_event(
+                log_cb or (lambda message: logging.error("%s", message)),
+                "writeback_initialization_failed",
+                reason="writeback_api_error",
+            )
             return {
                 "ok": False,
                 "written": 0,
                 "failed": [str(r.get("order_id") or "") for r in results],
-                "error": f"找不到目標表單 GID {TARGET_GID}",
+                "error": "writeback_api_error",
             }
 
         # 找最後一列
@@ -536,19 +575,39 @@ def backfill_results(results: list[dict], log_cb=None):
             if (_clean_cell(result.get("order_id")), _clean_cell(result.get("tracking"))) not in written_pairs
         ]
         if missing:
-            error = "回填後讀回驗證失敗：" + ", ".join(missing[:8])
-            _log(f"❌ {error}")
-            return {"ok": False, "written": len(results), "failed": missing, "error": error}
+            safe_log_event(
+                log_cb or (lambda message: logging.error("%s", message)),
+                "writeback_batch_finished",
+                count=len(results),
+                reason="partial_write",
+            )
+            return {
+                "ok": False,
+                "written": len(results),
+                "failed": missing,
+                "error": "writeback_readback_failed",
+            }
         _log(f"🚀 回填完成並驗證：{len(results)} 筆")
         return {"ok": True, "written": len(results), "failed": [], "error": ""}
 
-    except Exception as e:
-        _log(f"❌ 回填失敗: {e}")
+    except Exception as exc:
+        if isinstance(exc, PermissionError):
+            reason = "writeback_permission_denied"
+        elif isinstance(exc, (TimeoutError, ConnectionError)):
+            reason = "writeback_network_error"
+        else:
+            reason = "writeback_api_error"
+        safe_log_event(
+            log_cb or (lambda message: logging.error("%s", message)),
+            "writeback_initialization_failed",
+            reason=reason,
+            error_type=type(exc).__name__,
+        )
         return {
             "ok": False,
             "written": 0,
             "failed": [str(r.get("order_id") or "") for r in results],
-            "error": str(e),
+            "error": reason,
         }
 
 

@@ -1878,6 +1878,19 @@ class AutomationHtmlTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid shipment role"):
                 run_automation(rows)
 
+    def test_run_automation_accepts_status_callback_and_uses_positional_row_indexes(self):
+        from pathlib import Path
+
+        source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(encoding="utf-8")
+
+        self.assertIn("status_cb=None", source)
+        self.assertIn("for row_index, (_, row) in enumerate(rows.iterrows()):", source)
+        self.assertIn('_emit_status("order_started"', source)
+        self.assertIn('"label_created",', source)
+        self.assertIn('"order_failed",', source)
+        self.assertNotIn("_tb.format_exc()", source)
+        self.assertNotIn("logging.info(msg)", source)
+
     def test_shipment_log_qualifier_includes_transport_and_role(self):
         row = {"TransType": "ePacket", "_shipment_role": "additional"}
 

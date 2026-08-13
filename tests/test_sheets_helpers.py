@@ -15,6 +15,7 @@ sys.modules.setdefault("streamlit", types.SimpleNamespace(secrets={}, session_st
 import bot.sheets as sheets_module
 
 from bot.sheets import (
+    CompletionAuthority,
     COUNTRY_CODE_MAP,
     _filter_pending_orders_dataframe,
     _get_worksheet_by_gid,
@@ -22,11 +23,45 @@ from bot.sheets import (
     _shipping_priority,
     backfill_results,
     get_pending_orders,
+    read_completion_authority,
     resolve_country_code,
 )
 
 
 class SheetsHelperTests(unittest.TestCase):
+    def test_read_completion_authority_uses_target_gid_and_reads_exact_cd_pairs(self):
+        class FakeWorksheet:
+            def get(self, range_name):
+                self.range_name = range_name
+                return [
+                    ["order_id", "tracking"],
+                    ["ORDER-1", "LX123456789JP"],
+                    ["ORDER-2", ""],
+                    ["", "EE123456789JP"],
+                ]
+
+        worksheet = FakeWorksheet()
+
+        class FakeSpreadsheet:
+            def get_worksheet_by_id(self, gid):
+                self.gid = gid
+                return worksheet
+
+        spreadsheet = FakeSpreadsheet()
+
+        class FakeClient:
+            def open_by_key(self, key):
+                self.key = key
+                return spreadsheet
+
+        authority = read_completion_authority(FakeClient())
+
+        self.assertIsInstance(authority, CompletionAuthority)
+        self.assertEqual(authority.legacy_order_ids, frozenset({"ORDER-1", "ORDER-2"}))
+        self.assertEqual(authority.exact_pairs, frozenset({("ORDER-1", "LX123456789JP")}))
+        self.assertEqual(spreadsheet.gid, int(sheets_module.TARGET_GID))
+        self.assertEqual(worksheet.range_name, "C:D")
+
     def test_get_pending_orders_strict_permission_failure_uses_safe_code(self):
         logs = []
 

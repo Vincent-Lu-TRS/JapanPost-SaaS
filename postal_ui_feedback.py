@@ -25,9 +25,53 @@ def completed_order_ids(results: list[dict] | None) -> set[str]:
     }
 
 
+def _package_key(result: dict) -> tuple[str, str, str] | None:
+    order_id = str(result.get("order_id") or "").strip()
+    trans_type = str(result.get("trans_type") or result.get("TransType") or "").strip()
+    shipment_role = str(result.get("shipment_role") or result.get("_shipment_role") or "").strip().lower()
+    if not order_id or not trans_type or shipment_role not in {"primary", "additional"}:
+        return None
+    return order_id, trans_type, shipment_role
+
+
+def completed_package_keys(results: list[dict] | None) -> set[tuple[str, str, str]]:
+    """Return package keys with terminal, verified writeback success."""
+    return {
+        key
+        for result in results or []
+        for key in [_package_key(result)]
+        if key is not None
+        and str(result.get("status") or "").strip() in {"completed", "writeback_verified"}
+    }
+
+
+def fully_completed_order_ids(
+    results: list[dict] | None,
+    submitted_packages: list[dict] | None = None,
+) -> set[str]:
+    """Return orders whose every submitted package has verified completion."""
+    rows = list(results or [])
+    submitted_rows = list(submitted_packages or rows)
+    submitted_keys = {
+        key for row in submitted_rows for key in [_package_key(row)] if key is not None
+    }
+    if not submitted_keys:
+        return completed_order_ids(rows)
+    completed_keys = completed_package_keys(rows)
+    order_ids = {key[0] for key in submitted_keys}
+    return {
+        order_id
+        for order_id in order_ids
+        if {key for key in submitted_keys if key[0] == order_id}
+        <= completed_keys
+    }
+
+
 def filter_pending_orders_after_batch(
     pending: pd.DataFrame,
     results: list[dict] | None,
+    *,
+    submitted_packages: list[dict] | None = None,
 ) -> pd.DataFrame:
     """Hide successfully completed rows from the cached pending-order view.
 
@@ -37,7 +81,7 @@ def filter_pending_orders_after_batch(
     if not isinstance(pending, pd.DataFrame) or pending.empty:
         return pending
 
-    completed_ids = completed_order_ids(results)
+    completed_ids = fully_completed_order_ids(results, submitted_packages)
     if not completed_ids:
         return pending
 

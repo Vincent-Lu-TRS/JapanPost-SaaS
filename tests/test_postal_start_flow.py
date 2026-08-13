@@ -269,11 +269,27 @@ class PostalStartFlowTests(unittest.TestCase):
     def test_start_job_rechecks_target_and_source_before_automation(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
-        self.assertIn("read_completed_order_ids", app_source)
+        self.assertIn("read_completion_authority", app_source)
         self.assertIn("preflight_batch_orders", app_source)
+        self.assertIn("partition_preflight_rows", app_source)
+        self.assertIn("exclude_completed=False", app_source)
         self.assertIn("target_read_error", app_source)
         self.assertIn("source_changed", app_source)
         self.assertIn("latest_pending_df", app_source)
+
+    def test_start_job_wires_package_status_events_and_executes_only_ready_rows(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        start_body = app_source[
+            app_source.index("def _start_job("):
+            app_source.index("# ══════════════════════════════════════════════════════\n# 頁面渲染函數")
+        ]
+
+        self.assertIn("def _status(event)", start_body)
+        self.assertIn("update_order_status_from_event(job, event)", start_body)
+        self.assertIn("status_cb=_status", start_body)
+        self.assertIn("ready_rows", start_body)
+        self.assertIn("writeback_pending", start_body)
+        self.assertIn("writeback_verified", start_body)
 
     def test_completion_count_comes_from_structured_results_and_failure_alerts(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

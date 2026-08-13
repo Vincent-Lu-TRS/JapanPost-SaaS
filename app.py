@@ -25,10 +25,12 @@ BatchJobRegistry = _job_control.BatchJobRegistry
 mark_results_completed = _job_control.mark_results_completed
 mark_results_failed = _job_control.mark_results_failed
 mark_unfinished_orders = _job_control.mark_unfinished_orders
+partition_preflight_rows = _job_control.partition_preflight_rows
 preflight_batch_orders = _job_control.preflight_batch_orders
 summarize_job_results = _job_control.summarize_job_results
 summarize_job_progress = _job_control.summarize_job_progress
 update_order_status_from_log = _job_control.update_order_status_from_log
+update_order_status_from_event = _job_control.update_order_status_from_event
 from pending_editor import (
     SHIPPING_COL,
     SHIPPING_OPTIONS,
@@ -47,6 +49,7 @@ from fx_rates import fetch_usd_jpy_rate
 from postal_ui_feedback import (
     completed_order_ids,
     filter_pending_orders_after_batch,
+    fully_completed_order_ids,
     summarize_batch_results,
     summarize_pending_read_logs,
 )
@@ -1497,18 +1500,28 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     flush=True,
                 )
 
+        def _status(event):
+            try:
+                update_order_status_from_event(job, event)
+            except Exception:
+                safe_log_event(
+                    _log,
+                    "job_exception",
+                    error_type="StatusEventError",
+                )
+
         try:
             rows_for_run = df if max_rows is None else df.head(max_rows)
             from bot.sheets import (
                 COUNTRY_CODE_MAP,
                 backfill_results,
                 get_pending_orders,
-                read_completed_order_ids,
+                read_completion_authority,
             )
 
             _log("🔐 製單前重新確認 Google Sheets 完成狀態與來源快照...")
             try:
-                completed_ids = read_completed_order_ids()
+                completion_authority = read_completion_authority()
             except Exception as preflight_error:
                 reason_text = "無法確認完成狀態，這批未開始製單。"
                 preflight_results = [
@@ -1532,37 +1545,62 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 _clear_job_lock(email)
                 return
 
-            latest_pending_df = get_pending_orders(log_cb=_log)
+            latest_pending_df = get_pending_orders(
+                log_cb=_log,
+                strict=True,
+                exclude_completed=False,
+            )
             preflight_checks = preflight_batch_orders(
                 rows_for_run,
                 latest_pending_df,
-                completed_ids,
+                completion_authority,
             )
             job["preflight_checks"] = preflight_checks
-            blocked_checks = [check for check in preflight_checks if check.get("status") != "ready"]
-            if blocked_checks:
-                preflight_results = [
+            ready_rows, already_completed_items, hard_blocked_items = partition_preflight_rows(
+                rows_for_run,
+                preflight_checks,
+            )
+            preflight_completed_results = [
+                {
+                    **check,
+                    "status": "completed",
+                    "message": check.get("reason_text", ""),
+                }
+                for check in already_completed_items
+            ]
+            preflight_blocked_results = [
                     {
-                        "order_id": check["order_id"],
+                        **check,
                         "status": "blocked",
                         "reason_code": check.get("reason_code", "source_changed"),
                         "reason_text": check.get("reason_text", "製單前檢查未通過"),
                         "message": check.get("reason_text", "製單前檢查未通過"),
                     }
-                    for check in blocked_checks
-                ]
-                job["results"] = preflight_results
-                mark_results_failed(job, preflight_results)
-                _log(
-                    "🛑 製單前檢查阻擋："
-                    + ", ".join(
-                        f"{check['order_id']}({check.get('reason_code', 'unknown')})"
-                        for check in blocked_checks
-                    )
+                    for check in hard_blocked_items
+            ]
+            initial_results = preflight_completed_results + preflight_blocked_results
+            job["results"] = list(initial_results)
+            if preflight_completed_results:
+                mark_results_completed(job, preflight_completed_results)
+            if preflight_blocked_results:
+                mark_results_failed(job, preflight_blocked_results)
+                safe_log_event(
+                    _log,
+                    "preflight_blocked",
+                    count=len(preflight_blocked_results),
                 )
-                _JOB_REGISTRY.finish(job, "partial_failure")
+            if ready_rows.empty:
+                terminal_status = (
+                    "completed" if preflight_completed_results and not preflight_blocked_results
+                    else "partial_failure"
+                )
+                _JOB_REGISTRY.finish(job, terminal_status)
+                if preflight_completed_results:
+                    job["pending_refresh_needed"] = True
                 _clear_job_lock(email)
                 return
+
+            rows_for_run = ready_rows
 
             _log("🚀 任務啟動，正在載入模組...")
             _log("🧰 正在準備 Playwright Chromium 環境...")
@@ -1585,9 +1623,10 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     )
             _log("✅ 模組載入成功，開始 Playwright 自動化...")
             results = run_automation(
-                df,
-                max_rows=max_rows,
+                rows_for_run,
+                max_rows=None,
                 log_cb=_log,
+                status_cb=_status,
                 headless=True,
                 precomputed_hs_codes=hs_codes_by_order,
             )
@@ -1601,7 +1640,14 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                         "reason_text": "自動化完成但沒有產生新結果",
                         "message": "自動化完成但沒有產生新結果",
                     }
-                    for order in job.get("orders") or []
+                    for _, row in rows_for_run.iterrows()
+                    for order in [
+                        {
+                            "order_id": str(row.get("order_id") or row.get("注文番号(貼上原始資料)") or "").strip(),
+                            "trans_type": str(row.get("trans_type") or row.get("TransType") or row.get("郵局運送方式(複數商品請自行確認是否走小包)") or "").strip(),
+                            "shipment_role": str(row.get("shipment_role") or row.get("_shipment_role") or "primary").strip(),
+                        }
+                    ]
                 ]
 
             successful_results = [
@@ -1616,6 +1662,8 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             ]
             mark_results_failed(job, failed_results)
             if successful_results:
+                for result in successful_results:
+                    _status({"event": "writeback_pending", **result})
                 _log(f"📋 正在回填 {len(successful_results)} 筆至 Google Sheets...")
                 backfill_outcome = backfill_results(successful_results, log_cb=_log) or {
                     "ok": False,
@@ -1626,6 +1674,8 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 job["backfill_outcome"] = backfill_outcome
                 if backfill_outcome.get("ok"):
                     mark_results_completed(job, successful_results)
+                    for result in successful_results:
+                        _status({"event": "writeback_verified", **result})
                     _log(f"✅ 完成！本次實際完成 {len(successful_results)} 筆訂單。")
                     job["pending_refresh_needed"] = True
                 else:
@@ -1651,6 +1701,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             else:
                 job["backfill_outcome"] = {"ok": True, "written": 0, "failed": [], "error": ""}
 
+            results = initial_results + results
             job["results"] = results
             result_summary = summarize_job_results(results)
             terminal_status = "completed" if (
@@ -2754,13 +2805,20 @@ def _render_main_app():
     pending_count = len(df_pending)
 
     if not is_busy and job and job.get("results"):
-        filtered_pending = filter_pending_orders_after_batch(df_pending, job["results"])
+        filtered_pending = filter_pending_orders_after_batch(
+            df_pending,
+            job["results"],
+            submitted_packages=job.get("orders") or [],
+        )
         if len(filtered_pending) != len(df_pending):
             df_pending = filtered_pending
             st.session_state["last_pending_df"] = df_pending
             selected_by_order = st.session_state.get("pending_selected_by_order")
             if isinstance(selected_by_order, dict):
-                for order_id in completed_order_ids(job["results"]):
+                for order_id in fully_completed_order_ids(
+                    job["results"],
+                    job.get("orders") or [],
+                ):
                     selected_by_order.pop(order_id, None)
 
     pending_count = len(df_pending)
