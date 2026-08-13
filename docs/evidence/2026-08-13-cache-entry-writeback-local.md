@@ -1,6 +1,6 @@
 # JPPOST cache, writeback, and postal-entry local evidence
 
-Date: 2026-08-13  
+Date: 2026-08-13
 Branch: `codex/jppost-cache-entry-writeback-20260813`
 
 ## Implemented scope
@@ -26,7 +26,7 @@ Commands run on synthetic data only:
 | Tracked Python `py_compile` | passed |
 | `git diff --check` | passed |
 
-The full-discovery error is the pre-existing Python 3.14 import-reload mock interaction in `test_app_imports`; the same module passes when run alone. No test connected to Google Sheets, Japan Post, Google Drive, or external carrier services.
+The former Python 3.14 import-reload mock interaction in `test_app_imports` was reproduced with a stale module entry and fixed by `aa7fd24`; the complete discovery now passes. No test connected to Google Sheets, Japan Post, Google Drive, or external carrier services.
 
 ## Commit sequence
 
