@@ -662,7 +662,7 @@ The patches target dependencies imported by the AppTest script while they are al
 Run:
 
 ```powershell
-python -m unittest tests.test_postal_start_flow tests.test_postal_ui_v2_app tests.test_picking_labels -v
+python -m unittest tests.test_refresh_cache tests.test_sheets_helpers tests.test_postal_start_flow tests.test_postal_ui_v2_app tests.test_picking_labels -v
 ```
 
 Expected: FAIL because the coordinator is not connected and manual reload still clears session data.
@@ -1350,6 +1350,11 @@ module-level `build_safe_automation_logger()` helper. Patch/capture
 address and `EE123456789JP`, and assert neither the captured Python log nor the
 callback collector contains any of those values. Also assert the callback receives
 the same sanitized string that Python logging receives.
+
+Also write the `update_order_status_from_event` tests described in Step 3 now,
+including the non-contiguous-index package-key case and the `label_created` followed
+by writeback-failure case. They belong to this RED set even though their production
+helper is implemented in Step 3.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -2251,6 +2256,18 @@ def test_initial_sheet_read_failure_returns_item_outcomes(self):
 ```
 
 Each case asserts the per-input status, safe reason, target row, aggregate counts, and whether a write call was allowed.
+
+- [ ] **Step 4b: Run all classification/readback tests and verify RED**
+
+Run before writing the Step 5 implementation:
+
+```powershell
+python -m unittest tests.test_sheets_helpers tests.test_postal_mock_e2e -v
+```
+
+Expected: the new idempotency, additional-package, conflict, partial-write,
+initial-read-failure, and delayed-readback tests fail for the intended missing
+classification/readback behavior; the Step 1 capacity tests remain green.
 
 - [ ] **Step 5: Implement classification, write, and readback retry with a compatible return shape**
 
