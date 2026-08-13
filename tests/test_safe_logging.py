@@ -1,7 +1,11 @@
 import unittest
 from pathlib import Path
 
-from safe_logging import redact_operational_log, safe_log_event
+from safe_logging import (
+    build_safe_automation_logger,
+    redact_operational_log,
+    safe_log_event,
+)
 
 
 class SafeLoggingTests(unittest.TestCase):
@@ -94,13 +98,53 @@ class SafeLoggingTests(unittest.TestCase):
             self.assertNotIn(secret, session_logs[0])
             self.assertNotIn(secret, rendered_log)
 
+    def test_safe_automation_logger_redacts_before_callback_and_python_logging(self):
+        callback_messages = []
+
+        class RecordingLogger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, template, message):
+                self.messages.append(template % message)
+
+        logger = RecordingLogger()
+        emit = build_safe_automation_logger(
+            callback_messages.append,
+            sensitive_values=("SERVER-SECRET", "Synthetic Receiver"),
+            logger=logger,
+        )
+
+        emit(
+            "response body SERVER-SECRET receiver=Synthetic Receiver "
+            "tracking=LX123456789JP email=private@example.com"
+        )
+
+        self.assertEqual(callback_messages, logger.messages)
+        for output in callback_messages + logger.messages:
+            self.assertNotIn("SERVER-SECRET", output)
+            self.assertNotIn("Synthetic Receiver", output)
+            self.assertNotIn("LX123456789JP", output)
+            self.assertNotIn("private@example.com", output)
+
+    def test_automation_source_never_logs_raw_response_bodies_or_exception_text(self):
+        automation_source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("build_safe_automation_logger", automation_source)
+        self.assertNotIn("body[:", automation_source)
+        self.assertNotIn("body_snip", automation_source)
+        self.assertNotRegex(automation_source, r'_log\(f[^\n]*(?:\{e\}|\{exc\}|\{_re_err\})')
+        self.assertNotIn("logging.info", automation_source)
+
     def test_automation_and_sheets_redact_at_source_boundaries(self):
         root = Path(__file__).parents[1]
         automation_source = root.joinpath("bot", "automation.py").read_text(encoding="utf-8")
         sheets_source = root.joinpath("bot", "sheets.py").read_text(encoding="utf-8")
 
-        self.assertIn("redact_operational_log", automation_source)
-        self.assertIn("safe_message = redact_operational_log", automation_source)
+        self.assertIn("build_safe_automation_logger", automation_source)
+        self.assertIn("_log = build_safe_automation_logger", automation_source)
         self.assertNotIn("logging.info(msg)", automation_source)
         self.assertNotIn("format_exc()", automation_source)
         run_body = automation_source.split("def run_automation(", 1)[1]

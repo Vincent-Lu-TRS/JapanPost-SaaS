@@ -180,8 +180,6 @@ def update_order_status_from_event(
         return False
 
     event_type = str(event.get("event") or event.get("type") or "").strip().lower()
-    event_aliases = {"automation_completed": "label_created"}
-    event_type = event_aliases.get(event_type, event_type)
     if event_type not in {
         "order_started",
         "label_created",
@@ -412,6 +410,16 @@ def preflight_batch_orders(
             if order_id and order_id not in latest_by_order:
                 latest_by_order[order_id] = row
 
+    selected_primary_transport: dict[str, str] = {}
+    if isinstance(selected_df, pd.DataFrame):
+        for _, row in selected_df.iterrows():
+            if _row_value(row, SHIPMENT_ROLE_COLUMNS, "primary").lower() != "primary":
+                continue
+            order_id = _row_value(row, ORDER_ID_COLUMNS)
+            trans_type = _row_value(row, TRANS_TYPE_COLUMNS)
+            if order_id and trans_type:
+                selected_primary_transport.setdefault(order_id, trans_type)
+
     legacy_order_ids = set(getattr(completion, "legacy_order_ids", completion or set()))
     exact_pairs = set(getattr(completion, "exact_pairs", set()))
     checks: list[dict[str, Any]] = []
@@ -472,7 +480,10 @@ def preflight_batch_orders(
                 ),
             ))
             continue
-        primary_trans_type = _row_value(latest, TRANS_TYPE_COLUMNS)
+        primary_trans_type = selected_primary_transport.get(order_id) or _row_value(
+            latest,
+            TRANS_TYPE_COLUMNS,
+        )
         if shipment_role == "additional" and trans_type == primary_trans_type:
             checks.append(_item("blocked", "additional_transport_matches_primary", "追加包裹不得與主要包裹使用相同運送方式。"))
             continue

@@ -520,6 +520,26 @@ def backfill_results(results: list[dict], log_cb=None):
         _log("ℹ️ 無需回填（results 為空）")
         return {"ok": True, "written": 0, "failed": [], "error": ""}
 
+    invalid_results = [
+        result
+        for result in results
+        if not _clean_cell(result.get("order_id"))
+        or not _clean_cell(result.get("tracking"))
+    ]
+    if invalid_results:
+        safe_log_event(
+            log_cb or (lambda message: logging.error("%s", message)),
+            "writeback_initialization_failed",
+            reason="invalid_writeback_identity",
+            count=len(invalid_results),
+        )
+        return {
+            "ok": False,
+            "written": 0,
+            "failed": [str(result.get("order_id") or "") for result in invalid_results],
+            "error": "invalid_writeback_identity",
+        }
+
     try:
         client = _get_gspread_client()
         sh = client.open_by_key(TARGET_SHEET_ID)
@@ -567,7 +587,7 @@ def backfill_results(results: list[dict], log_cb=None):
         written_pairs = {
             (_clean_cell(order_id), _clean_cell(tracking))
             for order_id, tracking in zip(written_order_ids[1:], written_tracking[1:])
-            if _clean_cell(order_id)
+            if _clean_cell(order_id) and _clean_cell(tracking)
         }
         missing = [
             str(result.get("order_id") or "")

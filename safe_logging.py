@@ -1,6 +1,7 @@
 """PII-safe operational logging helpers."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import Callable, Iterable
@@ -92,6 +93,28 @@ def safe_log_event(
         parts.append(f"{field}={_safe_field_value(field, value)}")
     if log_cb is not None:
         log_cb(" ".join(parts))
+
+
+def build_safe_automation_logger(
+    log_cb: Callable[[str], object] | None = None,
+    *,
+    sensitive_values: Iterable[object] = (),
+    logger: logging.Logger | None = None,
+) -> Callable[[object], None]:
+    """Build a boundary that redacts before callbacks and Python logging."""
+    python_logger = logger or logging.getLogger("jppost.automation")
+    sensitive_tokens = tuple(sensitive_values)
+
+    def emit(message: object) -> None:
+        safe_message = redact_operational_log(
+            message,
+            sensitive_values=sensitive_tokens,
+        )
+        if log_cb is not None:
+            log_cb(safe_message)
+        python_logger.info("%s", safe_message)
+
+    return emit
 
 
 def redact_operational_log(

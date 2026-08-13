@@ -206,6 +206,56 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(outcome["ok"])
         self.assertEqual(outcome["written"], 1)
 
+    def test_backfill_results_rejects_blank_tracking_before_sheet_access(self):
+        with patch.object(
+            sheets_module,
+            "_get_gspread_client",
+            side_effect=AssertionError("blank tracking must not reach Google Sheets"),
+        ):
+            outcome = backfill_results(
+                [{"name": "Synthetic", "order_id": "ORDER-BLANK", "tracking": ""}]
+            )
+
+        self.assertFalse(outcome["ok"])
+        self.assertEqual(outcome["written"], 0)
+        self.assertEqual(outcome["error"], "invalid_writeback_identity")
+
+    def test_backfill_readback_requires_nonblank_order_and_tracking_pair(self):
+        class FakeWorksheet:
+            id = int(sheets_module.TARGET_GID)
+
+            def col_values(self, column):
+                return {
+                    2: ["receiver"],
+                    3: ["order", "ORDER-READBACK"],
+                    4: ["tracking", ""],
+                }[column]
+
+            def batch_update(self, *_args, **_kwargs):
+                return None
+
+        class FakeSpreadsheet:
+            def worksheets(self):
+                return [FakeWorksheet()]
+
+        class FakeClient:
+            def open_by_key(self, _key):
+                return FakeSpreadsheet()
+
+        with patch.object(sheets_module, "_get_gspread_client", return_value=FakeClient()):
+            outcome = backfill_results(
+                [
+                    {
+                        "name": "Synthetic",
+                        "order_id": "ORDER-READBACK",
+                        "tracking": "LX123456789JP",
+                    }
+                ]
+            )
+
+        self.assertFalse(outcome["ok"])
+        self.assertEqual(outcome["error"], "writeback_readback_failed")
+
     def test_get_worksheet_by_gid_uses_direct_lookup(self):
         class FakeSpreadsheet:
             title = "Fake Sheet"

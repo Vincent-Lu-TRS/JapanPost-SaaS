@@ -67,6 +67,60 @@ def fully_completed_order_ids(
     }
 
 
+def _pending_order_ids(frame: pd.DataFrame) -> pd.Series:
+    order_ids = pd.Series("", index=frame.index, dtype="object")
+    for column in _PENDING_ORDER_ID_COLUMNS:
+        if column not in frame.columns:
+            continue
+        values = frame[column].fillna("").astype(str).str.strip()
+        order_ids = order_ids.mask(order_ids == "", values)
+    return order_ids
+
+
+def preserve_incomplete_submitted_orders(
+    existing: pd.DataFrame | None,
+    refreshed: pd.DataFrame,
+    submitted_orders: list[dict] | None,
+    results: list[dict] | None,
+) -> pd.DataFrame:
+    """Restore omitted cached rows until every submitted package is complete."""
+    if not isinstance(refreshed, pd.DataFrame):
+        return refreshed
+    if not isinstance(existing, pd.DataFrame) or existing.empty:
+        return refreshed.copy()
+
+    submitted_keys = {
+        key
+        for row in submitted_orders or []
+        for key in [_package_key(row)]
+        if key is not None
+    }
+    if not submitted_keys:
+        return refreshed.copy()
+
+    completed_keys = completed_package_keys(results)
+    incomplete_order_ids = {
+        order_id
+        for order_id in {key[0] for key in submitted_keys}
+        if not {
+            key for key in submitted_keys if key[0] == order_id
+        } <= completed_keys
+    }
+    if not incomplete_order_ids:
+        return refreshed.copy()
+
+    refreshed_ids = set(_pending_order_ids(refreshed)) - {""}
+    missing_ids = incomplete_order_ids - refreshed_ids
+    if not missing_ids:
+        return refreshed.copy()
+
+    existing_ids = _pending_order_ids(existing)
+    preserved = existing.loc[existing_ids.isin(missing_ids)].copy()
+    if preserved.empty:
+        return refreshed.copy()
+    return pd.concat([refreshed.copy(), preserved], ignore_index=True, sort=False)
+
+
 def filter_pending_orders_after_batch(
     pending: pd.DataFrame,
     results: list[dict] | None,
@@ -91,10 +145,7 @@ def filter_pending_orders_after_batch(
     if not order_id_columns:
         return pending
 
-    order_ids = pd.Series("", index=pending.index, dtype="object")
-    for column in order_id_columns:
-        values = pending[column].fillna("").astype(str).str.strip()
-        order_ids = order_ids.mask(order_ids == "", values)
+    order_ids = _pending_order_ids(pending)
 
     return pending.loc[~order_ids.isin(completed_ids)].copy()
 

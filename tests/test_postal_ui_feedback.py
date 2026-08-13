@@ -6,6 +6,7 @@ from postal_ui_feedback import (
     completed_package_keys,
     filter_pending_orders_after_batch,
     fully_completed_order_ids,
+    preserve_incomplete_submitted_orders,
     summarize_batch_results,
     summarize_pending_read_logs,
 )
@@ -132,6 +133,51 @@ class PostalUiFeedbackTests(unittest.TestCase):
         visible = filter_pending_orders_after_batch(pending, results, submitted_packages=submitted)
 
         self.assertEqual(visible["order_id"].tolist(), ["missing-1"])
+
+    def test_refresh_restores_existing_order_when_additional_package_is_failed_or_missing(self):
+        existing = pd.DataFrame(
+            [
+                {"order_id": "mixed-1", "Shipping Name": "Existing Mixed"},
+                {"order_id": "fresh-1", "Shipping Name": "Existing Fresh"},
+            ]
+        )
+        refreshed = pd.DataFrame(
+            [{"order_id": "fresh-1", "Shipping Name": "Refreshed Fresh"}]
+        )
+        submitted = [
+            {"order_id": "mixed-1", "trans_type": "AIR", "shipment_role": "primary"},
+            {"order_id": "mixed-1", "trans_type": "EMS", "shipment_role": "additional"},
+        ]
+
+        for additional_result in (
+            {
+                "order_id": "mixed-1",
+                "trans_type": "EMS",
+                "shipment_role": "additional",
+                "status": "failed",
+            },
+            None,
+        ):
+            results = [
+                {
+                    "order_id": "mixed-1",
+                    "trans_type": "AIR",
+                    "shipment_role": "primary",
+                    "status": "completed",
+                }
+            ]
+            if additional_result is not None:
+                results.append(additional_result)
+
+            visible = preserve_incomplete_submitted_orders(
+                existing,
+                refreshed,
+                submitted,
+                results,
+            )
+
+            self.assertEqual(visible["order_id"].tolist(), ["fresh-1", "mixed-1"])
+            self.assertEqual(visible.iloc[0]["Shipping Name"], "Refreshed Fresh")
 
 
 if __name__ == "__main__":

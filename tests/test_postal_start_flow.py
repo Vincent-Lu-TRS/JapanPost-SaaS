@@ -291,6 +291,47 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn("writeback_pending", start_body)
         self.assertIn("writeback_verified", start_body)
 
+    def test_start_job_aborts_entire_batch_when_any_preflight_item_is_blocked(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        start_body = app_source[
+            app_source.index("def _start_job("):
+            app_source.index("# ══════════════════════════════════════════════════════\n# 頁面渲染函數")
+        ]
+
+        blocker_gate = start_body.index("if preflight_blocked_results:")
+        automation_start = start_body.index("_install_playwright()")
+        ready_assignment = start_body.index("rows_for_run = ready_rows")
+        self.assertLess(blocker_gate, ready_assignment)
+        self.assertLess(blocker_gate, automation_start)
+        blocker_body = start_body[blocker_gate:ready_assignment]
+        self.assertIn('_JOB_REGISTRY.finish(job, "error")', blocker_body)
+        self.assertIn("return", blocker_body)
+
+    def test_pending_refresh_applies_mixed_package_preservation_with_job_authority(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        apply_body = app_source[
+            app_source.index("def _apply_pending_result("):
+            app_source.index("if not hasattr(st, \"fragment\")")
+        ]
+
+        self.assertIn("preserve_incomplete_submitted_orders", apply_body)
+        self.assertIn('existing=st.session_state.get("last_pending_df")', apply_body)
+        self.assertIn('submitted_orders=job.get("orders") or []', apply_body)
+        self.assertIn('results=job.get("results") or []', apply_body)
+
+    def test_start_job_only_backfills_successful_results_with_tracking(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        start_body = app_source[
+            app_source.index("def _start_job("):
+            app_source.index("# ══════════════════════════════════════════════════════\n# 頁面渲染函數")
+        ]
+        candidates = start_body[
+            start_body.index("successful_results = ["):
+            start_body.index("failed_results = [")
+        ]
+
+        self.assertIn('str(result.get("tracking") or "").strip()', candidates)
+
     def test_completion_count_comes_from_structured_results_and_failure_alerts(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 

@@ -325,6 +325,39 @@ class JobControlTests(unittest.TestCase):
             ["", "additional_transport_matches_primary", "", "duplicate_package_request"],
         )
 
+    def test_preflight_compares_additional_transport_to_selected_primary_package(self):
+        selected = pd.DataFrame(
+            [
+                {
+                    "order_id": "Synthetic-Order-Selected-Primary",
+                    "TransType": "AIR",
+                    "shipment_role": "primary",
+                },
+                {
+                    "order_id": "Synthetic-Order-Selected-Primary",
+                    "TransType": "AIR",
+                    "shipment_role": "additional",
+                },
+            ]
+        )
+        latest = pd.DataFrame(
+            [
+                {
+                    "order_id": "Synthetic-Order-Selected-Primary",
+                    "TransType": "EMS",
+                }
+            ]
+        )
+
+        checks = preflight_batch_orders(selected, latest, set())
+
+        self.assertEqual(checks[0]["status"], "ready")
+        self.assertEqual(checks[1]["status"], "blocked")
+        self.assertEqual(
+            checks[1]["reason_code"],
+            "additional_transport_matches_primary",
+        )
+
     def test_preflight_missing_identity_and_partition_missing_result_fail_closed(self):
         selected = pd.DataFrame(
             [
@@ -410,7 +443,7 @@ class JobControlTests(unittest.TestCase):
             )
         }
 
-        update_order_status_from_event(
+        updated = update_order_status_from_event(
             job,
             {
                 "event": "automation_completed",
@@ -421,9 +454,10 @@ class JobControlTests(unittest.TestCase):
             },
         )
 
+        self.assertFalse(updated)
         self.assertEqual(job["orders"][0]["status"], "queued")
-        self.assertEqual(job["orders"][1]["status"], "running")
-        self.assertEqual(job["orders"][1]["tracking_no"], "LX123456789JP")
+        self.assertEqual(job["orders"][1]["status"], "queued")
+        self.assertEqual(job["orders"][1]["tracking_no"], "")
         self.assertEqual(summarize_job_progress(job)["done"], 0)
 
     def test_status_events_are_strict_and_label_creation_never_completes(self):

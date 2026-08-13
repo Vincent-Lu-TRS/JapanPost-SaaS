@@ -50,6 +50,7 @@ from postal_ui_feedback import (
     completed_order_ids,
     filter_pending_orders_after_batch,
     fully_completed_order_ids,
+    preserve_incomplete_submitted_orders,
     summarize_batch_results,
     summarize_pending_read_logs,
 )
@@ -390,8 +391,19 @@ def _apply_pending_result(
 
     payload = copy_pending_payload(result.data)
     dataframe = payload.dataframe.copy(deep=True)
-    if job and job.get("results"):
-        dataframe = filter_pending_orders_after_batch(dataframe, job["results"])
+    if job:
+        dataframe = preserve_incomplete_submitted_orders(
+            existing=st.session_state.get("last_pending_df"),
+            refreshed=dataframe,
+            submitted_orders=job.get("orders") or [],
+            results=job.get("results") or [],
+        )
+        if job.get("results"):
+            dataframe = filter_pending_orders_after_batch(
+                dataframe,
+                job["results"],
+                submitted_packages=job.get("orders") or [],
+            )
     logs = _safe_operational_log_lines(
         payload.logs,
         sensitive_values=_dataframe_sensitive_values(dataframe),
@@ -1589,6 +1601,23 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     "preflight_blocked",
                     count=len(preflight_blocked_results),
                 )
+                aborted_results = [
+                    {
+                        "order_id": str(row.get("order_id") or row.get("注文番号(貼上原始資料)") or "").strip(),
+                        "trans_type": str(row.get("trans_type") or row.get("TransType") or row.get("郵局運送方式(複數商品請自行確認是否走小包)") or "").strip(),
+                        "shipment_role": str(row.get("shipment_role") or row.get("_shipment_role") or "primary").strip(),
+                        "status": "blocked",
+                        "reason_code": "batch_preflight_blocked",
+                        "reason_text": "本批含未通過製單前檢查的包裹，整批停止。",
+                        "message": "本批含未通過製單前檢查的包裹，整批停止。",
+                    }
+                    for _, row in ready_rows.iterrows()
+                ]
+                job["results"].extend(aborted_results)
+                mark_results_failed(job, aborted_results)
+                _JOB_REGISTRY.finish(job, "error")
+                _clear_job_lock(email)
+                return
             if ready_rows.empty:
                 terminal_status = (
                     "completed" if preflight_completed_results and not preflight_blocked_results
@@ -1650,10 +1679,24 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     ]
                 ]
 
+            for result in results:
+                if (
+                    str(result.get("status") or "success").strip() in {"success", "completed"}
+                    and not str(result.get("tracking") or "").strip()
+                ):
+                    result.update(
+                        {
+                            "status": "failed",
+                            "reason_code": "invalid_writeback_identity",
+                            "reason_text": "製單結果缺少貨運單號，未進行回填。",
+                            "message": "製單結果缺少貨運單號，未進行回填。",
+                        }
+                    )
             successful_results = [
                 result
                 for result in results
                 if str(result.get("status") or "success").strip() in {"success", "completed"}
+                and str(result.get("tracking") or "").strip()
             ]
             failed_results = [
                 result
