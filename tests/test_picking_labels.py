@@ -2,6 +2,9 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -46,6 +49,7 @@ from bot.picking_pdf import (
 sys.modules.pop("bot.drive", None)
 from bot.drive import choose_safe_picking_filename, next_sequence_filename
 from bot.sheets import build_picking_done_updates
+import features.picking_labels as picking_labels
 
 
 def _header(max_items=2):
@@ -78,6 +82,24 @@ def _row(order_no="imy1", status="可出貨", done="", max_items=2, items=None):
         else:
             values.extend(["", "", "", "", ""])
     return values
+
+
+def _picking_payload_for_rows(*source_rows):
+    return picking_labels.PickingPayload(
+        orders=tuple(
+            PickingOrder(
+                source_row,
+                "2026/06/27",
+                "Official website - imy Shop",
+                f"imy{source_row}",
+                "郵便局",
+                [PickingItem(f"SKU{source_row}", "商品", "", "1", "")],
+            )
+            for source_row in source_rows
+        ),
+        warnings=("警告",),
+        diagnostics={"nested": {"source_rows": list(source_rows)}},
+    )
 
 
 def _anchored_duplicate_header(max_items=2):
@@ -541,6 +563,108 @@ class PickingLabelDriveTests(unittest.TestCase):
 
         self.assertEqual(filename, "260628-4揀貨標籤.pdf")
         self.assertNotIn(filename, {file["name"] for file in existing})
+
+
+class PickingPayloadTests(unittest.TestCase):
+    def _set_session_state(self, value):
+        original_session = picking_labels.st.session_state
+        picking_labels.st.session_state = value
+        self.addCleanup(setattr, picking_labels.st, "session_state", original_session)
+
+    def test_load_picking_payload_does_not_mutate_session_state(self):
+        session_state = {"sentinel": object()}
+        self._set_session_state(session_state)
+        expected_orders = _picking_payload_for_rows(3, 8).orders
+        source_values = [["source"]]
+        status_values = [["status"]]
+
+        with (
+            patch.object(
+                picking_labels,
+                "load_sheet_values",
+                side_effect=[source_values, status_values],
+            ) as load_sheet_values,
+            patch.object(
+                picking_labels,
+                "parse_picking_label_candidates",
+                return_value=(list(expected_orders), ["警告"]),
+            ) as parse_candidates,
+            patch.object(
+                picking_labels,
+                "build_picking_source_diagnostics",
+                return_value={"candidate_order_count": 2},
+            ),
+            patch.object(
+                picking_labels,
+                "get_registered_cjk_font_info",
+                return_value={"normal_font": "test-font"},
+            ),
+        ):
+            payload = picking_labels.load_picking_payload()
+
+        self.assertIs(picking_labels.st.session_state, session_state)
+        self.assertEqual(picking_labels.st.session_state, session_state)
+        self.assertEqual(payload.orders, expected_orders)
+        self.assertIsInstance(payload.orders, tuple)
+        self.assertEqual(load_sheet_values.call_count, 2)
+        parse_candidates.assert_called_once_with(
+            source_values,
+            shipping_deadlines=build_shipping_deadline_lookup(status_values),
+        )
+
+    def test_apply_picking_payload_preserves_only_valid_selected_rows(self):
+        self._set_session_state({"picking_selected_rows": {3, 8, 99}})
+        payload = _picking_payload_for_rows(3, 8, 10)
+
+        picking_labels.apply_picking_payload(payload, preserve_selection=True)
+
+        self.assertEqual(picking_labels.st.session_state["picking_selected_rows"], {3, 8})
+        self.assertEqual(picking_labels.st.session_state["picking_orders"], payload.orders)
+        self.assertEqual(picking_labels.st.session_state["picking_warnings"], payload.warnings)
+        self.assertEqual(picking_labels.st.session_state["picking_diagnostics"], payload.diagnostics)
+
+    def test_legacy_load_orders_delegates_to_payload_loader_and_apply(self):
+        payload = _picking_payload_for_rows(3)
+
+        with (
+            patch.object(picking_labels, "load_picking_payload", return_value=payload) as load_payload,
+            patch.object(picking_labels, "apply_picking_payload") as apply_payload,
+        ):
+            picking_labels._load_orders()
+
+        load_payload.assert_called_once_with()
+        apply_payload.assert_called_once()
+        args, kwargs = apply_payload.call_args
+        self.assertEqual(args, (payload,))
+        self.assertFalse(kwargs["preserve_selection"])
+        self.assertIsNotNone(kwargs["loaded_at"].tzinfo)
+
+
+class RefreshPayloadCopyTests(unittest.TestCase):
+    def test_copy_pending_payload_copies_dataframe(self):
+        from refresh_payloads import PendingPayload, copy_pending_payload
+
+        original = PendingPayload(pd.DataFrame([{"order": "imy1"}]), ("log",))
+
+        copied = copy_pending_payload(original)
+        copied.dataframe.loc[0, "order"] = "changed"
+
+        self.assertIsNot(copied.dataframe, original.dataframe)
+        self.assertEqual(original.dataframe.loc[0, "order"], "imy1")
+        self.assertEqual(copied.logs, ("log",))
+
+    def test_copy_picking_payload_deep_copies_orders_and_diagnostics(self):
+        from refresh_payloads import copy_picking_payload
+
+        original = _picking_payload_for_rows(3)
+
+        copied = copy_picking_payload(original)
+        copied.orders[0].items[0].name = "changed"
+        copied.diagnostics["nested"]["source_rows"].append(99)
+
+        self.assertIsNot(copied.orders[0], original.orders[0])
+        self.assertEqual(original.orders[0].items[0].name, "商品")
+        self.assertEqual(original.diagnostics["nested"]["source_rows"], [3])
 
 
 class PickingLabelUiTests(unittest.TestCase):

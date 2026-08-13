@@ -27,6 +27,7 @@ from bot.picking_labels import (
 )
 from bot.picking_pdf import get_registered_cjk_font_info, render_picking_labels_pdf
 from bot.sheets import batch_mark_picking_done, load_sheet_values
+from refresh_payloads import PickingPayload, copy_picking_payload
 
 
 def _config_value(name: str, default: str) -> str:
@@ -57,22 +58,52 @@ def _picking_output_drive_folder_id() -> str:
     return _config_value("PICKING_OUTPUT_DRIVE_FOLDER_ID", PICKING_OUTPUT_DRIVE_FOLDER_ID)
 
 
-def _load_orders() -> None:
+def load_picking_payload() -> PickingPayload:
     values = load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name())
     status_values = load_sheet_values(_shipping_status_spreadsheet_id(), _shipping_status_sheet_name())
     shipping_deadlines = build_shipping_deadline_lookup(status_values)
     orders, warnings = parse_picking_label_candidates(values, shipping_deadlines=shipping_deadlines)
-    st.session_state["picking_orders"] = orders
-    st.session_state["picking_warnings"] = warnings
     diagnostics = build_picking_source_diagnostics(values, orders, warnings)
     diagnostics["source_spreadsheet_id"] = _picking_source_spreadsheet_id()
     diagnostics["source_sheet"] = _picking_source_sheet_name()
     diagnostics["shipping_status_spreadsheet_id"] = _shipping_status_spreadsheet_id()
     diagnostics["shipping_status_sheet"] = _shipping_status_sheet_name()
     diagnostics["pdf_cjk_font"] = get_registered_cjk_font_info()
-    st.session_state["picking_diagnostics"] = diagnostics
-    st.session_state["picking_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
+    return PickingPayload(
+        orders=tuple(orders),
+        warnings=tuple(warnings),
+        diagnostics=diagnostics,
+    )
+
+
+def apply_picking_payload(
+    payload: PickingPayload,
+    *,
+    preserve_selection: bool,
+    loaded_at: datetime | None = None,
+) -> None:
+    copied = copy_picking_payload(payload)
+    valid_rows = {order.source_row_number for order in copied.orders}
+    if preserve_selection:
+        selected_rows = set(st.session_state.get("picking_selected_rows", set())) & valid_rows
+    else:
+        selected_rows = set(valid_rows)
+
+    st.session_state["picking_orders"] = copied.orders
+    st.session_state["picking_warnings"] = copied.warnings
+    st.session_state["picking_diagnostics"] = copied.diagnostics
+    st.session_state["picking_selected_rows"] = selected_rows
+    if loaded_at is not None:
+        st.session_state["picking_loaded_at"] = loaded_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _load_orders() -> None:
+    payload = load_picking_payload()
+    apply_picking_payload(
+        payload,
+        preserve_selection=False,
+        loaded_at=datetime.now().astimezone(),
+    )
 
 
 def _orders_to_dataframe(orders: list[PickingOrder], selected_rows: set[int]) -> pd.DataFrame:
