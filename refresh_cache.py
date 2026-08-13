@@ -10,6 +10,15 @@ from typing import Any, Callable, Generic, TypeVar
 T = TypeVar("T")
 
 
+def may_apply_pending_snapshot(
+    *,
+    is_busy: bool,
+    editor_dirty: bool,
+    allow_dirty_reset: bool = False,
+) -> bool:
+    return not is_busy and (allow_dirty_reset or not editor_dirty)
+
+
 @dataclass(frozen=True)
 class RefreshStatus:
     source: str

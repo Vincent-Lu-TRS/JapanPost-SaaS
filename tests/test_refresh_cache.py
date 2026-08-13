@@ -9,7 +9,7 @@ from threading import Barrier, Event, Lock
 
 import pandas as pd
 
-from refresh_cache import SharedRefreshCoordinator
+from refresh_cache import SharedRefreshCoordinator, may_apply_pending_snapshot
 
 
 class MutableClock:
@@ -316,6 +316,34 @@ class SharedRefreshCoordinatorTests(unittest.TestCase):
             self.assertFalse(waited.status.is_refreshing)
         finally:
             pool.shutdown(wait=True)
+
+
+class PendingSnapshotPolicyTests(unittest.TestCase):
+    def test_busy_session_never_applies_pending_snapshot(self) -> None:
+        self.assertFalse(
+            may_apply_pending_snapshot(
+                is_busy=True,
+                editor_dirty=False,
+                allow_dirty_reset=True,
+            )
+        )
+
+    def test_dirty_editor_blocks_automatic_snapshot_application(self) -> None:
+        self.assertFalse(
+            may_apply_pending_snapshot(
+                is_busy=False,
+                editor_dirty=True,
+            )
+        )
+
+    def test_explicit_reset_allows_dirty_snapshot_application(self) -> None:
+        self.assertTrue(
+            may_apply_pending_snapshot(
+                is_busy=False,
+                editor_dirty=True,
+                allow_dirty_reset=True,
+            )
+        )
 
 
 if __name__ == "__main__":

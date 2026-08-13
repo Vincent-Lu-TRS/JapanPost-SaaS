@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from safe_logging import safe_log_event
 
 from .countries import resolve_country_code
 
@@ -312,7 +313,35 @@ def read_completed_order_ids(client: gspread.Client | None = None) -> set[str]:
     }
 
 
-def get_pending_orders(log_cb=None) -> pd.DataFrame:
+def _pending_read_failure(exc: Exception, log_cb, *, strict: bool) -> pd.DataFrame:
+    safe_log_event(
+        log_cb or logging.error,
+        "pending_read_failed",
+        error_type=type(exc).__name__,
+    )
+    if strict:
+        if isinstance(exc, PermissionError):
+            code = "pending_read_permission_denied"
+        elif isinstance(exc, (TimeoutError, ConnectionError)):
+            code = "pending_read_network"
+        else:
+            error_name = type(exc).__name__.lower()
+            if any(token in error_name for token in ("permission", "forbidden", "unauthorized")):
+                code = "pending_read_permission_denied"
+            elif any(token in error_name for token in ("timeout", "connection", "network")):
+                code = "pending_read_network"
+            else:
+                code = "pending_read_failed"
+        raise RuntimeError(code) from None
+    return pd.DataFrame()
+
+
+def get_pending_orders(
+    log_cb=None,
+    *,
+    strict: bool = False,
+    exclude_completed: bool = True,
+) -> pd.DataFrame:
     """
     從來源表單取得待打單清單，並執行雙重過濾防重製：
     1. 篩選狀態為「未打單」且必要欄位不為空
@@ -336,8 +365,7 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         sh_source = client.open_by_key(SOURCE_SHEET_ID)
         ws_source = _get_worksheet_by_gid(sh_source, SOURCE_GID)
         if not ws_source:
-            _log(f"❌ 找不到來源表單 GID {SOURCE_GID}")
-            return pd.DataFrame()
+            raise RuntimeError("source worksheet unavailable")
 
         _log(f"🌐 讀取來源表單：{sh_source.title}")
         all_values = ws_source.get_all_values()
@@ -370,16 +398,19 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         )
 
         # ── 🔥 雙重過濾：即時讀取目標表單已完成單號 ──────
-        try:
-            target_started_at = time.perf_counter()
-            completed_ids = read_completed_order_ids(client)
-            _log(
-                "⏱️ 目標表 C 欄讀取完成："
-                f"{len(completed_ids)} 個完成單號，耗時 {time.perf_counter() - target_started_at:.1f}s"
-            )
-        except Exception as e:
-            _log(f"❌ 無法讀取目標表單，已停止本次待製單讀取（fail-closed）: {e}")
-            return pd.DataFrame()
+        completed_ids: set[str] = set()
+        if exclude_completed:
+            try:
+                target_started_at = time.perf_counter()
+                completed_ids = read_completed_order_ids(client)
+                _log(
+                    "⏱️ 目標表 C 欄讀取完成："
+                    f"{len(completed_ids)} 個完成單號，耗時 {time.perf_counter() - target_started_at:.1f}s"
+                )
+            except Exception as exc:
+                if strict:
+                    raise
+                return _pending_read_failure(exc, log_cb, strict=strict)
 
         df_filtered = _filter_pending_orders_dataframe(
             df,
@@ -392,11 +423,8 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
 
         return df_filtered
 
-    except Exception as e:
-        logging.error(f"❌ 取得待打單清單失敗: {e}")
-        if log_cb:
-            log_cb(f"❌ 取得待打單清單失敗: {e}")
-        return pd.DataFrame()
+    except Exception as exc:
+        return _pending_read_failure(exc, log_cb, strict=strict)
 
 
 def backfill_results(results: list[dict], log_cb=None):

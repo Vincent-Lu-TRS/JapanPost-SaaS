@@ -13,19 +13,40 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertNotIn("pending_start_requested", app_source)
         self.assertNotIn("confirm_start_job", app_source)
 
-    def test_pending_orders_load_only_after_manual_reload_request(self):
+    def test_pending_and_picking_snapshots_load_automatically_and_independently(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
-        self.assertIn(
-            'pending_manual_reload_requested = bool(st.session_state.pop("pending_manual_reload_requested", False))',
-            app_source,
-        )
-        self.assertIn("if pending_manual_reload_requested:", app_source)
-        self.assertNotIn(
-            'if not isinstance(cached_pending, pd.DataFrame):\n'
-            '            with st.spinner("讀取 Google Sheets 待打單資料..."):',
-            app_source,
-        )
+        render_body = app_source[app_source.index("def _render_main_app():"):]
+        self.assertIn('_refresh_source("pending", force=False)', render_body)
+        self.assertIn('_refresh_source("picking", force=False)', render_body)
+        self.assertNotIn("pending_manual_reload_requested", render_body)
+
+    def test_refresh_coordinator_and_active_fragment_are_wired(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn('@st.fragment(run_every="20m")', app_source)
+        self.assertIn("def _active_refresh_tick(*, is_busy: bool, job)", app_source)
+        self.assertIn("allow_dirty_reset=False", app_source)
+        self.assertIn("preserve_selection=True", app_source)
+        self.assertIn("SharedRefreshCoordinator(ttl=timedelta(minutes=20))", app_source)
+
+    def test_manual_reload_forces_shared_snapshot_without_clearing_last_good_data(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        picking_source = (ROOT / "features" / "picking_labels.py").read_text(encoding="utf-8")
+
+        self.assertIn('_refresh_source("pending", force=True)', app_source)
+        self.assertIn('refresh_source("picking", force=True)', picking_source)
+        self.assertNotIn('st.session_state.pop("last_pending_df", None)', app_source)
+
+    def test_v2_editable_widgets_mark_pending_editor_dirty(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _mark_pending_editor_dirty()", app_source)
+        v2_body = app_source[
+            app_source.index("def _render_postal_pending_v2("):
+            app_source.index("def _render_running_progress(")
+        ]
+        self.assertGreaterEqual(v2_body.count("on_change=_mark_pending_editor_dirty"), 6)
 
     def test_playwright_install_is_deferred_until_postal_job_start(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -117,9 +138,9 @@ class PostalStartFlowTests(unittest.TestCase):
             '<div class="postal-v2-list-heading">待製單訂單</div>',
             app_source,
         )
-        self.assertIn('st.text_input("姓名", value=pending_name, key=name_key)', app_source)
+        self.assertIn('"姓名",\n                                value=pending_name,', app_source)
         self.assertIn('                                "寄送方式",', app_source)
-        self.assertIn('st.selectbox("追加製作", options=extra_options, key=extra_trans_key)', app_source)
+        self.assertIn('"追加製作",\n                                options=extra_options,', app_source)
         self.assertIn(
             '[.58, 1.75, 2.45, .86, .86, 1.0],',
             app_source,

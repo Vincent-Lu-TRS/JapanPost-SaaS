@@ -668,7 +668,7 @@ class RefreshPayloadCopyTests(unittest.TestCase):
 
 
 class PickingLabelUiTests(unittest.TestCase):
-    def test_initial_render_does_not_auto_load_google_sheets(self):
+    def test_renderer_uses_snapshot_loaded_by_app_without_direct_sheet_read(self):
         import features.picking_labels as picking_ui
 
         class FakeColumn:
@@ -704,7 +704,7 @@ class PickingLabelUiTests(unittest.TestCase):
                 return df
 
             def rerun(self):
-                raise AssertionError("Initial picking-label render should not rerun.")
+                raise AssertionError("Snapshot render should not rerun.")
 
         fake_st = FakeStreamlit()
         original_st = picking_ui.st
@@ -713,7 +713,7 @@ class PickingLabelUiTests(unittest.TestCase):
             picking_ui.st = fake_st
 
             def fail_if_called(*args, **kwargs):
-                raise AssertionError("Initial picking-label render should not call Google Sheets.")
+                raise AssertionError("Snapshot render should not call Google Sheets directly.")
 
             picking_ui.load_sheet_values = fail_if_called
 

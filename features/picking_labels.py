@@ -153,10 +153,10 @@ def _preview_pdf(selected_orders: list[PickingOrder]) -> None:
         st.json(build_picking_label_summary(selected_orders))
 
 
-def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
+def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
     if not selected_orders:
         st.warning("請先選取至少一筆訂單。")
-        return
+        return False
 
     row_numbers = {order.source_row_number for order in selected_orders}
     with st.spinner("重新確認來源表狀態..."):
@@ -168,7 +168,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
 
     if len(fresh_selected) != len(selected_orders):
         st.error("部分訂單已不符合可製作條件，請重新讀取後再試。")
-        return
+        return False
 
     def _mark_done_after_revalidation(_rows: list[int]) -> list[int]:
         resolved_rows = resolve_picking_done_row_numbers(
@@ -192,8 +192,8 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
     except Exception as exc:
-        st.error(f"正式產生前檢查 Google Drive 檔名失敗，已中止：{exc}")
-        return
+        st.error("正式產生前檢查 Google Drive 檔名失敗，已中止。")
+        return False
 
     output_path = Path(result.local_path)
     if not result.success and not result.drive_file:
@@ -205,7 +205,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
             mime="application/pdf",
             width="stretch",
         )
-        return
+        return False
 
     if not result.success and result.drive_file:
         st.error(
@@ -214,15 +214,15 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
         )
         if result.drive_file.get("webViewLink"):
             st.link_button("開啟已上傳 PDF", result.drive_file["webViewLink"])
-        return
+        return False
 
     st.success(f"完成：{result.filename}，已標記來源列：{', '.join(str(row) for row in result.marked_rows)}")
     if result.drive_file and result.drive_file.get("webViewLink"):
         st.link_button("開啟 Google Drive PDF", result.drive_file["webViewLink"])
-    _load_orders()
+    return True
 
 
-def render_picking_label_tab() -> None:
+def render_picking_label_tab(refresh_source=None) -> None:
     st.info("列印設定：PDF檔尺寸為 100mm × 150mm，請使用對應Label大小輸出。")
 
     has_loaded_orders = "picking_orders" in st.session_state
@@ -310,13 +310,35 @@ def render_picking_label_tab() -> None:
         width="stretch",
         disabled=not has_selection,
     ):
-        _generate_and_upload(selected_orders)
+        if _generate_and_upload(selected_orders):
+            if refresh_source is None:
+                _load_orders()
+            else:
+                refresh_result = refresh_source("picking", force=True)
+                if refresh_result.data is not None:
+                    apply_picking_payload(
+                        refresh_result.data,
+                        preserve_selection=False,
+                        loaded_at=refresh_result.status.loaded_at,
+                    )
+                    st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
     if actions[1].button("重新讀取", width="stretch"):
         try:
-            _load_orders()
+            if refresh_source is None:
+                _load_orders()
+            else:
+                refresh_result = refresh_source("picking", force=True)
+                if refresh_result.data is None:
+                    raise RuntimeError("picking_refresh_failed")
+                apply_picking_payload(
+                    refresh_result.data,
+                    preserve_selection=False,
+                    loaded_at=refresh_result.status.loaded_at,
+                )
+                st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
             st.rerun()
-        except Exception as exc:
-            st.error(f"重新讀取失敗：{exc}")
+        except Exception:
+            st.error("重新讀取失敗，請稍後再試。")
     if actions[2].button("全選", width="stretch", disabled=not orders):
         st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
         st.rerun()

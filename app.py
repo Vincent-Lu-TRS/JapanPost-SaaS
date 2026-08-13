@@ -8,7 +8,7 @@ os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
 
 import hashlib
 import html
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess
 import sys
@@ -55,6 +55,17 @@ from postal_ui_v2 import (
     format_secondary_rate_badge,
     restore_v2_item_frame,
 )
+from refresh_cache import (
+    RefreshResult,
+    SharedRefreshCoordinator,
+    may_apply_pending_snapshot,
+)
+from refresh_payloads import (
+    PendingPayload,
+    copy_pending_payload,
+    copy_picking_payload,
+)
+from features.picking_labels import apply_picking_payload, load_picking_payload
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -114,6 +125,13 @@ def _get_job_registry(cache_version: str = _JOB_REGISTRY_CACHE_VERSION) -> Batch
 _JOB_REGISTRY = _get_job_registry(_JOB_REGISTRY_CACHE_VERSION)
 
 
+@st.cache_resource(show_spinner=False)
+def _get_refresh_coordinator(
+    cache_version="2026-08-13-v1",
+) -> SharedRefreshCoordinator:
+    return SharedRefreshCoordinator(ttl=timedelta(minutes=20))
+
+
 def _job_lock_path(email: str) -> Path:
     digest = hashlib.sha256((email or "anonymous").encode("utf-8")).hexdigest()[:24]
     return Path(tempfile.gettempdir()) / "jppost-job-locks" / f"{digest}.lock"
@@ -150,12 +168,137 @@ def _get_job(email: str) -> dict | None:
     return _JOB_REGISTRY.get(email)
 
 
-def _load_pending_orders() -> tuple[pd.DataFrame, list[str]]:
+def _load_pending_orders(
+    *,
+    strict: bool = False,
+    exclude_completed: bool = True,
+) -> tuple[pd.DataFrame, list[str]]:
     from bot.sheets import get_pending_orders
 
     pending_logs: list[str] = []
-    df_pending = get_pending_orders(log_cb=pending_logs.append)
+    df_pending = get_pending_orders(
+        log_cb=pending_logs.append,
+        strict=strict,
+        exclude_completed=exclude_completed,
+    )
     return df_pending, pending_logs
+
+
+def load_pending_payload() -> PendingPayload:
+    dataframe, logs = _load_pending_orders(strict=True, exclude_completed=True)
+    return PendingPayload(dataframe=dataframe, logs=tuple(logs))
+
+
+def _refresh_source(source: str, *, force: bool):
+    coordinator = _get_refresh_coordinator()
+    if source == "pending":
+        return coordinator.get(
+            source,
+            load_pending_payload,
+            force=force,
+            copier=copy_pending_payload,
+        )
+    if source == "picking":
+        return coordinator.get(
+            source,
+            load_picking_payload,
+            force=force,
+            copier=copy_picking_payload,
+        )
+    raise ValueError(f"unknown refresh source: {source}")
+
+
+def _mark_pending_editor_dirty() -> None:
+    st.session_state["pending_editor_dirty"] = True
+
+
+def _clear_pending_editor_keys() -> None:
+    prefixes = (
+        "pending_v2_name_",
+        "pending_v2_trans_",
+        "pending_v2_extra_trans_",
+        "pending_v2_prc_id_",
+        "pending_v2_pccc_",
+        "pending_v2_items_",
+    )
+    for key in list(st.session_state):
+        if str(key).startswith(prefixes):
+            st.session_state.pop(key, None)
+
+
+def _apply_pending_result(
+    result: RefreshResult[PendingPayload],
+    *,
+    is_busy: bool,
+    allow_dirty_reset: bool = False,
+    job=None,
+) -> bool:
+    if result.data is None or not may_apply_pending_snapshot(
+        is_busy=is_busy,
+        editor_dirty=bool(st.session_state.get("pending_editor_dirty")),
+        allow_dirty_reset=allow_dirty_reset,
+    ):
+        return False
+
+    payload = copy_pending_payload(result.data)
+    dataframe = payload.dataframe.copy(deep=True)
+    if job and job.get("results"):
+        dataframe = filter_pending_orders_after_batch(dataframe, job["results"])
+    logs = list(payload.logs)
+    st.session_state["last_pending_df"] = dataframe
+    st.session_state["last_pending_logs"] = logs
+    st.session_state["last_pending_loaded_at"] = result.status.loaded_at
+    st.session_state["last_pending_read_summary"] = summarize_pending_read_logs(logs)
+    st.session_state["last_pending_error"] = result.status.error_code or ""
+    return True
+
+
+if not hasattr(st, "fragment"):
+    st.fragment = lambda **_kwargs: (lambda function: function)
+
+
+@st.fragment(run_every="20m")
+def _active_refresh_tick(*, is_busy: bool, job) -> None:
+    before_pending = st.session_state.get("last_pending_loaded_at")
+    before_picking = st.session_state.get("picking_snapshot_loaded_at")
+    applied = False
+
+    try:
+        pending_result = _refresh_source("pending", force=False)
+        applied = _apply_pending_result(
+            pending_result,
+            is_busy=is_busy,
+            allow_dirty_reset=False,
+            job=job,
+        ) or applied
+    except Exception:
+        pending_result = None
+
+    try:
+        picking_result = _refresh_source("picking", force=False)
+        if picking_result.data is not None:
+            apply_picking_payload(
+                picking_result.data,
+                preserve_selection=True,
+                loaded_at=picking_result.status.loaded_at,
+            )
+            st.session_state["picking_snapshot_loaded_at"] = picking_result.status.loaded_at
+            applied = True
+    except Exception:
+        picking_result = None
+
+    changed = (
+        pending_result is not None
+        and pending_result.status.loaded_at != before_pending
+    ) or (
+        picking_result is not None
+        and picking_result.status.loaded_at != before_picking
+    )
+    if applied and changed:
+        try:
+            st.rerun(scope="app")
+        except TypeError:
+            st.rerun()
 
 
 def _visible_pending_logs(logs: list[str]) -> list[str]:
@@ -611,8 +754,6 @@ def _render_postal_pending_v2(
     pending_count: int,
     done: int,
     batch_summary: dict,
-    pending_manual_reload_requested: bool,
-    pending_read_error: str,
 ) -> None:
     """Render the isolated v2 postal page using the existing job pipeline."""
     st.markdown('<span class="postal-v2-page-marker"></span>', unsafe_allow_html=True)
@@ -742,17 +883,31 @@ def _render_postal_pending_v2(
                 )
 
                 if reload_requested:
-                    st.session_state.pop("last_pending_df", None)
-                    st.session_state.pop("last_pending_logs", None)
-                    st.session_state.pop("pending_refresh_notice", None)
-                    st.session_state.pop("pending_selected_by_order", None)
-                    st.session_state.pop("pending_v2_selected_by_order", None)
-                    st.session_state["pending_manual_reload_requested"] = True
+                    pending_result = _refresh_source("pending", force=True)
+                    if _apply_pending_result(
+                        pending_result,
+                        is_busy=is_busy,
+                        allow_dirty_reset=False,
+                        job=job,
+                    ):
+                        st.session_state.pop("pending_refresh_warning", None)
+                    else:
+                        st.session_state["pending_refresh_warning"] = (
+                            "目前有尚未送出的編輯，已保留畫面資料。"
+                        )
                     st.rerun()
-                if reset_all_requested and not df_pending.empty:
-                    st.session_state.pop("pending_v2_selected_by_order", None)
-                    _v2_reset_all_order_editors(df_pending, editable_count)
-                    st.rerun()
+                if reset_all_requested:
+                    pending_result = _refresh_source("pending", force=True)
+                    if _apply_pending_result(
+                        pending_result,
+                        is_busy=is_busy,
+                        allow_dirty_reset=True,
+                        job=job,
+                    ):
+                        st.session_state["pending_editor_dirty"] = False
+                        st.session_state.pop("pending_v2_selected_by_order", None)
+                        _clear_pending_editor_keys()
+                        st.rerun()
 
                 if start_requested:
                     if df_pending.empty:
@@ -772,16 +927,13 @@ def _render_postal_pending_v2(
                         else:
                             st.error("任務執行中，請稍候")
 
-                if pending_manual_reload_requested and not is_busy:
-                    if pending_read_error:
-                        st.warning(f"重新讀取失敗：{pending_read_error}")
-                    else:
-                        read_summary = st.session_state.get("last_pending_read_summary") or {}
-                        st.success(
-                            "重新讀取完成："
-                            f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
-                            f"耗時 {read_summary.get('elapsed', '-')}。"
-                        )
+                pending_loaded_at = st.session_state.get("last_pending_loaded_at")
+                if isinstance(pending_loaded_at, datetime):
+                    st.caption(f"資料更新於 {pending_loaded_at.astimezone().strftime('%H:%M')}")
+                if st.session_state.get("last_pending_error"):
+                    st.warning("目前顯示上次成功讀取的資料，請稍後再試。")
+                elif st.session_state.get("pending_refresh_warning"):
+                    st.warning(st.session_state["pending_refresh_warning"])
                 if not rate and not df_pending.empty:
                     st.warning(
                         "暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，"
@@ -928,7 +1080,12 @@ def _render_postal_pending_v2(
                                 vertical_alignment="center",
                             )
                         with action_cols[0]:
-                            edited_name = st.text_input("姓名", value=pending_name, key=name_key)
+                            edited_name = st.text_input(
+                                "姓名",
+                                value=pending_name,
+                                key=name_key,
+                                on_change=_mark_pending_editor_dirty,
+                            )
                         with action_cols[1]:
                             trans_type = st.selectbox(
                                 "寄送方式",
@@ -937,6 +1094,7 @@ def _render_postal_pending_v2(
                                 if default_trans_type in SHIPPING_OPTIONS
                                 else 0,
                                 key=trans_key,
+                                on_change=_mark_pending_editor_dirty,
                             )
                         extra_options = ["無"] + SHIPPING_OPTIONS
                         if st.session_state.get(extra_trans_key, "無") not in extra_options:
@@ -944,15 +1102,30 @@ def _render_postal_pending_v2(
                         if extra_trans_key not in st.session_state:
                             st.session_state[extra_trans_key] = "無"
                         with action_cols[2]:
-                            st.selectbox("追加製作", options=extra_options, key=extra_trans_key)
+                            st.selectbox(
+                                "追加製作",
+                                options=extra_options,
+                                key=extra_trans_key,
+                                on_change=_mark_pending_editor_dirty,
+                            )
                         edited_prc_id = pending_prc_id
                         edited_pccc = pending_pccc
                         if kind == "china":
                             with action_cols[3]:
-                                edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
+                                edited_prc_id = st.text_input(
+                                    "PRC ID",
+                                    value=pending_prc_id,
+                                    key=prc_id_key,
+                                    on_change=_mark_pending_editor_dirty,
+                                )
                         elif kind == "korea":
                             with action_cols[3]:
-                                edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
+                                edited_pccc = st.text_input(
+                                    "PCCC",
+                                    value=pending_pccc,
+                                    key=pccc_key,
+                                    on_change=_mark_pending_editor_dirty,
+                                )
                         with action_cols[-1]:
                             if st.button(
                                 "恢復預設",
@@ -993,6 +1166,7 @@ def _render_postal_pending_v2(
                                 "Quantity": st.column_config.TextColumn("數量", width=90),
                             },
                             key=item_key,
+                            on_change=_mark_pending_editor_dirty,
                         )
                         edited_items_by_position[position] = restore_v2_item_frame(edited_display_frame)
 
@@ -1388,6 +1562,17 @@ def _render_login_page():
 
 
 def _render_main_app():
+    pending_initial_result = None
+    picking_initial_result = None
+    try:
+        pending_initial_result = _refresh_source("pending", force=False)
+    except Exception:
+        pass
+    try:
+        picking_initial_result = _refresh_source("picking", force=False)
+    except Exception:
+        pass
+
     email = st.session_state.get("user_email", "")
     name = st.session_state.get("user_name", email)
     picture = st.session_state.get("user_picture", "")
@@ -2337,42 +2522,43 @@ def _render_main_app():
     is_launching = bool(st.session_state.get("job_launching"))
     is_busy = is_running or is_launching
 
-    df_pending = pd.DataFrame()
-    pending_count = 0
-    pending_logs: list[str] = []
-    pending_manual_reload_requested = False
-    pending_read_error = ""
-    if is_busy:
-        df_pending = st.session_state.get("last_pending_df", pd.DataFrame())
-        pending_logs = st.session_state.get("last_pending_logs", [])
-        pending_count = len(df_pending)
+    if pending_initial_result is not None:
+        _apply_pending_result(
+            pending_initial_result,
+            is_busy=is_busy,
+            allow_dirty_reset=False,
+            job=job,
+        )
+    if picking_initial_result is not None and picking_initial_result.data is not None:
+        picking_was_loaded = "picking_orders" in st.session_state
+        apply_picking_payload(
+            picking_initial_result.data,
+            preserve_selection=picking_was_loaded,
+            loaded_at=picking_initial_result.status.loaded_at,
+        )
+        st.session_state["picking_snapshot_loaded_at"] = picking_initial_result.status.loaded_at
+
+    refresh_notice = bool(job and job.pop("pending_refresh_needed", False))
+    if refresh_notice and not is_busy:
+        st.session_state["pending_refresh_notice"] = True
+        completed_refresh = _refresh_source("pending", force=True)
+        if _apply_pending_result(
+            completed_refresh,
+            is_busy=is_busy,
+            allow_dirty_reset=True,
+            job=job,
+        ):
+            st.session_state["pending_editor_dirty"] = False
+            _clear_pending_editor_keys()
+
+    cached_pending = st.session_state.get("last_pending_df")
+    if isinstance(cached_pending, pd.DataFrame):
+        df_pending = cached_pending
+        pending_logs = list(st.session_state.get("last_pending_logs", []))
     else:
-        pending_manual_reload_requested = bool(st.session_state.pop("pending_manual_reload_requested", False))
-        refresh_notice = bool(job and job.pop("pending_refresh_needed", False))
-        if refresh_notice:
-            st.session_state["pending_refresh_notice"] = True
-        cached_pending = st.session_state.get("last_pending_df")
-        cached_logs = st.session_state.get("last_pending_logs", [])
-        if isinstance(cached_pending, pd.DataFrame):
-            df_pending = cached_pending
-            pending_logs = cached_logs
-            pending_count = len(df_pending)
-        else:
-            df_pending = pd.DataFrame()
-            pending_logs = []
-            pending_count = 0
-        if pending_manual_reload_requested:
-            with st.spinner("讀取 Google Sheets 待打單資料..."):
-                try:
-                    df_pending, pending_logs = _load_pending_orders()
-                    pending_count = len(df_pending)
-                    st.session_state.last_pending_df = df_pending
-                    st.session_state.last_pending_logs = pending_logs
-                    st.session_state.last_pending_loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    st.session_state.last_pending_read_summary = summarize_pending_read_logs(pending_logs)
-                except Exception as e:
-                    pending_read_error = str(e)
-                    st.warning(f"無法讀取 Google Sheets：{e}")
+        df_pending = pd.DataFrame()
+        pending_logs = []
+    pending_count = len(df_pending)
 
     if not is_busy and job and job.get("results"):
         filtered_pending = filter_pending_orders_after_batch(df_pending, job["results"])
@@ -2409,13 +2595,15 @@ def _render_main_app():
     batch_summary = summarize_batch_results((job or {}).get("results") or [])
     done = int(batch_summary["completed_count"])
 
+    _active_refresh_tick(is_busy=is_busy, job=job)
+
     picking_tab, preview_tab, postal_v2_tab, guide_tab, diagnostics_tab = st.tabs(
         ["跨境揀貨單", "郵局待打單", "郵局待打單（新版測試）", "使用說明", "讀取診斷"]
     )
 
     with picking_tab:
         picking_labels_module = import_module_with_retry("features.picking_labels")
-        picking_labels_module.render_picking_label_tab()
+        picking_labels_module.render_picking_label_tab(refresh_source=_refresh_source)
 
     with preview_tab:
         toolbar_info_cols = st.columns([1.75, 1, 1, 1], gap="medium", vertical_alignment="center")
@@ -2482,11 +2670,13 @@ def _render_main_app():
                 if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
                     st.rerun()
             elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
-                st.session_state.pop("last_pending_df", None)
-                st.session_state.pop("last_pending_logs", None)
-                st.session_state.pop("pending_refresh_notice", None)
-                st.session_state.pop("pending_selected_by_order", None)
-                st.session_state["pending_manual_reload_requested"] = True
+                pending_result = _refresh_source("pending", force=True)
+                _apply_pending_result(
+                    pending_result,
+                    is_busy=is_busy,
+                    allow_dirty_reset=False,
+                    job=job,
+                )
                 st.rerun()
         with toolbar_action_cols[5]:
             reset_all_requested = st.button(
@@ -2496,20 +2686,18 @@ def _render_main_app():
                 disabled=is_busy or df_pending.empty,
             )
 
-        if reset_all_requested and not df_pending.empty:
-            st.session_state.pop("pending_selected_by_order", None)
-            _reset_all_order_editors(df_pending.head(editable_count))
-            st.rerun()
-        read_summary = st.session_state.get("last_pending_read_summary") or summarize_pending_read_logs(pending_logs)
-        if pending_manual_reload_requested and not is_busy:
-            if pending_read_error:
-                st.warning(f"重新讀取失敗：{pending_read_error}")
-            else:
-                st.success(
-                    "重新讀取完成："
-                    f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
-                    f"耗時 {read_summary.get('elapsed', '-')}。"
-                )
+        if reset_all_requested:
+            pending_result = _refresh_source("pending", force=True)
+            if _apply_pending_result(
+                pending_result,
+                is_busy=is_busy,
+                allow_dirty_reset=True,
+                job=job,
+            ):
+                st.session_state["pending_editor_dirty"] = False
+                st.session_state.pop("pending_selected_by_order", None)
+                _reset_all_order_editors(df_pending.head(editable_count))
+                st.rerun()
         if not rate and not df_pending.empty:
             st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
         if is_busy and zero_value_warnings:
@@ -2765,8 +2953,6 @@ def _render_main_app():
             pending_count=pending_count,
             done=done,
             batch_summary=batch_summary,
-            pending_manual_reload_requested=pending_manual_reload_requested,
-            pending_read_error=pending_read_error,
         )
 
     with guide_tab:

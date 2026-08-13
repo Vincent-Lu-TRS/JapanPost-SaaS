@@ -15,6 +15,7 @@ APP_TEST_SCRIPT = textwrap.dedent(
 
     import pandas as pd
     from streamlit.testing.v1 import AppTest
+    from refresh_payloads import PickingPayload
 
     mock_pending = pd.DataFrame(
         [
@@ -54,7 +55,9 @@ APP_TEST_SCRIPT = textwrap.dedent(
     )
 
     app = AppTest.from_file(str(Path.cwd() / "app.py"))
-    with patch("fx_rates.fetch_usd_jpy_rate", return_value=(157.79, "2026-08-07", "mock")):
+    with patch("fx_rates.fetch_usd_jpy_rate", return_value=(157.79, "2026-08-07", "mock")), \
+         patch("bot.sheets.get_pending_orders", return_value=mock_pending.copy(deep=True)), \
+         patch("features.picking_labels.load_picking_payload", return_value=PickingPayload((), (), {})):
         app.run(timeout=30)
         app.session_state["authenticated"] = True
         app.session_state["user_email"] = "tester@tkrjm.co.jp"

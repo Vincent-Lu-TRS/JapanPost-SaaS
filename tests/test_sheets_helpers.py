@@ -2,6 +2,7 @@ import sys
 import types
 import re
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -9,7 +10,7 @@ sys.modules.setdefault(
     "gspread",
     types.SimpleNamespace(Client=object, authorize=lambda *_args, **_kwargs: None),
 )
-sys.modules.setdefault("streamlit", types.SimpleNamespace(secrets={}))
+sys.modules.setdefault("streamlit", types.SimpleNamespace(secrets={}, session_state={}))
 
 import bot.sheets as sheets_module
 
@@ -20,11 +21,96 @@ from bot.sheets import (
     _prefer_shipping_method_rows,
     _shipping_priority,
     backfill_results,
+    get_pending_orders,
     resolve_country_code,
 )
 
 
 class SheetsHelperTests(unittest.TestCase):
+    def test_get_pending_orders_strict_permission_failure_uses_safe_code(self):
+        logs = []
+
+        with patch.object(
+            sheets_module,
+            "_get_gspread_client",
+            side_effect=PermissionError("private-sheet@example.com ORDER-8490"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^pending_read_permission_denied$",
+            ) as raised:
+                get_pending_orders(log_cb=logs.append, strict=True)
+
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual(logs, ["pending_read_failed error_type=PermissionError"])
+        self.assertNotIn("private-sheet", " ".join(logs))
+
+    def test_get_pending_orders_non_strict_failure_returns_empty_dataframe(self):
+        logs = []
+
+        with patch.object(
+            sheets_module,
+            "_get_gspread_client",
+            side_effect=ConnectionError("token=secret"),
+        ):
+            result = get_pending_orders(log_cb=logs.append, strict=False)
+
+        self.assertTrue(result.empty)
+        self.assertEqual(logs, ["pending_read_failed error_type=ConnectionError"])
+
+    def test_get_pending_orders_default_remains_non_strict(self):
+        with patch.object(
+            sheets_module,
+            "_get_gspread_client",
+            side_effect=RuntimeError("private details"),
+        ):
+            result = get_pending_orders()
+
+        self.assertTrue(result.empty)
+
+    def test_get_pending_orders_can_skip_completed_target_read(self):
+        header = [
+            "注文番号(貼上原始資料)",
+            "製單上傳狀態(請用[未打單]檢視模式)",
+            "郵局申告金額(USD)",
+            "製單檢核",
+            "Shipping Name",
+            "郵局運送方式(複數商品請自行確認是否走小包)",
+        ]
+        values = [
+            header,
+            ["ORDER-1", "未打單", "1.00", "", "Receiver", "ePacket"],
+        ]
+
+        class FakeWorksheet:
+            def get_all_values(self):
+                return values
+
+        class FakeSpreadsheet:
+            title = "source"
+
+            def get_worksheet_by_id(self, _gid):
+                return FakeWorksheet()
+
+        class FakeClient:
+            def open_by_key(self, key):
+                self.opened = key
+                return FakeSpreadsheet()
+
+        with (
+            patch.object(sheets_module, "_get_gspread_client", return_value=FakeClient()),
+            patch.object(
+                sheets_module,
+                "read_completed_order_ids",
+                side_effect=AssertionError("completed target should not be read"),
+            ),
+        ):
+            result = get_pending_orders(exclude_completed=False)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["_source_row_number"], "2")
+        self.assertTrue(result.iloc[0]["_source_fingerprint"])
+
     def test_backfill_results_writes_eu_for_formula_dictionary_europe_country(self):
         class FakeWorksheet:
             id = int(sheets_module.TARGET_GID)
