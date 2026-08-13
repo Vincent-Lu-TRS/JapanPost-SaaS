@@ -1,0 +1,1793 @@
+# JapanPost-SaaS Cache, Entry, and Writeback Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 讓使用者進站即取得兩份待處理資料、以 20 分鐘共享快照降低等待時間、將新版郵局頁面整理為唯一入口，並使製單回填具備擴列、追加製單識別、逐包裹讀回驗證與明確失敗狀態。
+
+**Architecture:** 以純 Python `SharedRefreshCoordinator` 管理 process 內、分資料源、單飛且可保留舊資料的共享快照；Streamlit 只用 `st.cache_resource` 保存協調器並在安全狀態套用資料副本。Google Sheets 回填仍集中於 `bot/sheets.py`，但改成先建立逐包裹分類、擴充 grid、批次寫入，再逐列驗證 B/C/D/J；頁面依每筆 outcome 更新工作狀態。舊郵局 renderer 移除，新版 renderer 與既有製單後端維持單一路徑。
+
+**Tech Stack:** Python 3、Streamlit 1.56、pandas、gspread、`unittest`、Streamlit AppTest、Git。
+
+---
+
+## Scope and non-negotiable gates
+
+- 本計畫只修改本機 `codex/jppost-cache-entry-writeback-20260813` 分支。
+- 應用程式實作前，工作階段必須使用使用者指定的 GPT-5.6 Luna、reasoning effort `max`。目前工作階段若不可切換，停在此計畫，不開始 Task 1。
+- 每個既有檔案首次修改前，先複製到 repo 的 `backups/20260813_<原檔名>`；同日重名依治理規則加 `-2`。備份不得加入 Git。
+- 現有未追蹤 `.planning/`、`backups/`、`tmp/` 都視為使用者檔案，不刪除、不搬移、不納入 commit；禁止 `git add .`。
+- 所有測試使用 synthetic data／fake worksheet；不得讀寫正式 Google Sheet、不得執行日本郵政正式製單。
+- 分支 push、PR、正式 Streamlit 部署與正式工作表驗證都需另取得使用者同意。
+- Community Cloud 休眠期間不執行 20 分鐘刷新；本計畫不建立 keep-alive。
+- 跨 process 的「已產生 tracking 但完全未回填」自動恢復需要持久運單帳本，不在本次範圍。當現有證據不足時必須待人工確認，不得重新製單。
+
+## File responsibility map
+
+- Create `refresh_cache.py`: thread-safe TTL、single-flight、stale fallback、錯誤分類與 copy isolation。
+- Create `refresh_payloads.py`: 郵局與揀貨資料的 frozen payload，以及明確的深拷貝函式。
+- Modify `features/picking_labels.py`: 將 Google Sheets 讀取與 session 套用拆開，保留選取狀態。
+- Modify `app.py`: 建立共享 coordinator、登入後自動載入、活躍 session 定時檢查、手動強制刷新、逐包裹回填 outcome，以及唯一郵局入口。
+- Modify `pending_editor.py`: 為原始／追加運單加上 `_shipment_role` 證據。
+- Modify `bot/automation.py`: 將 `_shipment_role` 帶入自動化結果。
+- Modify `bot/sheets.py`: completion authority、四欄判斷、grid 擴列、逐包裹分類、寫入與讀回重試。
+- Modify `job_control.py`: 以 package key 執行 preflight，不再用注文番号跳過同批追加運單。
+- Modify `postal_ui_feedback.py`: 只有同注文番号的全部包裹成功才從畫面移除，並修正回填失敗文案。
+- Create `tests/fake_gspread.py`: 有 row limit、擴列、部分寫入與 stale readback 能力的共用 fake。
+- Create `tests/test_refresh_cache.py`: 快取核心測試。
+- Modify既有測試：`tests/test_picking_labels.py`、`tests/test_postal_start_flow.py`、`tests/test_postal_ui_v2_app.py`、`tests/test_pending_editor.py`、`tests/test_automation_helpers.py`、`tests/test_sheets_helpers.py`、`tests/test_job_control.py`、`tests/test_postal_ui_feedback.py`、`tests/test_postal_mock_e2e.py`。
+
+### Task 1: Establish baseline and protect existing files
+
+**Files:**
+- Backup only: `app.py`, `features/picking_labels.py`, `pending_editor.py`, `bot/automation.py`, `bot/sheets.py`, `job_control.py`, `postal_ui_feedback.py`
+- Backup only: the nine existing test files listed in the file map
+
+- [ ] **Step 1: Confirm the exact branch, clean tracked state, and baseline commit**
+
+Run:
+
+```powershell
+git branch --show-current
+git rev-parse HEAD
+git status --short
+```
+
+Expected: branch is `codex/jppost-cache-entry-writeback-20260813`, HEAD contains design commit `bc23f69`, and the only pre-existing untracked entries are `.planning/`, `backups/`, and `tmp/`.
+
+- [ ] **Step 2: Run and record the baseline tests before changing code**
+
+Run:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+$trackedPy = @(git ls-files "*.py")
+python -m py_compile @trackedPy
+git diff --check
+```
+
+Expected: `unittest` ends in `OK`, tracked Python files compile, and `git diff --check` returns no errors. Record the actual test count and any environment-caused skips; `tests.test_postal_ui_v2_app` must later run rather than remain skipped in the acceptance environment.
+
+- [ ] **Step 3: Create governance-required local backups before the first edit**
+
+Run once for each file, choosing `-2` when the destination already exists:
+
+```powershell
+Copy-Item -LiteralPath 'app.py' -Destination 'backups/20260813_app.py'
+Copy-Item -LiteralPath 'features/picking_labels.py' -Destination 'backups/20260813_picking_labels.py'
+Copy-Item -LiteralPath 'pending_editor.py' -Destination 'backups/20260813_pending_editor.py'
+Copy-Item -LiteralPath 'bot/automation.py' -Destination 'backups/20260813_automation.py'
+Copy-Item -LiteralPath 'bot/sheets.py' -Destination 'backups/20260813_sheets.py'
+Copy-Item -LiteralPath 'job_control.py' -Destination 'backups/20260813_job_control.py'
+Copy-Item -LiteralPath 'postal_ui_feedback.py' -Destination 'backups/20260813_postal_ui_feedback.py'
+Copy-Item -LiteralPath 'tests/test_picking_labels.py' -Destination 'backups/20260813_test_picking_labels.py'
+Copy-Item -LiteralPath 'tests/test_postal_start_flow.py' -Destination 'backups/20260813_test_postal_start_flow.py'
+Copy-Item -LiteralPath 'tests/test_postal_ui_v2_app.py' -Destination 'backups/20260813_test_postal_ui_v2_app.py'
+Copy-Item -LiteralPath 'tests/test_pending_editor.py' -Destination 'backups/20260813_test_pending_editor.py'
+Copy-Item -LiteralPath 'tests/test_automation_helpers.py' -Destination 'backups/20260813_test_automation_helpers.py'
+Copy-Item -LiteralPath 'tests/test_sheets_helpers.py' -Destination 'backups/20260813_test_sheets_helpers.py'
+Copy-Item -LiteralPath 'tests/test_job_control.py' -Destination 'backups/20260813_test_job_control.py'
+Copy-Item -LiteralPath 'tests/test_postal_ui_feedback.py' -Destination 'backups/20260813_test_postal_ui_feedback.py'
+Copy-Item -LiteralPath 'tests/test_postal_mock_e2e.py' -Destination 'backups/20260813_test_postal_mock_e2e.py'
+```
+
+Expected: all backups exist locally and remain untracked. If any destination already exists, use the exact same command with `-2` inserted before `.py`; do not overwrite an earlier backup.
+
+### Task 2: Build the shared refresh coordinator
+
+**Files:**
+- Create: `refresh_cache.py`
+- Create: `tests/test_refresh_cache.py`
+
+- [ ] **Step 1: Write the failing coordinator tests**
+
+Create `tests/test_refresh_cache.py` with a controllable clock and these concrete cases:
+
+```python
+import threading
+import unittest
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+
+from refresh_cache import SharedRefreshCoordinator
+
+
+class MutableClock:
+    def __init__(self):
+        self.value = datetime(2026, 8, 13, tzinfo=timezone.utc)
+
+    def now(self):
+        return self.value
+
+
+class RefreshCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = MutableClock()
+        self.cache = SharedRefreshCoordinator(
+            ttl=timedelta(minutes=20), now=self.clock.now
+        )
+
+    def test_first_get_loads_and_returns_copy(self):
+        calls = []
+        result = self.cache.get("pending", lambda: calls.append(1) or {"rows": [1]})
+        result.data["rows"].append(2)
+        again = self.cache.get("pending", lambda: self.fail("must use cache"))
+        self.assertEqual(calls, [1])
+        self.assertEqual(again.data, {"rows": [1]})
+
+    def test_get_within_ttl_reuses_snapshot(self):
+        calls = []
+        self.cache.get("pending", lambda: calls.append(1) or 1)
+        self.clock.value += timedelta(minutes=19, seconds=59)
+        self.assertEqual(self.cache.get("pending", lambda: calls.append(2) or 2).data, 1)
+        self.assertEqual(calls, [1])
+
+    def test_expired_get_refreshes(self):
+        values = iter([1, 2])
+        self.cache.get("pending", lambda: next(values))
+        self.clock.value += timedelta(minutes=20)
+        self.assertEqual(self.cache.get("pending", lambda: next(values)).data, 2)
+
+    def test_force_refresh_ignores_ttl(self):
+        values = iter([1, 2])
+        self.cache.get("pending", lambda: next(values))
+        self.assertEqual(self.cache.get("pending", lambda: next(values), force=True).data, 2)
+
+    def test_refresh_failure_serves_last_success(self):
+        self.cache.get("pending", lambda: {"rows": [1]})
+        self.clock.value += timedelta(minutes=20)
+        result = self.cache.get("pending", lambda: (_ for _ in ()).throw(TimeoutError()))
+        self.assertEqual(result.data, {"rows": [1]})
+        self.assertTrue(result.status.served_stale)
+        self.assertEqual(result.status.error_code, "network")
+
+    def test_first_refresh_failure_returns_no_data(self):
+        result = self.cache.get("pending", lambda: (_ for _ in ()).throw(PermissionError()))
+        self.assertIsNone(result.data)
+        self.assertIsNone(result.status.loaded_at)
+        self.assertEqual(result.status.error_code, "permission_denied")
+
+    def test_dataframe_copy_isolation(self):
+        first = self.cache.get("pending", lambda: pd.DataFrame({"id": [1]}))
+        first.data.loc[0, "id"] = 99
+        second = self.cache.get("pending", lambda: self.fail("must use cache"))
+        self.assertEqual(second.data.loc[0, "id"], 1)
+
+    def test_sources_refresh_independently(self):
+        self.assertIsNone(self.cache.get("pending", lambda: (_ for _ in ()).throw(RuntimeError())).data)
+        self.assertEqual(self.cache.get("picking", lambda: ["ok"]).data, ["ok"])
+
+    def test_concurrent_gets_call_loader_once(self):
+        gate = threading.Barrier(8)
+        release = threading.Event()
+        calls = []
+        outputs = []
+
+        def loader():
+            calls.append(1)
+            release.wait(2)
+            return {"rows": [1]}
+
+        def worker():
+            gate.wait()
+            outputs.append(self.cache.get("pending", loader).data)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        while not calls:
+            pass
+        release.set()
+        for thread in threads:
+            thread.join(2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(outputs, [{"rows": [1]}] * 8)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run the new tests and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_refresh_cache -v
+```
+
+Expected: FAIL with `ModuleNotFoundError: No module named 'refresh_cache'`.
+
+- [ ] **Step 3: Implement the minimal thread-safe coordinator**
+
+Create `refresh_cache.py` with these exact public contracts:
+
+```python
+from __future__ import annotations
+
+import copy
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Generic, TypeVar
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class RefreshStatus:
+    source: str
+    loaded_at: datetime | None
+    last_attempt_at: datetime | None
+    is_stale: bool
+    is_refreshing: bool
+    served_stale: bool
+    error_code: str | None
+
+
+@dataclass(frozen=True)
+class RefreshResult(Generic[T]):
+    data: T | None
+    status: RefreshStatus
+
+
+@dataclass
+class _Entry:
+    data: object | None = None
+    loaded_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    refreshing: bool = False
+    error_code: str | None = None
+
+
+def _safe_error_code(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "permission_denied"
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "network"
+    return "unexpected"
+
+
+class SharedRefreshCoordinator:
+    def __init__(
+        self,
+        ttl: timedelta = timedelta(minutes=20),
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self._ttl = ttl
+        self._now = now
+        self._condition = threading.Condition(threading.RLock())
+        self._entries: dict[str, _Entry] = {}
+
+    def _result(self, source: str, entry: _Entry, *, served_stale: bool, copier):
+        now = self._now()
+        stale = entry.loaded_at is None or now - entry.loaded_at >= self._ttl
+        return RefreshResult(
+            data=None if entry.data is None else copier(entry.data),
+            status=RefreshStatus(
+                source=source,
+                loaded_at=entry.loaded_at,
+                last_attempt_at=entry.last_attempt_at,
+                is_stale=stale,
+                is_refreshing=entry.refreshing,
+                served_stale=served_stale,
+                error_code=entry.error_code,
+            ),
+        )
+
+    def get(
+        self,
+        source: str,
+        loader: Callable[[], T],
+        *,
+        force: bool = False,
+        copier: Callable[[T], T] = copy.deepcopy,
+    ) -> RefreshResult[T]:
+        with self._condition:
+            entry = self._entries.setdefault(source, _Entry())
+            fresh = entry.loaded_at is not None and self._now() - entry.loaded_at < self._ttl
+            if fresh and not force:
+                return self._result(source, entry, served_stale=False, copier=copier)
+            if entry.refreshing:
+                if entry.data is not None and not force:
+                    return self._result(source, entry, served_stale=True, copier=copier)
+                while entry.refreshing:
+                    self._condition.wait()
+                return self._result(
+                    source, entry, served_stale=entry.error_code is not None, copier=copier
+                )
+            entry.refreshing = True
+            entry.last_attempt_at = self._now()
+
+        try:
+            loaded = loader()
+        except Exception as exc:
+            with self._condition:
+                entry.error_code = _safe_error_code(exc)
+                entry.refreshing = False
+                self._condition.notify_all()
+                return self._result(
+                    source, entry, served_stale=entry.data is not None, copier=copier
+                )
+
+        with self._condition:
+            entry.data = copier(loaded)
+            entry.loaded_at = self._now()
+            entry.error_code = None
+            entry.refreshing = False
+            self._condition.notify_all()
+            return self._result(source, entry, served_stale=False, copier=copier)
+
+    def status(self, source: str) -> RefreshStatus:
+        with self._condition:
+            entry = self._entries.setdefault(source, _Entry())
+            return self._result(
+                source,
+                entry,
+                served_stale=entry.error_code is not None and entry.data is not None,
+                copier=copy.deepcopy,
+            ).status
+```
+
+- [ ] **Step 4: Run focused tests and commit**
+
+Run:
+
+```powershell
+python -m unittest tests.test_refresh_cache -v
+python -m py_compile refresh_cache.py
+git diff --check
+git add -- refresh_cache.py tests/test_refresh_cache.py
+git commit -m "feat: add shared refresh coordinator"
+```
+
+Expected: all refresh tests PASS; commit contains only the two new files.
+
+### Task 3: Define payloads and refactor picking-label loading
+
+**Files:**
+- Create: `refresh_payloads.py`
+- Modify: `features/picking_labels.py`
+- Modify: `tests/test_picking_labels.py`
+
+- [ ] **Step 1: Write RED tests for pure loading, safe apply, and selection preservation**
+
+Add tests that patch the existing sheet parser and assert these contracts:
+
+```python
+def test_load_picking_payload_does_not_mutate_session_state(self):
+    before = dict(self.fake_st.session_state)
+    payload = picking_labels.load_picking_payload()
+    self.assertEqual(dict(self.fake_st.session_state), before)
+    self.assertIsInstance(payload.orders, tuple)
+
+def test_apply_picking_payload_preserves_selected_source_rows(self):
+    self.fake_st.session_state["picking_selected_rows"] = {3, 8, 99}
+    picking_labels.apply_picking_payload(self.payload_for_rows(3, 8, 10), preserve_selection=True)
+    self.assertEqual(self.fake_st.session_state["picking_selected_rows"], {3, 8})
+
+def test_initial_render_uses_supplied_auto_loaded_payload_without_direct_sheet_read(self):
+    picking_labels.apply_picking_payload(self.payload_for_rows(3), preserve_selection=False)
+    with patch.object(picking_labels, "load_picking_orders", side_effect=AssertionError):
+        picking_labels.render_picking_label_page()
+    self.assertIn(3, [order.source_row_number for order in self.fake_st.session_state["picking_orders"]])
+```
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_picking_labels -v
+```
+
+Expected: new tests fail because `PickingPayload`, `load_picking_payload`, or `apply_picking_payload` do not exist.
+
+- [ ] **Step 3: Add immutable payload types and explicit copy functions**
+
+Create `refresh_payloads.py`:
+
+```python
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from typing import Mapping
+
+import pandas as pd
+
+from bot.picking_labels import PickingOrder
+
+
+@dataclass(frozen=True)
+class PendingPayload:
+    dataframe: pd.DataFrame
+    logs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PickingPayload:
+    orders: tuple[PickingOrder, ...]
+    warnings: tuple[str, ...]
+    diagnostics: Mapping[str, object]
+
+
+def copy_pending_payload(value: PendingPayload) -> PendingPayload:
+    return PendingPayload(value.dataframe.copy(deep=True), tuple(value.logs))
+
+
+def copy_picking_payload(value: PickingPayload) -> PickingPayload:
+    return PickingPayload(
+        orders=tuple(copy.deepcopy(value.orders)),
+        warnings=tuple(value.warnings),
+        diagnostics=copy.deepcopy(dict(value.diagnostics)),
+    )
+```
+
+- [ ] **Step 4: Split picking reading from session application**
+
+In `features/picking_labels.py`, replace the direct session-writing `_load_orders()` with:
+
+```python
+def load_picking_payload() -> PickingPayload:
+    values = load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name())
+    status_values = load_sheet_values(_shipping_status_spreadsheet_id(), _shipping_status_sheet_name())
+    shipping_deadlines = build_shipping_deadline_lookup(status_values)
+    orders, warnings = parse_picking_label_candidates(values, shipping_deadlines=shipping_deadlines)
+    diagnostics = build_picking_source_diagnostics(values, orders, warnings)
+    diagnostics.update(
+        {
+            "source_spreadsheet_id": _picking_source_spreadsheet_id(),
+            "source_sheet": _picking_source_sheet_name(),
+            "shipping_status_spreadsheet_id": _shipping_status_spreadsheet_id(),
+            "shipping_status_sheet": _shipping_status_sheet_name(),
+            "pdf_cjk_font": get_registered_cjk_font_info(),
+        }
+    )
+    return PickingPayload(
+        orders=tuple(orders),
+        warnings=tuple(warnings),
+        diagnostics=diagnostics,
+    )
+
+
+def apply_picking_payload(payload: PickingPayload, *, preserve_selection: bool, loaded_at=None) -> None:
+    old_selected = set(st.session_state.get("picking_selected_rows", set()))
+    valid_rows = {order.source_row_number for order in payload.orders}
+    st.session_state["picking_orders"] = list(payload.orders)
+    st.session_state["picking_warnings"] = list(payload.warnings)
+    st.session_state["picking_diagnostics"] = dict(payload.diagnostics)
+    st.session_state["picking_selected_rows"] = (
+        old_selected & valid_rows if preserve_selection else set()
+    )
+    if loaded_at is not None:
+        st.session_state["picking_loaded_at"] = loaded_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+```
+
+The existing page renderer must only consume session state. Its manual reload callback and post-generation reload are replaced in Task 4 with coordinator calls.
+
+- [ ] **Step 5: Run tests and commit**
+
+Run:
+
+```powershell
+python -m unittest tests.test_picking_labels -v
+python -m py_compile refresh_payloads.py features/picking_labels.py
+git diff --check
+git add -- refresh_payloads.py features/picking_labels.py tests/test_picking_labels.py
+git commit -m "refactor: separate picking data load from session state"
+```
+
+Expected: picking tests PASS; existing selection, parser, QR and generation tests remain green.
+
+### Task 4: Wire automatic, forced, and active-session refreshes
+
+**Files:**
+- Modify: `app.py`
+- Modify: `features/picking_labels.py`
+- Modify: `tests/test_postal_start_flow.py`
+- Modify: `tests/test_postal_ui_v2_app.py`
+- Test: `tests/test_refresh_cache.py`
+
+- [ ] **Step 1: Write RED source-contract and AppTest cases**
+
+Replace the old “manual only” expectations and add:
+
+```python
+def test_main_app_auto_requests_pending_and_picking_snapshots(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    self.assertIn('_refresh_source("pending", force=False)', source)
+    self.assertIn('_refresh_source("picking", force=False)', source)
+    self.assertNotIn("if pending_manual_reload_requested:\n        try:\n            df_pending", source)
+
+def test_manual_reload_forces_pending_without_clearing_last_success(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    self.assertIn('_refresh_source("pending", force=True)', source)
+    self.assertNotIn('pop("last_pending_df", None)', source)
+
+def test_periodic_fragment_runs_every_twenty_minutes(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    self.assertIn('@st.fragment(run_every="20m")', source)
+    self.assertIn('not is_busy and not st.session_state.get("pending_editor_dirty", False)', source)
+
+def test_periodic_picking_refresh_preserves_user_selection(self):
+    source = PICKING_PATH.read_text(encoding="utf-8")
+    self.assertIn("preserve_selection=True", source)
+```
+
+In `tests/test_postal_ui_v2_app.py`, inject fake refresh results and assert the page renders without manually seeding a reload flag.
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_postal_start_flow tests.test_postal_ui_v2_app tests.test_picking_labels -v
+```
+
+Expected: FAIL because the coordinator is not connected and manual reload still clears session data.
+
+- [ ] **Step 3: Add one cached coordinator and payload loaders to `app.py`**
+
+Add imports and these functions:
+
+```python
+from datetime import timedelta
+
+from refresh_cache import RefreshResult, SharedRefreshCoordinator
+from refresh_payloads import PendingPayload, copy_pending_payload, copy_picking_payload
+from features.picking_labels import (
+    apply_picking_payload,
+    load_picking_payload,
+)
+
+
+@st.cache_resource(show_spinner=False)
+def _get_refresh_coordinator(cache_version: str = "2026-08-13-v1") -> SharedRefreshCoordinator:
+    return SharedRefreshCoordinator(ttl=timedelta(minutes=20))
+
+
+def load_pending_payload() -> PendingPayload:
+    dataframe, logs = _load_pending_orders()
+    return PendingPayload(dataframe=dataframe, logs=tuple(logs))
+
+
+def _refresh_source(source: str, *, force: bool) -> RefreshResult:
+    coordinator = _get_refresh_coordinator()
+    if source == "pending":
+        return coordinator.get(
+            source, load_pending_payload, force=force, copier=copy_pending_payload
+        )
+    if source == "picking":
+        return coordinator.get(
+            source, load_picking_payload, force=force, copier=copy_picking_payload
+        )
+    raise ValueError(f"unknown refresh source: {source}")
+```
+
+- [ ] **Step 4: Apply snapshots only at safe boundaries**
+
+Add helpers with a single authoritative gate:
+
+```python
+def _may_apply_pending_snapshot(*, is_busy: bool) -> bool:
+    return not is_busy and not st.session_state.get("pending_editor_dirty", False)
+
+
+def _apply_pending_result(result: RefreshResult[PendingPayload], *, is_busy: bool) -> bool:
+    if result.data is None or not _may_apply_pending_snapshot(is_busy=is_busy):
+        return False
+    st.session_state["last_pending_df"] = result.data.dataframe.copy(deep=True)
+    st.session_state["last_pending_logs"] = list(result.data.logs)
+    st.session_state["last_pending_loaded_at"] = result.status.loaded_at
+    st.session_state["pending_refresh_error_code"] = result.status.error_code
+    return True
+```
+
+All editable postal widgets call `_mark_pending_editor_dirty`, which sets `pending_editor_dirty=True`. Manual force refresh, “全部恢復預設資料”, and successful job completion clear it only after a successful apply. Picking periodic apply calls `apply_picking_payload(..., preserve_selection=True)`; manual force refresh and successful label generation may use `preserve_selection=False`.
+
+- [ ] **Step 5: Replace manual-only initial load and add the active-session fragment**
+
+At the start of `_render_main_app()`, call both sources independently so one failure does not block the other. Add:
+
+```python
+@st.fragment(run_every="20m")
+def _active_refresh_tick(*, is_busy: bool) -> None:
+    pending = _refresh_source("pending", force=False)
+    picking = _refresh_source("picking", force=False)
+    pending_changed = pending.status.loaded_at != st.session_state.get("pending_applied_at")
+    picking_changed = picking.status.loaded_at != st.session_state.get("picking_applied_at")
+    changed = False
+    if pending_changed and _apply_pending_result(pending, is_busy=is_busy):
+        st.session_state["pending_applied_at"] = pending.status.loaded_at
+        changed = True
+    if picking_changed and picking.data is not None:
+        apply_picking_payload(
+            picking.data,
+            preserve_selection=True,
+            loaded_at=picking.status.loaded_at,
+        )
+        st.session_state["picking_applied_at"] = picking.status.loaded_at
+        changed = True
+    if changed:
+        st.rerun()
+```
+
+The first full run applies both results before rendering and stores `*_applied_at`, so the fragment’s initial call does not cause a rerun loop. Manual buttons call `force=True` and never clear prior data before a successful result.
+
+- [ ] **Step 6: Use human-readable refresh status without exposing internals**
+
+Normal UI text is limited to:
+
+```python
+st.caption(f"資料更新於 {loaded_at.astimezone().strftime('%H:%M')}")
+st.warning("暫時無法取得最新資料，目前顯示上次成功讀取的內容。")
+st.error("目前無法取得待製郵便運單資料，請稍後重新讀取。")
+```
+
+Do not display TTL seconds, row counts, locks, error objects, or raw API text in the operational pages.
+
+In the existing diagnostic tab, render only a safe two-row summary:
+
+```python
+def _refresh_diagnostics_rows():
+    coordinator = _get_refresh_coordinator()
+    labels = {"pending": "待製郵便運單", "picking": "跨境揀貨單"}
+    error_labels = {
+        None: "",
+        "permission_denied": "權限不足",
+        "network": "連線失敗",
+        "unexpected": "讀取失敗",
+    }
+    rows = []
+    for source, label in labels.items():
+        status = coordinator.status(source)
+        rows.append(
+            {
+                "資料": label,
+                "最後成功": status.loaded_at.astimezone().strftime("%Y-%m-%d %H:%M") if status.loaded_at else "尚未成功",
+                "最後嘗試": status.last_attempt_at.astimezone().strftime("%Y-%m-%d %H:%M") if status.last_attempt_at else "尚未嘗試",
+                "狀態": "使用上次資料" if status.served_stale else ("需要更新" if status.is_stale else "正常"),
+                "問題": error_labels.get(status.error_code, "讀取失敗"),
+            }
+        )
+    return rows
+```
+
+Never render a raw exception. Detailed picking diagnostics remain inside the existing diagnostic expander rather than moving to the operational page.
+
+- [ ] **Step 7: Run focused and integration tests, then commit**
+
+Run:
+
+```powershell
+python -m unittest tests.test_refresh_cache tests.test_picking_labels tests.test_postal_start_flow tests.test_postal_ui_v2_app -v
+python -m py_compile app.py features/picking_labels.py refresh_cache.py refresh_payloads.py
+git diff --check
+git add -- app.py features/picking_labels.py tests/test_postal_start_flow.py tests/test_postal_ui_v2_app.py tests/test_picking_labels.py
+git commit -m "feat: auto-refresh shared order snapshots"
+```
+
+Expected: all focused tests PASS; AppTest executes rather than silently skipping.
+
+### Task 5: Carry explicit primary/additional shipment evidence
+
+**Files:**
+- Modify: `pending_editor.py`
+- Modify: `bot/automation.py`
+- Modify: `tests/test_pending_editor.py`
+- Modify: `tests/test_automation_helpers.py`
+
+- [ ] **Step 1: Write RED tests for shipment provenance**
+
+Extend the existing duplicate-trans-type test and result record test:
+
+```python
+def test_expand_pending_orders_marks_primary_and_additional_roles(self):
+    expanded = expand_pending_orders_for_trans_types(self.one_order(), ["EMS", "航空便"])
+    self.assertEqual(expanded["_shipment_role"].tolist(), ["primary", "additional"])
+
+def test_build_result_record_preserves_shipment_role(self):
+    row = self.success_row(_shipment_role="additional")
+    result = _build_result_record(row, tracking="TRACK-2")
+    self.assertEqual(result["shipment_role"], "additional")
+```
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_pending_editor tests.test_automation_helpers -v
+```
+
+Expected: FAIL because `_shipment_role` is not produced or propagated.
+
+- [ ] **Step 3: Implement the provenance column and compatibility default**
+
+In `pending_editor.py`:
+
+```python
+SHIPMENT_ROLE_COLUMN = "_shipment_role"
+
+# Before expanding rows:
+primary = row.copy()
+primary[SHIPMENT_ROLE_COLUMN] = "primary"
+
+# For each explicitly requested extra transport:
+additional = row.copy()
+additional["TransType"] = extra_trans_type
+additional[SHIPMENT_ROLE_COLUMN] = "additional"
+```
+
+In `bot/automation.py`, extend `_build_result_record`:
+
+```python
+"shipment_role": str(row.get("_shipment_role") or "primary").strip().lower(),
+```
+
+Reject any value other than `primary` or `additional` before submission; legacy rows default to `primary`.
+
+- [ ] **Step 4: Run tests and commit**
+
+Run:
+
+```powershell
+python -m unittest tests.test_pending_editor tests.test_automation_helpers -v
+python -m py_compile pending_editor.py bot/automation.py
+git diff --check
+git add -- pending_editor.py bot/automation.py tests/test_pending_editor.py tests/test_automation_helpers.py
+git commit -m "feat: preserve additional shipment provenance"
+```
+
+Expected: provenance tests and all existing editor/automation tests PASS.
+
+### Task 6: Make preflight package-aware without weakening legacy safety
+
+**Files:**
+- Modify: `bot/sheets.py`
+- Modify: `job_control.py`
+- Modify: `postal_ui_feedback.py`
+- Modify: `app.py`
+- Modify: `tests/test_job_control.py`
+- Modify: `tests/test_postal_ui_feedback.py`
+- Modify: `tests/test_sheets_helpers.py`
+- Modify: `tests/test_postal_start_flow.py`
+
+- [ ] **Step 1: Write RED tests for package-aware authority and preflight**
+
+Add these concrete assertions:
+
+```python
+def test_read_completion_authority_keeps_legacy_ids_and_exact_pairs(self):
+    authority = read_completion_authority(client=self.client_with_rows([
+        ["", "Name", "ORDER-1", "TRACK-1", "", "", "", "", "", "US"]
+    ]))
+    self.assertEqual(authority.legacy_order_ids, frozenset({"ORDER-1"}))
+    self.assertEqual(authority.exact_pairs, frozenset({("ORDER-1", "TRACK-1")}))
+
+def test_preflight_checks_primary_and_additional_as_distinct_packages(self):
+    checks = preflight_batch_orders(self.primary_and_additional(), self.latest(), self.authority())
+    self.assertEqual([item["status"] for item in checks], ["ready", "ready"])
+
+def test_preflight_allows_explicit_additional_when_legacy_order_completed(self):
+    checks = preflight_batch_orders(self.additional_only(), self.latest(), self.completed_primary())
+    self.assertEqual(checks[0]["status"], "ready")
+
+def test_preflight_blocks_duplicate_additional_package_key(self):
+    checks = preflight_batch_orders(self.duplicate_additional(), self.latest(), self.authority())
+    self.assertEqual(checks[1]["reason"], "duplicate_package_request")
+```
+
+Also add the exact UI filtering tests:
+
+```python
+def test_primary_success_additional_backfill_failure_keeps_order_visible(self):
+    pending = pd.DataFrame([{"注文番号(貼上原始資料)": "ORDER-1"}])
+    results = [
+        {"order_id": "ORDER-1", "trans_type": "EMS", "shipment_role": "primary", "status": "completed"},
+        {"order_id": "ORDER-1", "trans_type": "AIR", "shipment_role": "additional", "status": "backfill_failed"},
+    ]
+    filtered = filter_pending_orders_after_batch(pending, results)
+    self.assertEqual(filtered["注文番号(貼上原始資料)"].tolist(), ["ORDER-1"])
+
+
+def test_all_packages_completed_hides_order(self):
+    pending = pd.DataFrame([{"注文番号(貼上原始資料)": "ORDER-1"}])
+    results = [
+        {"order_id": "ORDER-1", "trans_type": "EMS", "shipment_role": "primary", "status": "completed"},
+        {"order_id": "ORDER-1", "trans_type": "AIR", "shipment_role": "additional", "status": "completed"},
+    ]
+    self.assertTrue(filter_pending_orders_after_batch(pending, results).empty)
+```
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_job_control tests.test_postal_ui_feedback tests.test_sheets_helpers tests.test_postal_start_flow -v
+```
+
+Expected: FAIL because completion is still a `set[str]` and preflight deduplicates by order ID.
+
+- [ ] **Step 3: Add stable authority and package key contracts**
+
+In `bot/sheets.py`:
+
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class CompletionAuthority:
+    legacy_order_ids: frozenset[str]
+    exact_pairs: frozenset[tuple[str, str]]
+
+
+def read_completion_authority(client=None) -> CompletionAuthority:
+    client = client or _get_gspread_client()
+    worksheet = _get_target_worksheet(client=client)
+    order_ids = worksheet.col_values(3)
+    tracking_numbers = worksheet.col_values(4)
+    legacy = frozenset(value.strip() for value in order_ids[1:] if value.strip())
+    pairs = frozenset(
+        (order_id.strip(), tracking.strip())
+        for order_id, tracking in zip(order_ids[1:], tracking_numbers[1:])
+        if order_id.strip() and tracking.strip()
+    )
+    return CompletionAuthority(legacy_order_ids=legacy, exact_pairs=pairs)
+
+
+def read_completed_order_ids(client=None) -> set[str]:
+    return set(read_completion_authority(client=client).legacy_order_ids)
+```
+
+In `job_control.py`:
+
+```python
+PackageKey = tuple[str, str, str]
+
+
+def shipment_package_key(row) -> PackageKey:
+    order_id = str(row.get("注文番号(貼上原始資料)") or row.get("order_id") or "").strip()
+    trans_type = str(row.get("TransType") or row.get("trans_type") or "").strip()
+    role = str(row.get("_shipment_role") or row.get("shipment_role") or "primary").strip().lower()
+    if role not in {"primary", "additional"}:
+        raise ValueError("invalid_shipment_role")
+    return order_id, trans_type, role
+```
+
+Update `preflight_batch_orders(selected_df, latest_pending_df, completion)` by replacing its order-only `seen`/completion gate with the following block; retain the existing latest-source, field, ID, item and transport validations after this gate:
+
+```python
+seen: set[PackageKey] = set()
+primary_transport_by_order: dict[str, str] = {}
+checks = []
+for row_index, row in selected_df.iterrows():
+    try:
+        package_key = shipment_package_key(row)
+    except ValueError:
+        checks.append({"row_index": row_index, "status": "blocked", "reason": "invalid_shipment_role"})
+        continue
+    order_id, trans_type, role = package_key
+    if not order_id or not trans_type:
+        checks.append({"row_index": row_index, "status": "blocked", "reason": "missing_package_identity"})
+        continue
+    if package_key in seen:
+        checks.append({"row_index": row_index, "status": "blocked", "reason": "duplicate_package_request"})
+        continue
+    if role == "primary":
+        primary_transport_by_order[order_id] = trans_type
+        if order_id in completion.legacy_order_ids:
+            checks.append({"row_index": row_index, "status": "blocked", "reason": "already_completed"})
+            seen.add(package_key)
+            continue
+    elif trans_type == primary_transport_by_order.get(order_id):
+        checks.append({"row_index": row_index, "status": "blocked", "reason": "additional_transport_matches_primary"})
+        seen.add(package_key)
+        continue
+    seen.add(package_key)
+    checks.append({"row_index": row_index, "status": "ready", "reason": ""})
+```
+
+If an additional row appears before its primary row, precompute `primary_transport_by_order` from all explicit primary rows before the validation loop. An explicit additional with a non-empty, different TransType is not blocked merely because the order ID exists.
+
+- [ ] **Step 4: Make UI filtering depend on all submitted packages**
+
+In `postal_ui_feedback.py` add:
+
+```python
+def completed_package_keys(results: list[dict] | None) -> set[tuple[str, str, str]]:
+    return {
+        (
+            str(item.get("order_id") or "").strip(),
+            str(item.get("trans_type") or "").strip(),
+            str(item.get("shipment_role") or "primary").strip().lower(),
+        )
+        for item in (results or [])
+        if str(item.get("status") or "").lower() in {"success", "completed"}
+    }
+
+
+def fully_completed_order_ids(results: list[dict] | None) -> set[str]:
+    grouped: dict[str, list[dict]] = {}
+    for item in results or []:
+        grouped.setdefault(str(item.get("order_id") or "").strip(), []).append(item)
+    return {
+        order_id
+        for order_id, items in grouped.items()
+        if order_id and all(
+            str(item.get("status") or "").lower() in {"success", "completed"}
+            for item in items
+        )
+    }
+
+
+def filter_pending_orders_after_batch(pending, results):
+    completed_ids = fully_completed_order_ids(results)
+    if not completed_ids:
+        return pending.copy(deep=True)
+    order_column = "注文番号(貼上原始資料)"
+    return pending.loc[
+        ~pending[order_column].astype(str).str.strip().isin(completed_ids)
+    ].copy(deep=True)
+```
+
+Use `fully_completed_order_ids()` when removing pending rows or clearing selection. Do not hide an order when any submitted package is `backfill_failed`.
+
+- [ ] **Step 5: Run tests and commit**
+
+Run:
+
+```powershell
+python -m unittest tests.test_job_control tests.test_postal_ui_feedback tests.test_sheets_helpers tests.test_postal_start_flow -v
+python -m py_compile app.py bot/sheets.py job_control.py postal_ui_feedback.py
+git diff --check
+git add -- app.py bot/sheets.py job_control.py postal_ui_feedback.py tests/test_job_control.py tests/test_postal_ui_feedback.py tests/test_sheets_helpers.py tests/test_postal_start_flow.py
+git commit -m "fix: preserve package-level postal preflight state"
+```
+
+Expected: package-aware tests PASS and legacy order-level completion behavior remains covered by compatibility tests.
+
+### Task 7: Build a realistic fake worksheet and robust writeback engine
+
+**Files:**
+- Create: `tests/fake_gspread.py`
+- Modify: `bot/sheets.py`
+- Modify: `tests/test_sheets_helpers.py`
+- Modify: `tests/test_postal_mock_e2e.py`
+
+- [ ] **Step 1: Create the shared fake and write RED tests for grid capacity**
+
+`tests/fake_gspread.py` must implement this usable contract:
+
+```python
+import copy
+import re
+
+
+class FakeWorksheet:
+    def __init__(self, rows, *, gid=465870894, row_count=None):
+        self.id = gid
+        self.title = "target"
+        self.rows = [list(row) + [""] * (10 - len(row)) for row in rows]
+        self.row_count = row_count if row_count is not None else max(len(self.rows), 1)
+        self.calls = []
+        self.fail_add_rows = None
+        self.fail_batch_update = None
+        self.drop_columns = set()
+        self.drop_rows = set()
+        self.stale_reads_remaining = 0
+        self._stale_rows = None
+
+    def col_values(self, column):
+        source = self._stale_rows if self.stale_reads_remaining and self._stale_rows is not None else self.rows
+        values = [row[column - 1] for row in source]
+        while values and values[-1] == "":
+            values.pop()
+        if column == 10 and self.stale_reads_remaining:
+            self.stale_reads_remaining -= 1
+        return values
+
+    def add_rows(self, count):
+        self.calls.append(("add_rows", count))
+        if self.fail_add_rows:
+            raise self.fail_add_rows
+        self.row_count += count
+
+    def batch_update(self, batch, value_input_option=None):
+        self.calls.append(("batch_update", batch, value_input_option))
+        if self.fail_batch_update:
+            raise self.fail_batch_update
+        self._stale_rows = copy.deepcopy(self.rows)
+        for update in batch:
+            self._apply_a1_update(update["range"], update["values"])
+
+    def _apply_a1_update(self, a1_range, values):
+        match = re.fullmatch(r"([A-Z]+)(\d+):([A-Z]+)(\d+)", a1_range)
+        if not match or match.group(2) != match.group(4):
+            raise ValueError(f"unsupported range: {a1_range}")
+        start_col = self._column_number(match.group(1))
+        end_col = self._column_number(match.group(3))
+        row_number = int(match.group(2))
+        if row_number > self.row_count:
+            raise ValueError("grid_limit")
+        if row_number in self.drop_rows:
+            return
+        while len(self.rows) < row_number:
+            self.rows.append([""] * 10)
+        for offset, value in enumerate(values[0]):
+            column_number = start_col + offset
+            if column_number > end_col:
+                raise ValueError("too_many_values")
+            column_letter = self._column_letter(column_number)
+            if column_letter not in self.drop_columns:
+                self.rows[row_number - 1][column_number - 1] = value
+
+    @staticmethod
+    def _column_number(label):
+        value = 0
+        for character in label:
+            value = value * 26 + ord(character) - ord("A") + 1
+        return value
+
+    @staticmethod
+    def _column_letter(number):
+        label = ""
+        while number:
+            number, remainder = divmod(number - 1, 26)
+            label = chr(ord("A") + remainder) + label
+        return label
+
+
+class FakeSpreadsheet:
+    def __init__(self, worksheet):
+        self.worksheet = worksheet
+
+    def get_worksheet_by_id(self, gid):
+        if gid != self.worksheet.id:
+            raise KeyError(gid)
+        return self.worksheet
+
+
+class FakeClient:
+    def __init__(self, worksheet):
+        self.worksheet = worksheet
+        self.opened_keys = []
+
+    def open_by_key(self, key):
+        self.opened_keys.append(key)
+        return FakeSpreadsheet(self.worksheet)
+```
+
+Add exact capacity tests:
+
+```python
+def test_last_used_row_considers_b_c_d_and_j(self):
+    columns = {"B": ["B", ""], "C": ["C"] + [""] * 6 + ["ORDER"], "D": ["D"] + [""] * 6 + ["TRACK"], "J": ["J"] + [""] * 7 + ["US"]}
+    self.assertEqual(_last_used_writeback_row(columns), 9)
+
+
+def test_last_used_row_ignores_formula_empty_string(self):
+    columns = {"B": ["B", "Receiver", ""], "C": ["C"], "D": ["D"], "J": ["J"]}
+    self.assertEqual(_last_used_writeback_row(columns), 2)
+
+
+def test_backfill_expands_grid_before_batch_update(self):
+    client = self.make_client([], row_count=1)
+    outcome = backfill_results([result("ORDER-1", "TRACK-1")], client=client, readback_delay_seconds=0)
+    self.assertTrue(outcome["ok"])
+    self.assertEqual(client.worksheet.calls[0], ("add_rows", 1))
+    self.assertEqual(client.worksheet.calls[1][0], "batch_update")
+
+
+def test_add_rows_failure_is_not_reported_success(self):
+    client = self.make_client([], row_count=1)
+    client.worksheet.fail_add_rows = PermissionError("denied")
+    outcome = backfill_results([result("ORDER-1", "TRACK-1")], client=client)
+    self.assertFalse(outcome["ok"])
+    self.assertEqual(outcome["items"][0]["status"], "write_failed")
+    self.assertFalse(any(call[0] == "batch_update" for call in client.worksheet.calls))
+```
+
+- [ ] **Step 2: Run the capacity test and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_sheets_helpers.SheetsHelperTests.test_backfill_expands_grid_before_batch_update -v
+```
+
+Expected: FAIL because `backfill_results` never calls `add_rows`.
+
+- [ ] **Step 3: Add four-column helpers and capacity expansion**
+
+In `bot/sheets.py` implement:
+
+```python
+def _read_writeback_columns(worksheet) -> dict[str, list[str]]:
+    return {column: worksheet.col_values(index) for column, index in {"B": 2, "C": 3, "D": 4, "J": 10}.items()}
+
+
+def _last_used_writeback_row(columns: dict[str, list[str]]) -> int:
+    return max(
+        (
+            index
+            for values in columns.values()
+            for index, value in enumerate(values, start=1)
+            if str(value).strip()
+        ),
+        default=1,
+    )
+
+
+def _ensure_row_capacity(worksheet, required_last_row: int) -> None:
+    missing = required_last_row - int(worksheet.row_count)
+    if missing > 0:
+        worksheet.add_rows(missing)
+```
+
+Resolve the target directly through `get_worksheet_by_id(TARGET_GID)` rather than enumerating worksheets.
+
+- [ ] **Step 4: Add RED tests for idempotency, explicit additional shipments, conflicts, and readback**
+
+Add a small result factory and the concrete cases below. `make_client()` returns the `FakeClient` around a `FakeWorksheet` and exposes the worksheet as `client.worksheet`.
+
+```python
+def result(order_id, tracking, *, role="primary", trans_type="EMS", name="Receiver"):
+    return {
+        "name": name,
+        "order_id": order_id,
+        "tracking": tracking,
+        "country_raw": "US",
+        "trans_type": trans_type,
+        "shipment_role": role,
+    }
+
+
+def make_client(self, data_rows, *, row_count=None):
+    header = ["", "收件人", "注文番号", "追跡番号", "", "", "", "", "", "國家"]
+    worksheet = FakeWorksheet(
+        [header, *data_rows],
+        row_count=row_count if row_count is not None else len(data_rows) + 1,
+    )
+    return FakeClient(worksheet)
+
+
+def test_exact_order_tracking_pair_is_idempotent(self):
+    client = self.make_client([["", "Receiver", "ORDER-1", "TRACK-1", "", "", "", "", "", "US"]])
+    outcome = backfill_results([result("ORDER-1", "TRACK-1")], client=client)
+    self.assertEqual(outcome["existing"], 1)
+    self.assertEqual(outcome["written"], 0)
+    self.assertEqual(outcome["items"][0]["status"], "already_present")
+    self.assertFalse(any(call[0] == "batch_update" for call in client.worksheet.calls))
+
+
+def test_explicit_additional_tracking_appends_new_row(self):
+    client = self.make_client([["", "Receiver", "ORDER-1", "TRACK-1", "", "", "", "", "", "US"]])
+    outcome = backfill_results(
+        [result("ORDER-1", "TRACK-2", role="additional", trans_type="AIR")],
+        client=client,
+        readback_delay_seconds=0,
+    )
+    self.assertEqual(outcome["written"], 1)
+    self.assertEqual(outcome["items"][0]["status"], "written")
+    self.assertEqual(outcome["items"][0]["row"], 3)
+
+
+def test_same_batch_primary_and_additional_each_append(self):
+    client = self.make_client([], row_count=2)
+    outcome = backfill_results(
+        [
+            result("ORDER-1", "TRACK-1"),
+            result("ORDER-1", "TRACK-2", role="additional", trans_type="AIR"),
+        ],
+        client=client,
+        readback_delay_seconds=0,
+    )
+    self.assertEqual([item["status"] for item in outcome["items"]], ["written", "written"])
+    self.assertEqual([item["row"] for item in outcome["items"]], [2, 3])
+    self.assertEqual(outcome["written"], 2)
+
+
+def test_unexpected_second_tracking_requires_manual_review(self):
+    client = self.make_client([["", "Receiver", "ORDER-1", "TRACK-1", "", "", "", "", "", "US"]])
+    outcome = backfill_results([result("ORDER-1", "TRACK-2")], client=client)
+    self.assertEqual(outcome["items"][0]["status"], "manual_review")
+    self.assertEqual(outcome["items"][0]["reason_code"], "unexpected_second_tracking")
+    self.assertFalse(any(call[0] == "batch_update" for call in client.worksheet.calls))
+
+
+def test_same_tracking_for_different_order_is_conflict(self):
+    client = self.make_client([["", "Receiver", "ORDER-1", "TRACK-1", "", "", "", "", "", "US"]])
+    outcome = backfill_results([result("ORDER-2", "TRACK-1")], client=client)
+    self.assertEqual(outcome["items"][0]["status"], "conflict")
+    self.assertEqual(outcome["items"][0]["reason_code"], "tracking_owned_by_other_order")
+
+
+def test_readback_verifies_all_four_columns(self):
+    client = self.make_client([], row_count=2)
+    client.worksheet.drop_columns.add("J")
+    outcome = backfill_results(
+        [result("ORDER-1", "TRACK-1")], client=client, readback_attempts=1
+    )
+    self.assertEqual(outcome["items"][0]["status"], "partial_write")
+    self.assertFalse(outcome["ok"])
+
+
+def test_readback_retries_until_values_are_visible(self):
+    sleeps = []
+    client = self.make_client([], row_count=2)
+    client.worksheet.stale_reads_remaining = 2
+    outcome = backfill_results(
+        [result("ORDER-1", "TRACK-1")],
+        client=client,
+        readback_attempts=3,
+        readback_delay_seconds=0.01,
+        sleep_fn=sleeps.append,
+    )
+    self.assertEqual(outcome["items"][0]["status"], "written")
+    self.assertEqual(sleeps, [0.01, 0.01])
+
+
+def test_readback_retry_exhaustion_is_failure(self):
+    client = self.make_client([], row_count=2)
+    client.worksheet.stale_reads_remaining = 99
+    outcome = backfill_results(
+        [result("ORDER-1", "TRACK-1")],
+        client=client,
+        readback_attempts=3,
+        readback_delay_seconds=0,
+    )
+    self.assertFalse(outcome["ok"])
+    self.assertEqual(outcome["items"][0]["reason_code"], "writeback_readback_failed")
+
+
+def test_one_conflict_does_not_erase_verified_success(self):
+    client = self.make_client([["", "Receiver", "ORDER-X", "TRACK-X", "", "", "", "", "", "US"]], row_count=3)
+    outcome = backfill_results(
+        [result("ORDER-1", "TRACK-1"), result("ORDER-2", "TRACK-X")],
+        client=client,
+        readback_delay_seconds=0,
+    )
+    self.assertEqual([item["status"] for item in outcome["items"]], ["written", "conflict"])
+    self.assertEqual(outcome["written"], 1)
+    self.assertFalse(outcome["ok"])
+
+
+def test_batch_update_partial_write_reports_per_item_outcomes(self):
+    client = self.make_client([], row_count=3)
+    client.worksheet.drop_rows.add(3)
+    outcome = backfill_results(
+        [result("ORDER-1", "TRACK-1"), result("ORDER-2", "TRACK-2")],
+        client=client,
+        readback_attempts=1,
+    )
+    self.assertEqual(outcome["items"][0]["status"], "written")
+    self.assertIn(outcome["items"][1]["status"], {"partial_write", "write_failed"})
+```
+
+Each case asserts the per-input status, safe reason, target row, aggregate counts, and whether a write call was allowed.
+
+- [ ] **Step 5: Implement classification, write, and readback retry with a compatible return shape**
+
+Keep the existing positional arguments and add injectable test controls. Implement the following helpers and orchestration; `_country_code_from_raw` remains the existing country conversion helper:
+
+```python
+def _get_target_worksheet(*, client):
+    spreadsheet = client.open_by_key(TARGET_SHEET_ID)
+    return spreadsheet.get_worksheet_by_id(int(TARGET_GID))
+
+
+def _safe_sheet_error_code(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "writeback_permission_denied"
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "writeback_network_error"
+    return "writeback_api_error"
+
+
+def _column_rows(columns: dict[str, list[str]]):
+    row_count = max((len(values) for values in columns.values()), default=0)
+    for row_number in range(2, row_count + 1):
+        yield row_number, {
+            column: str(values[row_number - 1]).strip() if row_number <= len(values) else ""
+            for column, values in columns.items()
+        }
+
+
+def _outcome_item(index, result, *, status, reason_code, row=None):
+    return {
+        "input_index": index,
+        "order_id": str(result.get("order_id") or "").strip(),
+        "tracking": str(result.get("tracking") or "").strip(),
+        "trans_type": str(result.get("trans_type") or "").strip(),
+        "shipment_role": str(result.get("shipment_role") or "primary").strip().lower(),
+        "status": status,
+        "reason_code": reason_code,
+        "row": row,
+    }
+
+
+def _classify_writeback_records(results, columns):
+    existing_rows = list(_column_rows(columns))
+    exact_pairs = {
+        (values["C"], values["D"]): row_number
+        for row_number, values in existing_rows
+        if values["C"] and values["D"]
+    }
+    tracking_owners = {
+        values["D"]: values["C"]
+        for _, values in existing_rows
+        if values["C"] and values["D"]
+    }
+    tracking_by_order = {}
+    partial_orders = set()
+    for _, values in existing_rows:
+        if values["C"] and values["D"]:
+            tracking_by_order.setdefault(values["C"], set()).add(values["D"])
+        elif values["C"]:
+            partial_orders.add(values["C"])
+
+    candidates = []
+    immediate = []
+    planned_pairs = set()
+    planned_tracking_owners = dict(tracking_owners)
+    for index, raw in enumerate(results):
+        result = dict(raw)
+        order_id = str(result.get("order_id") or "").strip()
+        tracking = str(result.get("tracking") or "").strip()
+        role = str(result.get("shipment_role") or "primary").strip().lower()
+        result["order_id"] = order_id
+        result["tracking"] = tracking
+        result["shipment_role"] = role
+        pair = (order_id, tracking)
+        if not order_id or not tracking or role not in {"primary", "additional"}:
+            immediate.append(_outcome_item(index, result, status="manual_review", reason_code="invalid_writeback_identity"))
+        elif pair in exact_pairs:
+            immediate.append(_outcome_item(index, result, status="already_present", reason_code="exact_pair_exists", row=exact_pairs[pair]))
+        elif tracking in planned_tracking_owners and planned_tracking_owners[tracking] != order_id:
+            immediate.append(_outcome_item(index, result, status="conflict", reason_code="tracking_owned_by_other_order"))
+        elif order_id in partial_orders:
+            immediate.append(_outcome_item(index, result, status="manual_review", reason_code="incomplete_existing_row"))
+        elif tracking_by_order.get(order_id) and role != "additional":
+            immediate.append(_outcome_item(index, result, status="manual_review", reason_code="unexpected_second_tracking"))
+        elif pair in planned_pairs:
+            immediate.append(_outcome_item(index, result, status="manual_review", reason_code="duplicate_batch_pair"))
+        else:
+            result["input_index"] = index
+            candidates.append(result)
+            planned_pairs.add(pair)
+            planned_tracking_owners[tracking] = order_id
+            tracking_by_order.setdefault(order_id, set()).add(tracking)
+    return candidates, immediate
+
+
+def _verify_writeback_rows(
+    worksheet,
+    expected_by_row,
+    *,
+    attempts,
+    delay_seconds,
+    sleep_fn,
+):
+    final = {row_number: "writeback_readback_failed" for row_number in expected_by_row}
+    for attempt in range(attempts):
+        columns = _read_writeback_columns(worksheet)
+        for row_number, expected in expected_by_row.items():
+            actual = tuple(
+                str(columns[column][row_number - 1]).strip()
+                if row_number <= len(columns[column])
+                else ""
+                for column in ("B", "C", "D", "J")
+            )
+            matches = sum(actual_value == expected_value for actual_value, expected_value in zip(actual, expected))
+            final[row_number] = "verified" if matches == 4 else (
+                "partial_write" if matches else "writeback_readback_failed"
+            )
+        if all(reason == "verified" for reason in final.values()):
+            break
+        if attempt + 1 < attempts:
+            sleep_fn(delay_seconds)
+    return final
+
+
+def backfill_results(
+    results: list[dict],
+    log_cb=None,
+    *,
+    client=None,
+    sleep_fn=time.sleep,
+    readback_attempts: int = 3,
+    readback_delay_seconds: float = 0.5,
+) -> dict:
+    client = client or _get_gspread_client()
+    worksheet = _get_target_worksheet(client=client)
+    columns = _read_writeback_columns(worksheet)
+    classified, immediate_items = _classify_writeback_records(results, columns)
+    next_row = _last_used_writeback_row(columns) + 1
+
+    expected_by_row = {}
+    for offset, candidate in enumerate(classified):
+        row_number = next_row + offset
+        candidate["row"] = row_number
+        expected_by_row[row_number] = (
+            candidate["name"],
+            candidate["order_id"],
+            candidate["tracking"],
+            _country_code_from_raw(candidate["country_raw"]),
+        )
+
+    if expected_by_row:
+        try:
+            _ensure_row_capacity(worksheet, max(expected_by_row))
+            updates = []
+            for row_number, values in expected_by_row.items():
+                name, order_id, tracking, country_code = values
+                updates.extend(
+                    [
+                        {"range": f"B{row_number}:D{row_number}", "values": [[name, order_id, tracking]]},
+                        {"range": f"J{row_number}:J{row_number}", "values": [[country_code]]},
+                    ]
+                )
+            worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+            verified = _verify_writeback_rows(
+                worksheet,
+                expected_by_row,
+                attempts=readback_attempts,
+                delay_seconds=readback_delay_seconds,
+                sleep_fn=sleep_fn,
+            )
+        except Exception as exc:
+            safe_code = _safe_sheet_error_code(exc)
+            verified = {row_number: safe_code for row_number in expected_by_row}
+    else:
+        verified = {}
+
+    items = list(immediate_items)
+    for candidate in classified:
+        reason = verified[candidate["row"]]
+        status = "written" if reason == "verified" else (
+            "partial_write" if reason == "partial_write" else "write_failed"
+        )
+        items.append(
+            {
+                "input_index": candidate["input_index"],
+                "order_id": candidate["order_id"],
+                "tracking": candidate["tracking"],
+                "trans_type": candidate["trans_type"],
+                "shipment_role": candidate["shipment_role"],
+                "status": status,
+                "reason_code": reason,
+                "row": candidate["row"],
+            }
+        )
+    items.sort(key=lambda item: item["input_index"])
+    written = sum(item["status"] == "written" for item in items)
+    existing = sum(item["status"] == "already_present" for item in items)
+    failed = [item["reason_code"] for item in items if item["status"] not in {"written", "already_present"}]
+    return {
+        "ok": not failed,
+        "written": written,
+        "existing": existing,
+        "failed": failed,
+        "error": "" if not failed else "writeback_not_fully_verified",
+        "items": items,
+    }
+```
+
+The returned object must always contain:
+
+```python
+{
+    "ok": bool,
+    "written": int,
+    "existing": int,
+    "failed": list[str],
+    "error": str,
+    "items": [
+        {
+            "input_index": int,
+            "order_id": str,
+            "tracking": str,
+            "trans_type": str,
+            "shipment_role": str,
+            "status": "written" | "already_present" | "manual_review" | "conflict" | "write_failed" | "partial_write",
+            "reason_code": str,
+            "row": int | None,
+        }
+    ],
+}
+```
+
+Classification order is exact pair → same tracking/different order conflict → same order/different tracking role check → incomplete existing row manual review → append candidate. Only explicit `additional` results may append a second tracking for one order. Build one B:D update and one J update per contiguous append group, expand grid first, then verify all four columns with at most three reads. Logs contain only row ranges, counts, reason codes, and safe error classes.
+
+- [ ] **Step 6: Replace duplicated fake worksheets and run focused E2E tests**
+
+Use `tests.fake_gspread.FakeWorksheet/FakeClient` in both sheet-helper and postal mock E2E tests. Ensure a readback failure never leads to `completed`.
+
+Run:
+
+```powershell
+python -m unittest tests.test_sheets_helpers tests.test_postal_mock_e2e -v
+python -m py_compile bot/sheets.py tests/fake_gspread.py
+git diff --check
+git add -- bot/sheets.py tests/fake_gspread.py tests/test_sheets_helpers.py tests/test_postal_mock_e2e.py
+git commit -m "fix: make postal sheet writeback verifiable"
+```
+
+Expected: all grid, idempotency, additional shipment, conflict, partial write, and delayed readback cases PASS.
+
+### Task 8: Apply writeback outcomes per package and present truthful status
+
+**Files:**
+- Modify: `app.py`
+- Modify: `job_control.py`
+- Modify: `postal_ui_feedback.py`
+- Modify: `tests/test_job_control.py`
+- Modify: `tests/test_postal_ui_feedback.py`
+- Modify: `tests/test_postal_mock_e2e.py`
+
+- [ ] **Step 1: Write RED tests for mixed outcomes and user-facing wording**
+
+Add:
+
+```python
+def test_one_verified_package_completes_while_conflict_waits_for_review(self):
+    results = self.run_with_writeback_items([self.written(0), self.conflict(1)])
+    self.assertEqual(results[0]["status"], "completed")
+    self.assertEqual(results[1]["status"], "backfill_failed")
+    self.assertEqual(results[1]["failure_reason"], "writeback_tracking_conflict")
+
+def test_backfill_failed_copy_says_label_exists(self):
+    message = build_result_feedback([{"status": "backfill_failed"}])
+    self.assertIn("運單已產生，但資料回填未完成", message)
+    self.assertNotIn("未製單", message)
+```
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_job_control tests.test_postal_ui_feedback tests.test_postal_mock_e2e -v
+```
+
+Expected: FAIL because `app.py` currently marks all successful automation results together.
+
+- [ ] **Step 3: Map every writeback item back to its automation result**
+
+In `_start_job()`, use `items[*].input_index`:
+
+```python
+success_statuses = {"written", "already_present"}
+reason_by_status = {
+    "manual_review": "writeback_manual_review",
+    "conflict": "writeback_tracking_conflict",
+    "partial_write": "writeback_partial",
+    "write_failed": "writeback_failed",
+}
+for item in backfill_outcome["items"]:
+    result = successful_results[item["input_index"]]
+    if item["status"] in success_statuses:
+        result["status"] = "completed"
+        result["backfill_status"] = item["status"]
+    else:
+        result["status"] = "backfill_failed"
+        result["failure_reason"] = reason_by_status[item["status"]]
+        result["backfill_status"] = item["status"]
+```
+
+Call `mark_results_completed()` only with verified items and `mark_results_failed()` only with failed items. The failure stage is `回填待確認`, not `未製單`.
+
+- [ ] **Step 4: Add same-process safe retry and explicit restart boundary**
+
+When a result has a tracking number and `backfill_failed`, the UI retry action invokes `backfill_results()` with the stored result and never calls `run_automation()` again. If the process/session no longer holds that result, display: `運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。` No automatic carrier retry is allowed.
+
+- [ ] **Step 5: Run tests and commit**
+
+Run:
+
+```powershell
+python -m unittest tests.test_job_control tests.test_postal_ui_feedback tests.test_postal_mock_e2e -v
+python -m py_compile app.py job_control.py postal_ui_feedback.py
+git diff --check
+git add -- app.py job_control.py postal_ui_feedback.py tests/test_job_control.py tests/test_postal_ui_feedback.py tests/test_postal_mock_e2e.py
+git commit -m "fix: report postal writeback outcomes per package"
+```
+
+Expected: mixed batch outcomes remain independent, successful packages stay completed, and failed writeback never claims that no label was created.
+
+### Task 9: Remove the legacy postal entry without redesigning the new UI
+
+**Files:**
+- Modify: `app.py`
+- Modify: `tests/test_postal_start_flow.py`
+- Modify: `tests/test_postal_ui_v2_app.py`
+- Test: `tests/test_postal_ui_v2.py`
+
+- [ ] **Step 1: Write RED navigation and preservation tests**
+
+Add source-contract tests:
+
+```python
+def test_postal_navigation_has_one_formal_entry_and_preserves_order_contract(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    self.assertIn('["跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷"]', source)
+    self.assertNotIn("郵局待打單（新版測試）", source)
+    self.assertNotIn("with preview_tab:", source)
+    self.assertIn("with postal_tab:", source)
+    self.assertIn("_render_postal_pending_v2(", source)
+
+def test_v1_renderer_and_session_keys_are_removed(self):
+    source = APP_PATH.read_text(encoding="utf-8")
+    for marker in ("pending_reset_", "pending_name_", "pending_selected_by_order", "pending_extra_trans_single_"):
+        self.assertNotIn(marker, source)
+    for marker in ("_start_job", "_native_info", "_apply_data_editor_state", "pending_v2_selected_by_order"):
+        self.assertIn(marker, source)
+```
+
+Extend AppTest to assert four exact tabs and the preserved controls: `選取全部`, `清除全部`, `開始製單`, `重新讀取`, `全部恢復預設資料`.
+
+- [ ] **Step 2: Run focused UI tests and verify RED**
+
+Run:
+
+```powershell
+python -m unittest tests.test_postal_start_flow tests.test_postal_ui_v2 tests.test_postal_ui_v2_app -v
+```
+
+Expected: FAIL while both postal tabs and v1 state remain.
+
+- [ ] **Step 3: Remove only v1-owned code and rename the tab**
+
+In `app.py`:
+
+- Replace five tab variables with `picking_tab, postal_tab, guide_tab, diagnostics_tab` and the exact four labels.
+- Delete the old `with preview_tab:` renderer block.
+- Keep `_render_postal_pending_v2`, `_start_job`, `_zero_value_warning_lines`, `_order_id_for_position`, recipient/ID warnings, `_apply_data_editor_state`, running UI, and `_native_info`.
+- Remove only v1 helper families `_reset_key_for` through `_extra_trans_key_for`, v1 frame/selection builders, `_format_short_rate`, `_summary_cell`, `_summary_label`, and their unused session cleanup.
+- Keep all `pending_v2_*`, `last_pending_*`, refresh and job state.
+- Update guide copy to use `待製郵便運單`; do not globally replace the generic phrase `待製單資料`.
+- Keep internal `postal-v2-*` CSS/widget keys because they are not user-visible and changing them risks layout/session regression.
+
+- [ ] **Step 4: Verify minimal UI copy and no technical leakage**
+
+Add a source-contract test that requires the three approved messages and asserts the operational renderer does not interpolate `row_count`, `ttl`, lock state, or raw exception values. Do not remove safe detail from the diagnostic tab.
+
+- [ ] **Step 5: Run UI regression tests and commit**
+
+Run:
+
+```powershell
+python -m unittest tests.test_postal_start_flow tests.test_postal_ui_v2 tests.test_postal_ui_v2_app tests.test_picking_labels -v
+python -m py_compile app.py
+git diff --check
+git add -- app.py tests/test_postal_start_flow.py tests/test_postal_ui_v2_app.py
+git commit -m "refactor: make postal v2 the only shipping entry"
+```
+
+Expected: exact four tabs, old labels absent, all existing v2 selection/editor/layout tests PASS, and no nonessential redesign appears in the diff.
+
+### Task 10: Full verification, fresh review, and deployment-ready evidence
+
+**Files:**
+- Create: `docs/evidence/2026-08-13-cache-entry-writeback-local.md`
+- Read/verify: all modified source and test files
+
+- [ ] **Step 1: Run the complete automated suite**
+
+Run:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+$trackedPy = @(git ls-files "*.py")
+python -m py_compile @trackedPy
+git diff --check
+```
+
+Expected: `unittest` ends in `OK`; no unexpected AppTest skip; compilation and whitespace checks pass.
+
+- [ ] **Step 2: Run focused acceptance groups separately**
+
+Run:
+
+```powershell
+python -m unittest tests.test_refresh_cache tests.test_picking_labels tests.test_postal_start_flow tests.test_postal_ui_v2 tests.test_postal_ui_v2_app -v
+python -m unittest tests.test_pending_editor tests.test_automation_helpers tests.test_job_control tests.test_sheets_helpers tests.test_postal_ui_feedback tests.test_postal_mock_e2e -v
+```
+
+Expected: both groups end in `OK`, proving cache/UI and package/writeback independently.
+
+- [ ] **Step 3: Perform local visual and interaction verification without business writes**
+
+Launch the app with synthetic/mocked data only. Verify desktop and narrow viewport behavior:
+
+- Four tabs are visible and only `待製郵便運單` is the postal entry.
+- Existing v2 card layout, spacing, selection, clear-all, restore-default and start button hierarchy are unchanged.
+- Normal state shows only `資料更新於 HH:mm` near refresh.
+- Stale fallback shows one concise warning, not cache internals.
+- No reload overwrites active postal edits or picking selections.
+- No test action reaches Japan Post or the production Sheet.
+
+Expected: screenshots/readback contain no customer data or secrets and show no unintended layout change.
+
+- [ ] **Step 4: Obtain fresh-context code review**
+
+Give a fresh reviewer only the design, acceptance conditions, branch, and commit range. Reviewer must run tests/read code and report P0/P1/P2 findings, with special attention to:
+
+- single-flight correctness and copy isolation;
+- rerun-loop prevention;
+- selection/edit preservation;
+- primary/additional preflight;
+- exact-pair idempotency;
+- row expansion before write;
+- B/C/D/J readback;
+- mixed package outcome handling;
+- PII-safe logs;
+- v1-only deletion boundaries.
+
+Expected: P0/P1/P2 are all zero. Any finding returns to its owning task, followed by focused tests and a new fresh review.
+
+- [ ] **Step 5: Write evidence and commit it**
+
+Create `docs/evidence/2026-08-13-cache-entry-writeback-local.md` containing:
+
+```markdown
+# JapanPost-SaaS local acceptance evidence
+
+- Branch and exact HEAD
+- Baseline and final test counts
+- Focused test commands and outcomes
+- Python compile and git diff check outcomes
+- Fresh reviewer result
+- UI verification viewports and result
+- Confirmed non-actions: no production Sheet read/write, no Japan Post submission, no push, no deploy
+- Known boundary: no cross-process automatic recovery without a durable shipment ledger
+- Next gate: user approval for branch push and Streamlit deployment
+```
+
+Run:
+
+```powershell
+git add -- docs/evidence/2026-08-13-cache-entry-writeback-local.md
+git commit -m "docs: record jppost local acceptance"
+git status --short
+git log --oneline --decorate -10
+```
+
+Expected: only the original `.planning/`, `backups/`, and `tmp/` remain untracked; all implementation changes are committed on the `codex/*` branch.
+
+- [ ] **Step 6: Stop at the external-action gate**
+
+Report local results and ask for explicit approval before any `git push`, PR, Streamlit deployment, or safe test-order writeback. Do not merge `main`; the JapanPost-SaaS domain owner remains unresolved in the governance registry.
+
+## Implementation sequencing rationale
+
+Tasks 2–4 make data arrival faster without touching writeback. Tasks 5–8 then add explicit package identity before changing duplicate and writeback behavior, so the system never accepts a second tracking merely because the order ID matches. Task 9 removes the legacy UI only after the shared backend and new-entry regression tests are green. Task 10 separates local completion from external publication and production verification.
+
+## Deferred follow-up
+
+Create a separate specification for a compliant always-on host and a durable shipment ledger. That future ledger must persist package key, carrier tracking, label evidence, writeback state, idempotency key and recovery status before the system can safely recover an unfilled tracking number across process restarts. It must not reuse an unspecified B/C/D/J column or expose customer PII in logs.
