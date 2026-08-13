@@ -435,16 +435,17 @@ if not hasattr(st, "fragment"):
 def _active_refresh_tick(*, is_busy: bool, job) -> None:
     before_pending = st.session_state.get("last_pending_loaded_at")
     before_picking = st.session_state.get("picking_snapshot_loaded_at")
-    applied = False
+    pending_applied = False
+    picking_applied = False
 
     try:
         pending_result = _refresh_source("pending", force=False)
-        applied = _apply_pending_result(
+        pending_applied = _apply_pending_result(
             pending_result,
             is_busy=is_busy,
             allow_dirty_reset=False,
             job=job,
-        ) or applied
+        )
     except Exception:
         pending_result = None
         st.session_state["pending_refresh_error_code"] = "unavailable"
@@ -458,18 +459,20 @@ def _active_refresh_tick(*, is_busy: bool, job) -> None:
                 loaded_at=picking_result.status.loaded_at,
             )
             st.session_state["picking_snapshot_loaded_at"] = picking_result.status.loaded_at
-            applied = True
+            picking_applied = True
     except Exception:
         picking_result = None
 
     changed = (
-        pending_result is not None
+        pending_applied
+        and pending_result is not None
         and pending_result.status.loaded_at != before_pending
     ) or (
-        picking_result is not None
+        picking_applied
+        and picking_result is not None
         and picking_result.status.loaded_at != before_picking
     )
-    if applied and changed:
+    if changed:
         try:
             st.rerun(scope="app")
         except TypeError:

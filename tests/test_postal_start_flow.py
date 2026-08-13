@@ -1,11 +1,77 @@
+import ast
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class PostalStartFlowTests(unittest.TestCase):
+    def test_protected_pending_snapshot_does_not_repeat_rerun_after_picking_applies(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(app_source)
+        active_tick = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_active_refresh_tick"
+        )
+        active_tick.decorator_list = []
+        module = ast.Module(body=[active_tick], type_ignores=[])
+        ast.fix_missing_locations(module)
+
+        class SessionState(dict):
+            __getattr__ = dict.__getitem__
+            __setattr__ = dict.__setitem__
+
+        class StreamlitStub:
+            def __init__(self, *, editor_dirty):
+                self.session_state = SessionState(
+                    last_pending_loaded_at="pending-old",
+                    picking_snapshot_loaded_at="picking-old",
+                    pending_editor_dirty=editor_dirty,
+                )
+                self.rerun_count = 0
+
+            def rerun(self, **_kwargs):
+                self.rerun_count += 1
+
+        pending_result = SimpleNamespace(
+            data=object(),
+            status=SimpleNamespace(loaded_at="pending-new"),
+        )
+        picking_result = SimpleNamespace(
+            data=object(),
+            status=SimpleNamespace(loaded_at="picking-new"),
+        )
+
+        for is_busy, editor_dirty in ((True, False), (False, True)):
+            with self.subTest(is_busy=is_busy, editor_dirty=editor_dirty):
+                streamlit = StreamlitStub(editor_dirty=editor_dirty)
+
+                def refresh_source(source, *, force):
+                    self.assertFalse(force)
+                    return pending_result if source == "pending" else picking_result
+
+                def apply_pending_result(_result, *, is_busy, allow_dirty_reset, job):
+                    self.assertFalse(allow_dirty_reset)
+                    self.assertEqual(job, {})
+                    return not is_busy and not streamlit.session_state.pending_editor_dirty
+
+                namespace = {
+                    "st": streamlit,
+                    "_refresh_source": refresh_source,
+                    "_apply_pending_result": apply_pending_result,
+                    "apply_picking_payload": lambda *_args, **_kwargs: None,
+                }
+                exec(compile(module, "app.py", "exec"), namespace)
+
+                namespace["_active_refresh_tick"](is_busy=is_busy, job={})
+                namespace["_active_refresh_tick"](is_busy=is_busy, job={})
+
+                self.assertEqual(streamlit.rerun_count, 1)
+
     def test_postal_start_button_directly_starts_job_without_confirm_gate(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
