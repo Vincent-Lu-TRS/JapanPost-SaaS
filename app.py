@@ -8,6 +8,7 @@ os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
 
 import hashlib
 import html
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess
@@ -65,6 +66,7 @@ from refresh_payloads import (
     copy_pending_payload,
     copy_picking_payload,
 )
+from safe_logging import redact_operational_log, safe_log_event
 from features.picking_labels import apply_picking_payload, load_picking_payload
 
 # ══════════════════════════════════════════════════════
@@ -168,6 +170,135 @@ def _get_job(email: str) -> dict | None:
     return _JOB_REGISTRY.get(email)
 
 
+def _dataframe_sensitive_values(dataframe: pd.DataFrame | None) -> tuple[str, ...]:
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return ()
+    values: list[str] = []
+    seen: set[str] = set()
+    sensitive_markers = (
+        "注文番号",
+        "order",
+        "shipping name",
+        "receiver",
+        "recipient",
+        "email",
+        "mail",
+        "tracking",
+        "追跡",
+        "運單",
+        "address",
+        "住所",
+        "地址",
+        "收件人",
+        "phone",
+        "電話",
+        "pccc",
+        "prc id",
+    )
+    for column in dataframe.columns:
+        column_name = str(column).strip().lower()
+        is_status_column = "製單上傳狀態" in column_name
+        if not is_status_column and not any(
+            marker in column_name for marker in sensitive_markers
+        ):
+            continue
+        for value in dataframe[column].tolist():
+            if value is None:
+                continue
+            try:
+                if pd.isna(value):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            text = str(value).strip()
+            if is_status_column and not re.fullmatch(
+                r"[A-Z]{2}\d{9}[A-Z]{2}",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            lowered = text.lower()
+            if len(text) < 4 or lowered in seen:
+                continue
+            seen.add(lowered)
+            values.append(text)
+    return tuple(values)
+
+
+def _job_sensitive_values(
+    job: dict | None,
+    *,
+    dataframe: pd.DataFrame | None = None,
+    email: str = "",
+) -> tuple[str, ...]:
+    values = list(_dataframe_sensitive_values(dataframe))
+    if email:
+        values.append(email)
+
+    sensitive_keys = {
+        "order_id",
+        "recipient",
+        "receiver",
+        "tracking",
+        "tracking_no",
+        "email",
+        "name",
+        "address",
+        "phone",
+        "pccc",
+        "prc_id",
+        "reason_text",
+        "message",
+        "error",
+    }
+
+    def _collect(value, *, include_scalar: bool = False) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                _collect(
+                    nested,
+                    include_scalar=str(key).strip().lower() in sensitive_keys,
+                )
+        elif isinstance(value, (list, tuple, set)):
+            for nested in value:
+                _collect(nested, include_scalar=include_scalar)
+        elif include_scalar:
+            if value is None:
+                return
+            try:
+                if pd.isna(value):
+                    return
+            except (TypeError, ValueError):
+                pass
+            text = str(value).strip()
+            if len(text) >= 4:
+                values.append(text)
+
+    if isinstance(job, dict):
+        for key in ("orders", "results", "backfill_outcome"):
+            _collect(job.get(key))
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        lowered = value.lower()
+        if lowered not in seen:
+            seen.add(lowered)
+            unique.append(value)
+    return tuple(unique)
+
+
+def _safe_operational_log_lines(
+    logs,
+    *,
+    sensitive_values=(),
+) -> list[str]:
+    return [
+        redact_operational_log(line, sensitive_values=sensitive_values)
+        for line in logs or []
+    ]
+
+
 def _load_pending_orders(
     *,
     strict: bool = False,
@@ -181,7 +312,11 @@ def _load_pending_orders(
         strict=strict,
         exclude_completed=exclude_completed,
     )
-    return df_pending, pending_logs
+    safe_logs = _safe_operational_log_lines(
+        pending_logs,
+        sensitive_values=_dataframe_sensitive_values(df_pending),
+    )
+    return df_pending, safe_logs
 
 
 def load_pending_payload() -> PendingPayload:
@@ -233,7 +368,17 @@ def _apply_pending_result(
     allow_dirty_reset: bool = False,
     job=None,
 ) -> bool:
-    if result.data is None or not may_apply_pending_snapshot(
+    error_code = str(result.status.error_code or "").strip()
+    if error_code:
+        st.session_state["pending_refresh_error_code"] = error_code
+    else:
+        st.session_state.pop("pending_refresh_error_code", None)
+
+    if result.data is None:
+        st.session_state["pending_refresh_error_code"] = error_code or "unavailable"
+        return False
+
+    if not may_apply_pending_snapshot(
         is_busy=is_busy,
         editor_dirty=bool(st.session_state.get("pending_editor_dirty")),
         allow_dirty_reset=allow_dirty_reset,
@@ -244,13 +389,24 @@ def _apply_pending_result(
     dataframe = payload.dataframe.copy(deep=True)
     if job and job.get("results"):
         dataframe = filter_pending_orders_after_batch(dataframe, job["results"])
-    logs = list(payload.logs)
+    logs = _safe_operational_log_lines(
+        payload.logs,
+        sensitive_values=_dataframe_sensitive_values(dataframe),
+    )
     st.session_state["last_pending_df"] = dataframe
     st.session_state["last_pending_logs"] = logs
     st.session_state["last_pending_loaded_at"] = result.status.loaded_at
     st.session_state["last_pending_read_summary"] = summarize_pending_read_logs(logs)
-    st.session_state["last_pending_error"] = result.status.error_code or ""
+    st.session_state["last_pending_error"] = error_code
     return True
+
+
+def _pending_refresh_warning_message() -> str:
+    if not st.session_state.get("pending_refresh_error_code"):
+        return ""
+    if isinstance(st.session_state.get("last_pending_df"), pd.DataFrame):
+        return "暫時無法取得最新資料，目前顯示上次成功讀取的內容。"
+    return "目前無法取得待製郵便運單資料，請稍後重新讀取。"
 
 
 if not hasattr(st, "fragment"):
@@ -273,6 +429,7 @@ def _active_refresh_tick(*, is_busy: bool, job) -> None:
         ) or applied
     except Exception:
         pending_result = None
+        st.session_state["pending_refresh_error_code"] = "unavailable"
 
     try:
         picking_result = _refresh_source("picking", force=False)
@@ -301,10 +458,14 @@ def _active_refresh_tick(*, is_busy: bool, job) -> None:
             st.rerun()
 
 
-def _visible_pending_logs(logs: list[str]) -> list[str]:
+def _visible_pending_logs(logs: list[str], *, sensitive_values=()) -> list[str]:
+    safe_logs = _safe_operational_log_lines(
+        logs,
+        sensitive_values=sensitive_values,
+    )
     return [
         line
-        for line in logs
+        for line in safe_logs
         if "關注訂單診斷（WhoWhy/WhoWht）" not in line
         and "關注訂單診斷(WhoWhy/WhoWht)" not in line
     ]
@@ -930,8 +1091,9 @@ def _render_postal_pending_v2(
                 pending_loaded_at = st.session_state.get("last_pending_loaded_at")
                 if isinstance(pending_loaded_at, datetime):
                     st.caption(f"資料更新於 {pending_loaded_at.astimezone().strftime('%H:%M')}")
-                if st.session_state.get("last_pending_error"):
-                    st.warning("目前顯示上次成功讀取的資料，請稍後再試。")
+                refresh_error_message = _pending_refresh_warning_message()
+                if refresh_error_message:
+                    st.warning(refresh_error_message)
                 elif st.session_state.get("pending_refresh_warning"):
                     st.warning(st.session_state["pending_refresh_warning"])
                 if not rate and not df_pending.empty:
@@ -1233,7 +1395,11 @@ def _render_postal_pending_v2(
         if job and job.get("logs") and batch_summary["failure_alerts"]:
             with st.expander("詳細除錯日誌", expanded=True):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                st.code("\n".join(job["logs"][-200:]), language="text")
+                safe_job_logs = _safe_operational_log_lines(
+                    job["logs"][-200:],
+                    sensitive_values=_job_sensitive_values(job, email=email),
+                )
+                st.code("\n".join(safe_job_logs), language="text")
 
 
 def _render_running_progress(job: dict) -> None:
@@ -1309,17 +1475,27 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
     _write_job_lock(email)
 
     def _run():
-        import traceback as tb
-
         def _log(msg: str):
-            ts = time.strftime("%H:%M:%S")
-            entry = f"[{ts}] {msg}"
-            print(f"[BOT] {entry}", file=sys.stderr, flush=True)
             try:
-                job["logs"].append(entry)
                 update_order_status_from_log(job, msg)
+                safe_message = redact_operational_log(
+                    msg,
+                    sensitive_values=_job_sensitive_values(
+                        job,
+                        dataframe=df,
+                        email=email,
+                    ),
+                )
+                ts = time.strftime("%H:%M:%S")
+                entry = f"[{ts}] {safe_message}"
+                print(f"[BOT] {entry}", file=sys.stderr, flush=True)
+                job["logs"].append(entry)
             except Exception as log_err:
-                print(f"[LOG_ERR] {log_err}", file=sys.stderr, flush=True)
+                print(
+                    f"[LOG_ERR] {type(log_err).__name__}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         try:
             rows_for_run = df if max_rows is None else df.head(max_rows)
@@ -1334,7 +1510,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             try:
                 completed_ids = read_completed_order_ids()
             except Exception as preflight_error:
-                reason_text = f"無法確認完成狀態，這批未開始製單：{preflight_error}"
+                reason_text = "無法確認完成狀態，這批未開始製單。"
                 preflight_results = [
                     {
                         "order_id": str(order.get("order_id") or "").strip(),
@@ -1347,7 +1523,11 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 ]
                 job["results"] = preflight_results
                 mark_results_failed(job, preflight_results)
-                _log(f"❌ {reason_text}")
+                safe_log_event(
+                    _log,
+                    "preflight_blocked",
+                    error_type=type(preflight_error).__name__,
+                )
                 _JOB_REGISTRY.finish(job, "error")
                 _clear_job_lock(email)
                 return
@@ -1449,7 +1629,14 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     _log(f"✅ 完成！本次實際完成 {len(successful_results)} 筆訂單。")
                     job["pending_refresh_needed"] = True
                 else:
-                    error_text = backfill_outcome.get("error") or "Google Sheets 回填驗證失敗"
+                    error_text = redact_operational_log(
+                        backfill_outcome.get("error") or "Google Sheets 回填驗證失敗",
+                        sensitive_values=_job_sensitive_values(
+                            job,
+                            dataframe=df,
+                            email=email,
+                        ),
+                    )
                     for result in successful_results:
                         result.update(
                             {
@@ -1473,15 +1660,21 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             _JOB_REGISTRY.finish(job, terminal_status)
             _clear_job_lock(email)
         except BaseException as e:
-            err_text = tb.format_exc()
-            print(f"[BOT_ERROR] {err_text}", file=sys.stderr, flush=True)
+            print(
+                f"[BOT_ERROR] {type(e).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
             try:
-                _log(f"❌ 例外：{type(e).__name__}: {e}")
-                _log(f"詳細：{err_text}")
+                safe_log_event(
+                    _log,
+                    "job_exception",
+                    error_type=type(e).__name__,
+                )
             except Exception:
                 pass
             try:
-                reason_text = f"{type(e).__name__}: {e}"
+                reason_text = "製單流程發生錯誤，請查看安全診斷。"
                 unfinished_results = [
                     {
                         "order_id": str(order.get("order_id") or "").strip(),
@@ -1567,7 +1760,7 @@ def _render_main_app():
     try:
         pending_initial_result = _refresh_source("pending", force=False)
     except Exception:
-        pass
+        st.session_state["pending_refresh_error_code"] = "unavailable"
     try:
         picking_initial_result = _refresh_source("picking", force=False)
     except Exception:
@@ -2698,6 +2891,9 @@ def _render_main_app():
                 st.session_state.pop("pending_selected_by_order", None)
                 _reset_all_order_editors(df_pending.head(editable_count))
                 st.rerun()
+        refresh_error_message = _pending_refresh_warning_message()
+        if refresh_error_message:
+            st.warning(refresh_error_message)
         if not rate and not df_pending.empty:
             st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
         if is_busy and zero_value_warnings:
@@ -2814,6 +3010,7 @@ def _render_main_app():
                                 "Name",
                                 value=pending_name,
                                 key=name_key,
+                                on_change=_mark_pending_editor_dirty,
                             )
                         with action_cols[1]:
                             trans_type = st.selectbox(
@@ -2821,6 +3018,7 @@ def _render_main_app():
                                 options=SHIPPING_OPTIONS,
                                 index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
                                 key=trans_key,
+                                on_change=_mark_pending_editor_dirty,
                             )
                         extra_options = ["無"] + SHIPPING_OPTIONS
                         if st.session_state.get(extra_trans_key, "無") not in extra_options:
@@ -2832,15 +3030,26 @@ def _render_main_app():
                                 "追加",
                                 options=extra_options,
                                 key=extra_trans_key,
+                                on_change=_mark_pending_editor_dirty,
                             )
                         edited_prc_id = pending_prc_id
                         edited_pccc = pending_pccc
                         if kind == "china":
                             with action_cols[3]:
-                                edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
+                                edited_prc_id = st.text_input(
+                                    "PRC ID",
+                                    value=pending_prc_id,
+                                    key=prc_id_key,
+                                    on_change=_mark_pending_editor_dirty,
+                                )
                         elif kind == "korea":
                             with action_cols[3]:
-                                edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
+                                edited_pccc = st.text_input(
+                                    "PCCC",
+                                    value=pending_pccc,
+                                    key=pccc_key,
+                                    on_change=_mark_pending_editor_dirty,
+                                )
                         with action_cols[-1]:
                             if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
                                 _reset_order_editor(order_id)
@@ -2878,6 +3087,7 @@ def _render_main_app():
                                 "Quantity": st.column_config.TextColumn("Quantity", width=90),
                             },
                             key=item_key,
+                            on_change=_mark_pending_editor_dirty,
                         )
                 edited_df = apply_pending_order_editor_values(
                     df_pending,
@@ -2937,7 +3147,11 @@ def _render_main_app():
         if job and job.get("logs") and batch_summary["failure_alerts"]:
             with st.expander("🔧 詳細除錯日誌", expanded=True):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                st.code("\n".join(job["logs"][-200:]), language="text")
+                safe_job_logs = _safe_operational_log_lines(
+                    job["logs"][-200:],
+                    sensitive_values=_job_sensitive_values(job, email=email),
+                )
+                st.code("\n".join(safe_job_logs), language="text")
     with postal_v2_tab:
         _render_postal_pending_v2(
             email=email,
@@ -3398,7 +3612,10 @@ PDF 會上傳至指定 Google Drive 資料夾。
         )
 
     with diagnostics_tab:
-        visible_pending_logs = _visible_pending_logs(pending_logs)
+        visible_pending_logs = _visible_pending_logs(
+            pending_logs,
+            sensitive_values=_dataframe_sensitive_values(df_pending),
+        )
         if visible_pending_logs:
             with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=True):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)

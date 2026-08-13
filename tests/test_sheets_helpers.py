@@ -446,7 +446,9 @@ class SheetsHelperTests(unittest.TestCase):
         result = _filter_pending_orders_dataframe(df, completed_ids={"WhoWhy-Test6"}, log_cb=logs.append)
 
         self.assertTrue(result.empty)
-        self.assertTrue(any("已在目標表完成而排除" in line and "WhoWhy-Test6" in line for line in logs))
+        self.assertTrue(any("已在目標表完成而排除" in line for line in logs))
+        self.assertNotIn("WhoWhy-Test6", "\n".join(logs))
+        self.assertNotIn("Ioannis Zervos", "\n".join(logs))
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
     def test_filter_pending_orders_blocks_stale_source_tracking_when_target_missing(self):
@@ -467,7 +469,61 @@ class SheetsHelperTests(unittest.TestCase):
         result = _filter_pending_orders_dataframe(df, completed_ids=set(), log_cb=logs.append)
 
         self.assertTrue(result.empty)
-        self.assertTrue(any("來源狀態疑似快取過期" in line and "imy2036360" in line for line in logs))
+        self.assertTrue(any("來源狀態疑似快取過期" in line for line in logs))
+        rendered = "\n".join(logs)
+        self.assertNotIn("imy2036360", rendered)
+        self.assertNotIn("LX324329616JP", rendered)
+        self.assertNotIn("David G Derrick Jr", rendered)
+
+    def test_get_pending_orders_sanitizes_source_samples_before_callback(self):
+        header = [
+            "注文番号(貼上原始資料)",
+            "製單上傳狀態(請用[未打單]檢視模式)",
+            "郵局申告金額(USD)",
+            "製單檢核",
+            "Shipping Name",
+            "Email",
+            "郵局運送方式(複數商品請自行確認是否走小包)",
+        ]
+        values = [
+            header,
+            [
+                "ORDER-SECRET",
+                "未打單",
+                "1.00",
+                "",
+                "Secret Recipient",
+                "receiver@example.com",
+                "ePacket",
+            ],
+        ]
+
+        class FakeWorksheet:
+            def get_all_values(self):
+                return values
+
+        class FakeSpreadsheet:
+            title = "source"
+
+            def get_worksheet_by_id(self, _gid):
+                return FakeWorksheet()
+
+        class FakeClient:
+            def open_by_key(self, _key):
+                return FakeSpreadsheet()
+
+        logs = []
+        with patch.object(sheets_module, "_get_gspread_client", return_value=FakeClient()):
+            result = get_pending_orders(
+                log_cb=logs.append,
+                strict=True,
+                exclude_completed=False,
+            )
+
+        self.assertEqual(len(result), 1)
+        rendered = "\n".join(logs)
+        for secret in ("ORDER-SECRET", "Secret Recipient", "receiver@example.com"):
+            self.assertNotIn(secret, rendered)
 
     @unittest.skipIf(pd.DataFrame is object, "real pandas is not available in this unit-test shim")
     def test_filter_pending_orders_does_not_override_tracking_status_without_target_authority(self):

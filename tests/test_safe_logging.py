@@ -69,6 +69,30 @@ class SafeLoggingTests(unittest.TestCase):
         self.assertNotIn("123456789", redacted)
         self.assertGreaterEqual(redacted.count("[REDACTED]"), 5)
 
+    def test_redacted_message_stays_safe_through_session_and_ui_log_paths(self):
+        sensitive_values = ("ORDER-SECRET", "Secret Recipient")
+        raw_message = (
+            "order=ORDER-SECRET receiver=Secret Recipient "
+            "tracking=EE123456789JP email=receiver@example.com"
+        )
+
+        session_logs = [
+            redact_operational_log(raw_message, sensitive_values=sensitive_values)
+        ]
+        rendered_log = "\n".join(
+            redact_operational_log(line, sensitive_values=sensitive_values)
+            for line in session_logs
+        )
+
+        for secret in (
+            "ORDER-SECRET",
+            "Secret Recipient",
+            "EE123456789JP",
+            "receiver@example.com",
+        ):
+            self.assertNotIn(secret, session_logs[0])
+            self.assertNotIn(secret, rendered_log)
+
 
 if __name__ == "__main__":
     unittest.main()

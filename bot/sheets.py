@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from safe_logging import safe_log_event
+from safe_logging import redact_operational_log, safe_log_event
 
 from .countries import resolve_country_code
 
@@ -125,13 +125,52 @@ def _prefer_shipping_method_rows(
     return ranked.drop(columns=["_source_order", "_shipping_priority"])
 
 
-def _format_sample(values, limit: int = 8) -> str:
-    sample = [str(v).strip() for v in values if str(v).strip()]
-    if not sample:
-        return "-"
-    shown = sample[:limit]
-    suffix = "" if len(sample) <= limit else f"...(+{len(sample) - limit})"
-    return ", ".join(shown) + suffix
+def _dataframe_sensitive_log_values(df: pd.DataFrame) -> tuple[str, ...]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return ()
+    values: list[str] = []
+    seen: set[str] = set()
+    sensitive_markers = (
+        "注文番号",
+        "order",
+        "shipping name",
+        "receiver",
+        "recipient",
+        "email",
+        "mail",
+        "tracking",
+        "追跡",
+        "運單",
+        "address",
+        "住所",
+        "地址",
+        "收件人",
+        "phone",
+        "電話",
+        "pccc",
+        "prc id",
+    )
+    for column in df.columns:
+        column_name = str(column).strip().lower()
+        is_status_column = "製單上傳狀態" in column_name
+        if not is_status_column and not any(
+            marker in column_name for marker in sensitive_markers
+        ):
+            continue
+        for value in df[column].tolist():
+            text = _clean_cell(value)
+            if is_status_column and not re.fullmatch(
+                r"[A-Z]{2}\d{9}[A-Z]{2}",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            lowered = text.lower()
+            if len(text) < 4 or lowered in seen:
+                continue
+            seen.add(lowered)
+            values.append(text)
+    return tuple(values)
 
 
 def _looks_like_jp_tracking(value: str) -> bool:
@@ -143,11 +182,17 @@ def _filter_pending_orders_dataframe(
     completed_ids: set[str] | None = None,
     log_cb=None,
 ) -> pd.DataFrame:
+    sensitive_values = _dataframe_sensitive_log_values(df)
+
     def _log(msg):
+        safe_message = redact_operational_log(
+            msg,
+            sensitive_values=sensitive_values,
+        )
         if log_cb:
-            log_cb(msg)
+            log_cb(safe_message)
         else:
-            logging.info(msg)
+            logging.info(safe_message)
 
     if df.empty:
         return df
@@ -194,8 +239,7 @@ def _filter_pending_orders_dataframe(
         stale_rows = df[stale_source_status_mask]
         _log(
             "🛑 來源狀態疑似快取過期，目標表缺少完成證據，"
-            f"阻擋自動製單 {len(stale_rows)} 筆："
-            f"{_format_sample(stale_rows[order_id_col].tolist())}"
+            f"阻擋自動製單 {len(stale_rows)} 筆"
         )
 
     status_pending_mask = (df[status_col] == "未打單")
@@ -246,7 +290,7 @@ def _filter_pending_orders_dataframe(
         if not completed_rows.empty:
             _log(
                 "🔥 已在目標表完成而排除 "
-                f"{len(completed_rows)} 筆：{_format_sample(completed_rows[order_id_col].tolist())}"
+                f"{len(completed_rows)} 筆"
             )
         before_completed = len(df_filtered)
         df_filtered = df_filtered[~completed_mask]
@@ -287,15 +331,6 @@ def _get_worksheet_by_gid(spreadsheet, gid: str):
         return spreadsheet.get_worksheet_by_id(int(str(gid).strip()))
     except Exception:
         return None
-
-
-def _last_non_empty_row_sample(df: pd.DataFrame, order_id_col: str, limit: int = 5) -> str:
-    if df.empty or order_id_col not in df.columns:
-        return "-"
-    ids = [str(v).strip() for v in df[order_id_col].tolist() if str(v).strip()]
-    if not ids:
-        return "-"
-    return ", ".join(ids[-limit:])
 
 
 def read_completed_order_ids(client: gspread.Client | None = None) -> set[str]:
@@ -350,11 +385,17 @@ def get_pending_orders(
 
     回傳: pandas DataFrame，若無資料則為空 DataFrame
     """
+    sensitive_values: list[str] = []
+
     def _log(msg):
+        safe_message = redact_operational_log(
+            msg,
+            sensitive_values=sensitive_values,
+        )
         if log_cb:
-            log_cb(msg)
+            log_cb(safe_message)
         else:
-            logging.info(msg)
+            logging.info(safe_message)
 
     try:
         started_at = time.perf_counter()
@@ -391,11 +432,13 @@ def get_pending_orders(
         df = pd.DataFrame(all_values[1:], columns=header)
         df["_source_row_number"] = [str(row_number) for row_number in range(2, len(df) + 2)]
         df["_source_fingerprint"] = df.apply(_source_row_fingerprint, axis=1)
+        sensitive_values.extend(_dataframe_sensitive_log_values(df))
         _log(f"📊 來源原始筆數：{len(df)}")
-        _log(
-            "🧾 API 讀到的來源末端注文番号："
-            f"{_last_non_empty_row_sample(df, '注文番号(貼上原始資料)')}"
-        )
+        order_id_col = "注文番号(貼上原始資料)"
+        source_order_count = 0
+        if order_id_col in df.columns:
+            source_order_count = int(df[order_id_col].fillna("").astype(str).str.strip().ne("").sum())
+        _log(f"🧾 來源有效注文番号：{source_order_count} 筆")
 
         # ── 🔥 雙重過濾：即時讀取目標表單已完成單號 ──────
         completed_ids: set[str] = set()
@@ -415,7 +458,7 @@ def get_pending_orders(
         df_filtered = _filter_pending_orders_dataframe(
             df,
             completed_ids=completed_ids,
-            log_cb=log_cb,
+            log_cb=_log,
         )
         _log(
             f"✅ 最終可打單：{len(df_filtered)} 筆，總讀取耗時 {time.perf_counter() - started_at:.1f}s"

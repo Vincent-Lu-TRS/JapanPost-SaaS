@@ -48,6 +48,60 @@ class PostalStartFlowTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(v2_body.count("on_change=_mark_pending_editor_dirty"), 6)
 
+    def test_legacy_editable_widgets_mark_pending_editor_dirty(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        render_body = app_source[app_source.index("def _render_main_app():"):]
+        legacy_body = render_body[
+            render_body.index("with preview_tab:"):
+            render_body.index("with postal_v2_tab:")
+        ]
+        self.assertGreaterEqual(
+            legacy_body.count("on_change=_mark_pending_editor_dirty"),
+            6,
+        )
+
+    def test_job_and_pending_log_boundaries_redact_before_storage_or_ui(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        sheets_source = (ROOT / "bot" / "sheets.py").read_text(encoding="utf-8")
+        start_body = app_source[
+            app_source.index("def _start_job("):
+            app_source.index("def _render_login_page(")
+        ]
+
+        self.assertIn("from safe_logging import", app_source)
+        self.assertIn("redact_operational_log", app_source)
+        self.assertIn("safe_message = redact_operational_log", start_body)
+        self.assertIn('job["logs"].append(entry)', start_body)
+        self.assertNotIn('entry = f"[{ts}] {msg}"', start_body)
+        self.assertIn("_safe_operational_log_lines", app_source)
+        self.assertGreaterEqual(app_source.count("_safe_operational_log_lines("), 4)
+        self.assertIn("redact_operational_log", sheets_source)
+        self.assertIn("safe_message = redact_operational_log", sheets_source)
+        self.assertNotIn("_last_non_empty_row_sample", sheets_source)
+
+    def test_pending_refresh_failure_sets_safe_status_and_exact_warning_copy(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        apply_body = app_source[
+            app_source.index("def _apply_pending_result("):
+            app_source.index("if not hasattr(st, \"fragment\")")
+        ]
+
+        self.assertIn('st.session_state["pending_refresh_error_code"]', apply_body)
+        self.assertIn("if result.data is None", apply_body)
+        self.assertIn(
+            "暫時無法取得最新資料，目前顯示上次成功讀取的內容。",
+            app_source,
+        )
+        self.assertIn(
+            "目前無法取得待製郵便運單資料，請稍後重新讀取。",
+            app_source,
+        )
+        self.assertNotIn(
+            'st.warning(st.session_state["pending_refresh_error_code"])',
+            app_source,
+        )
+
     def test_playwright_install_is_deferred_until_postal_job_start(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 

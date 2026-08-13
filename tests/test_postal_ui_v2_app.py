@@ -54,17 +54,23 @@ APP_TEST_SCRIPT = textwrap.dedent(
         ]
     )
 
+    patch("fx_rates.fetch_usd_jpy_rate", return_value=(157.79, "2026-08-07", "mock")).start()
+    pending_loader = patch(
+        "bot.sheets.get_pending_orders",
+        return_value=mock_pending.copy(deep=True),
+    ).start()
+    patch(
+        "features.picking_labels.load_picking_payload",
+        return_value=PickingPayload((), (), {}),
+    ).start()
+
     app = AppTest.from_file(str(Path.cwd() / "app.py"))
-    with patch("fx_rates.fetch_usd_jpy_rate", return_value=(157.79, "2026-08-07", "mock")), \
-         patch("bot.sheets.get_pending_orders", return_value=mock_pending.copy(deep=True)), \
-         patch("features.picking_labels.load_picking_payload", return_value=PickingPayload((), (), {})):
-        app.run(timeout=30)
-        app.session_state["authenticated"] = True
-        app.session_state["user_email"] = "tester@tkrjm.co.jp"
-        app.session_state["user_name"] = "Mock Tester"
-        app.session_state["last_pending_df"] = mock_pending
-        app.session_state["last_pending_logs"] = []
-        app.run(timeout=30)
+    app.run(timeout=30)
+    app.session_state["authenticated"] = True
+    app.session_state["user_email"] = "tester@tkrjm.co.jp"
+    app.session_state["user_name"] = "Mock Tester"
+    app.run(timeout=30)
+    assert pending_loader.call_count >= 1, pending_loader.call_count
 
     assert not app.exception, app.exception
     assert not app.error, app.error
@@ -107,6 +113,10 @@ APP_TEST_SCRIPT = textwrap.dedent(
 
 
 class PostalUiV2AppTest(unittest.TestCase):
+    def test_app_test_relies_on_synthetic_loader_instead_of_session_seed(self):
+        self.assertNotIn('app.session_state["last_pending_df"] = mock_pending', APP_TEST_SCRIPT)
+        self.assertIn("pending_loader.call_count >= 1", APP_TEST_SCRIPT)
+
     def test_v2_app_test_with_mock_orders(self):
         probe = subprocess.run(
             [sys.executable, "-c", "from streamlit.testing.v1 import AppTest"],
