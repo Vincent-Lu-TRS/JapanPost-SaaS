@@ -17,16 +17,17 @@ Commands run on synthetic data only:
 
 | Check | Result |
 |---|---|
-| Cache/UI acceptance group | 120 passed, 1 skipped (Streamlit AppTest unavailable locally) |
+| Cache/UI acceptance group | 120 passed |
+| Streamlit AppTest (`tests.test_postal_ui_v2_app`) | 2 passed on Streamlit 1.56.0 / Python 3.13.7 |
 | Package/writeback acceptance group | 210 passed |
 | Task 7 sheets/E2E group | 50 passed |
 | Task 8 outcome/start-flow group | 76 passed; follow-up focused 51 passed |
-| Full unittest discovery | 365 passed, 1 AppTest skip |
+| Full unittest discovery | 365 passed, 0 skipped |
 | `tests.test_app_imports` alone | 3 passed |
 | Tracked Python `py_compile` | passed |
 | `git diff --check` | passed |
 
-The former Python 3.14 import-reload mock interaction in `test_app_imports` was reproduced with a stale module entry and fixed by `aa7fd24`; the complete discovery now passes. No test connected to Google Sheets, Japan Post, Google Drive, or external carrier services.
+The AppTest run used a temporary virtual environment outside the repository, installed from `requirements.txt`; no virtual-environment files were added to Git. The former Python 3.14 import-reload mock interaction in `test_app_imports` was reproduced with a stale module entry and fixed by `aa7fd24`; the complete discovery now passes. No test connected to Google Sheets, Japan Post, Google Drive, or external carrier services.
 
 ## Commit sequence
 
