@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 try:
     import pandas  # noqa: F401
@@ -59,6 +60,8 @@ from bot.automation import (
     _summarize_m060800_item_state,
     _summarize_submit_commands,
     _with_base_href,
+    _shipment_log_qualifier,
+    run_automation,
 )
 
 
@@ -1862,6 +1865,26 @@ class AutomationHtmlTests(unittest.TestCase):
         failure = _build_failure_record({}, "Synthetic-Order-2", RuntimeError("synthetic failure"))
 
         self.assertEqual(failure["shipment_role"], "primary")
+
+    def test_run_automation_rejects_invalid_role_before_credentials_or_browser(self):
+        rows = pandas.DataFrame(
+            [{"order_id": "Synthetic-Order-3", "_shipment_role": "unexpected"}]
+        )
+
+        with patch(
+            "bot.automation._get_jp_post_creds",
+            side_effect=AssertionError("credentials must not be read"),
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid shipment role"):
+                run_automation(rows)
+
+    def test_shipment_log_qualifier_includes_transport_and_role(self):
+        row = {"TransType": "ePacket", "_shipment_role": "additional"}
+
+        self.assertEqual(
+            _shipment_log_qualifier(row),
+            "[trans_type=ePacket shipment_role=additional]",
+        )
 
     def test_playwright_success_path_uses_structured_result_record(self):
         from pathlib import Path

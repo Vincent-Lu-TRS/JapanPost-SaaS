@@ -69,9 +69,11 @@ def _str_value(value) -> str:
 
 def normalize_shipment_role(value) -> str:
     role = _str_value(value).lower()
-    if role == ADDITIONAL_SHIPMENT_ROLE:
-        return ADDITIONAL_SHIPMENT_ROLE
-    return PRIMARY_SHIPMENT_ROLE
+    if not role:
+        return PRIMARY_SHIPMENT_ROLE
+    if role in {PRIMARY_SHIPMENT_ROLE, ADDITIONAL_SHIPMENT_ROLE}:
+        return role
+    raise ValueError(f"invalid shipment role: {role}")
 
 
 def sanitize_hscode(value) -> str:
@@ -334,10 +336,9 @@ def expand_pending_orders_for_trans_types(
     rows: list[pd.Series] = []
     for source_index, row in df.iterrows():
         primary_trans_type = _str_value(row.get(SHIPPING_COL, ""))
+        normalize_shipment_role(row.get(SHIPMENT_ROLE_COLUMN, PRIMARY_SHIPMENT_ROLE))
         primary = row.copy()
-        primary[SHIPMENT_ROLE_COLUMN] = normalize_shipment_role(
-            row.get(SHIPMENT_ROLE_COLUMN, PRIMARY_SHIPMENT_ROLE)
-        )
+        primary[SHIPMENT_ROLE_COLUMN] = PRIMARY_SHIPMENT_ROLE
         rows.append(primary)
         seen = {primary_trans_type}
         for trans_type in extra_trans_types_by_index.get(source_index, []):

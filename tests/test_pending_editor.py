@@ -416,6 +416,33 @@ class PendingEditorTests(unittest.TestCase):
         self.assertIn(SHIPMENT_ROLE_COLUMN, expanded.columns)
         self.assertTrue(expanded.empty)
 
+    def test_expand_pending_orders_resets_existing_additional_source_to_primary(self):
+        original = pd.DataFrame(
+            [
+                {
+                    SHIPPING_COL: "EMS",
+                    SHIPMENT_ROLE_COLUMN: "additional",
+                }
+            ],
+            index=[10],
+        )
+
+        expanded = expand_pending_orders_for_trans_types(original, {10: ["ePacket"]})
+
+        self.assertEqual(
+            list(expanded[SHIPMENT_ROLE_COLUMN]),
+            ["primary", "additional"],
+        )
+
+    def test_expand_pending_orders_rejects_invalid_shipment_role(self):
+        original = pd.DataFrame(
+            [{SHIPPING_COL: "EMS", SHIPMENT_ROLE_COLUMN: "unexpected"}],
+            index=[10],
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid shipment role"):
+            expand_pending_orders_for_trans_types(original, {10: ["ePacket"]})
+
 
 if __name__ == "__main__":
     unittest.main()

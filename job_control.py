@@ -44,7 +44,9 @@ def _row_value(row: pd.Series | Mapping[str, Any], columns: list[str], default: 
 
 def _shipment_role(row: pd.Series | Mapping[str, Any]) -> str:
     role = _row_value(row, SHIPMENT_ROLE_COLUMNS, "primary").lower()
-    return "additional" if role == "additional" else "primary"
+    if role in {"primary", "additional"}:
+        return role
+    raise ValueError(f"invalid shipment role: {role}")
 
 
 def shipment_package_key(
@@ -166,6 +168,65 @@ def filter_key_log_lines(logs: list[str], limit: int = 80) -> list[str]:
     return key_lines[-limit:]
 
 
+def update_order_status_from_event(
+    job: dict[str, Any],
+    event: Mapping[str, Any],
+) -> None:
+    orders = job.get("orders") or []
+    if not orders or not isinstance(event, Mapping):
+        return
+
+    order_id = _row_value(event, ORDER_ID_COLUMNS)
+    if not order_id:
+        return
+    trans_type = _row_value(event, TRANS_TYPE_COLUMNS)
+    shipment_role = ""
+    if any(column in event for column in SHIPMENT_ROLE_COLUMNS):
+        shipment_role = _shipment_role(event)
+
+    event_type = str(event.get("event") or event.get("type") or "").strip().lower()
+    tracking = str(event.get("tracking") or event.get("tracking_no") or "").strip()
+    if event_type in {"writeback_verified", "verified_writeback"}:
+        updates = {
+            "status": "success",
+            "stage": "已完成",
+            "tracking_no": tracking,
+            "message": "",
+        }
+    elif event_type in {"automation_failed", "failed", "stopped"}:
+        updates = {
+            "status": "failed",
+            "stage": "需排查",
+            "message": str(event.get("message") or event.get("reason_text") or "").strip(),
+        }
+    else:
+        updates = {
+            "status": "running",
+            "stage": "等待回填確認" if tracking else "製單中",
+            "message": "",
+        }
+        if tracking:
+            updates["tracking_no"] = tracking
+
+    _mark_order(
+        orders,
+        order_id,
+        updates,
+        trans_type=trans_type,
+        shipment_role=shipment_role,
+    )
+
+
+def _log_package_qualifiers(message: str) -> tuple[str, str]:
+    trans_type_match = re.search(r"\btrans_type=([^\]\s]+)", message)
+    shipment_role_match = re.search(r"\bshipment_role=([^\]\s]+)", message)
+    trans_type = trans_type_match.group(1).strip() if trans_type_match else ""
+    shipment_role = shipment_role_match.group(1).strip().lower() if shipment_role_match else ""
+    if shipment_role and shipment_role not in {"primary", "additional"}:
+        raise ValueError(f"invalid shipment role: {shipment_role}")
+    return trans_type, shipment_role
+
+
 def update_order_status_from_log(job: dict[str, Any], message: str) -> None:
     orders = job.get("orders") or []
     if not orders:
@@ -180,20 +241,22 @@ def update_order_status_from_log(job: dict[str, Any], message: str) -> None:
 
     done_match = re.search(r"訂單\s+(.+?)\s+完成，(?:貨運)?單號[:：]?\s*([A-Z]{2}\d{9}JP)", message)
     if done_match:
-        _mark_order(
-            orders,
-            done_match.group(1).strip(),
+        trans_type, shipment_role = _log_package_qualifiers(message)
+        update_order_status_from_event(
+            job,
             {
-                "status": "success",
-                "stage": "已完成",
-                "tracking_no": done_match.group(2),
-                "message": "",
+                "event": "automation_completed",
+                "order_id": done_match.group(1).strip(),
+                "tracking": done_match.group(2),
+                **({"trans_type": trans_type} if trans_type else {}),
+                **({"shipment_role": shipment_role} if shipment_role else {}),
             },
         )
         return
 
     stopped_match = re.search(r"訂單\s+(.+?)\s+.*(已停止.*)", message)
     if stopped_match:
+        trans_type, shipment_role = _log_package_qualifiers(message)
         _mark_order(
             orders,
             stopped_match.group(1).strip(),
@@ -202,6 +265,8 @@ def update_order_status_from_log(job: dict[str, Any], message: str) -> None:
                 "stage": "需排查",
                 "message": stopped_match.group(2).strip(),
             },
+            trans_type=trans_type,
+            shipment_role=shipment_role,
         )
 
 
@@ -289,6 +354,16 @@ def preflight_batch_orders(
         return checks
     for _, row in selected_df.iterrows():
         order_id = _row_value(row, ORDER_ID_COLUMNS)
+        try:
+            _shipment_role(row)
+        except ValueError:
+            checks.append({
+                "order_id": order_id,
+                "status": "blocked",
+                "reason_code": "invalid_shipment_role",
+                "reason_text": "製單角色無效，請重新選擇主要或追加包裹。",
+            })
+            continue
         if not order_id or order_id in seen:
             continue
         seen.add(order_id)
@@ -377,7 +452,8 @@ def _mark_order(
             if str(order.get("trans_type") or "").strip() == trans_type
         ]
     if shipment_role:
-        normalized_role = "additional" if shipment_role == "additional" else "primary"
-        candidates = [order for order in candidates if _shipment_role(order) == normalized_role]
+        if shipment_role not in {"primary", "additional"}:
+            raise ValueError(f"invalid shipment role: {shipment_role}")
+        candidates = [order for order in candidates if _shipment_role(order) == shipment_role]
     if len(candidates) == 1:
         candidates[0].update(updates)

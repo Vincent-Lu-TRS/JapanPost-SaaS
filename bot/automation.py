@@ -486,7 +486,19 @@ def _format_addr_to_bean_name(row, order_id: str) -> str:
 
 def _shipment_role(row) -> str:
     role = _row_val(row, ["_shipment_role", "shipment_role"]).lower()
-    return "additional" if role == "additional" else "primary"
+    if not role:
+        return "primary"
+    if role in {"primary", "additional"}:
+        return role
+    raise ValueError(f"invalid shipment role: {role}")
+
+
+def _shipment_log_qualifier(row) -> str:
+    trans_type = _row_val(
+        row,
+        ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"],
+    )
+    return f"[trans_type={trans_type} shipment_role={_shipment_role(row)}]"
 
 
 def _build_result_record(row, order_id: str, tracking: str) -> dict:
@@ -1581,9 +1593,12 @@ def run_automation(
             log_cb(msg)
         logging.info(msg)
 
+    rows = df if max_rows is None else df.head(max_rows)
+    for _, row in rows.iterrows():
+        _shipment_role(row)
+
     from playwright.sync_api import sync_playwright
 
-    rows = df if max_rows is None else df.head(max_rows)
     results: list[dict] = []
     user, pwd = _get_jp_post_creds()
     pw_cookies = []
@@ -2744,7 +2759,11 @@ def run_automation(
 
         for row_idx, row in rows.iterrows():
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
-            _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
+            package_qualifier = _shipment_log_qualifier(row)
+            _log(
+                f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}） "
+                f"{package_qualifier}"
+            )
 
             tracking = "ERROR"
             results_before_order = len(results)
@@ -2809,14 +2828,17 @@ def run_automation(
                                 if print_result.get("tracking") and print_result.get("pdf_uploaded"):
                                     tracking = print_result["tracking"]
                                     results.append(_build_result_record(row, order_id, tracking))
-                                    _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
+                                    _log(
+                                        f"📌 訂單 {order_id} 完成，貨運單號：{tracking} "
+                                        f"{package_qualifier}"
+                                    )
                 if len(results) > results_before_order:
                     _log(f"✅ 訂單 {order_id} requests 打單流程已完成並回傳結果")
                 else:
                     failure = RuntimeError(
                         "requests 流程已停止但未取得完整結果；請依最後一段 diagnostics 繼續排查"
                     )
-                    _log(f"⏸️ 訂單 {order_id} {failure}")
+                    _log(f"⏸️ 訂單 {order_id} {failure} {package_qualifier}")
                     results.append(_build_failure_record(row, order_id, failure))
                 continue
 
@@ -3057,7 +3079,10 @@ def run_automation(
 
                 # ── 收集結果 ────────────────────────────
                 results.append(_build_result_record(row, order_id, tracking))
-                _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
+                _log(
+                    f"📌 訂單 {order_id} 完成，貨運單號：{tracking} "
+                    f"{package_qualifier}"
+                )
 
             except Exception as e:
                 import traceback as _tb
