@@ -5,6 +5,7 @@ import pandas as pd
 from pending_editor import (
     EDITABLE_PENDING_COLUMNS,
     PENDING_SUMMARY_COLUMNS,
+    SHIPMENT_ROLE_COLUMN,
     SHIPPING_COL,
     SHIPPING_OPTIONS,
     apply_pending_editor_values,
@@ -400,7 +401,47 @@ class PendingEditorTests(unittest.TestCase):
             list(expanded[SHIPPING_COL]),
             ["EMS", "ePacket", "國際小包"],
         )
+        self.assertEqual(
+            list(expanded[SHIPMENT_ROLE_COLUMN]),
+            ["primary", "additional", "additional"],
+        )
         self.assertEqual(list(expanded["瘜冽??芸(鞎潔???鞈?)"]), ["WhoWht-Test1"] * 3)
+
+    def test_expand_pending_orders_for_trans_types_retains_role_for_empty_frame(self):
+        expanded = expand_pending_orders_for_trans_types(
+            pd.DataFrame(columns=[SHIPPING_COL]),
+            {},
+        )
+
+        self.assertIn(SHIPMENT_ROLE_COLUMN, expanded.columns)
+        self.assertTrue(expanded.empty)
+
+    def test_expand_pending_orders_resets_existing_additional_source_to_primary(self):
+        original = pd.DataFrame(
+            [
+                {
+                    SHIPPING_COL: "EMS",
+                    SHIPMENT_ROLE_COLUMN: "additional",
+                }
+            ],
+            index=[10],
+        )
+
+        expanded = expand_pending_orders_for_trans_types(original, {10: ["ePacket"]})
+
+        self.assertEqual(
+            list(expanded[SHIPMENT_ROLE_COLUMN]),
+            ["primary", "additional"],
+        )
+
+    def test_expand_pending_orders_rejects_invalid_shipment_role(self):
+        original = pd.DataFrame(
+            [{SHIPPING_COL: "EMS", SHIPMENT_ROLE_COLUMN: "unexpected"}],
+            index=[10],
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid shipment role"):
+            expand_pending_orders_for_trans_types(original, {10: ["ePacket"]})
 
 
 if __name__ == "__main__":

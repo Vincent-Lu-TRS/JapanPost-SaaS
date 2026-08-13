@@ -15,6 +15,7 @@ APP_TEST_SCRIPT = textwrap.dedent(
 
     import pandas as pd
     from streamlit.testing.v1 import AppTest
+    from refresh_payloads import PickingPayload
 
     mock_pending = pd.DataFrame(
         [
@@ -53,30 +54,38 @@ APP_TEST_SCRIPT = textwrap.dedent(
         ]
     )
 
+    patch("fx_rates.fetch_usd_jpy_rate", return_value=(157.79, "2026-08-07", "mock")).start()
+    pending_loader = patch(
+        "bot.sheets.get_pending_orders",
+        return_value=mock_pending.copy(deep=True),
+    ).start()
+    patch(
+        "features.picking_labels.load_picking_payload",
+        return_value=PickingPayload((), (), {}),
+    ).start()
+
     app = AppTest.from_file(str(Path.cwd() / "app.py"))
-    with patch("fx_rates.fetch_usd_jpy_rate", return_value=(157.79, "2026-08-07", "mock")):
-        app.run(timeout=30)
-        app.session_state["authenticated"] = True
-        app.session_state["user_email"] = "tester@tkrjm.co.jp"
-        app.session_state["user_name"] = "Mock Tester"
-        app.session_state["last_pending_df"] = mock_pending
-        app.session_state["last_pending_logs"] = []
-        app.run(timeout=30)
+    app.run(timeout=30)
+    app.session_state["authenticated"] = True
+    app.session_state["user_email"] = "tester@tkrjm.co.jp"
+    app.session_state["user_name"] = "Mock Tester"
+    app.run(timeout=30)
+    assert [tab.label for tab in app.tabs] == [
+        "跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷",
+    ]
+    assert "郵局待打單（新版測試）" not in [tab.label for tab in app.tabs]
+    assert "郵局待打單" not in [tab.label for tab in app.tabs]
+    buttons = [item.label for item in app.button]
+    for label in ("選取全部", "清除全部", "開始製單", "重新讀取", "全部恢復預設資料"):
+        assert label in buttons, label
+    assert not app.exception, app.exception
+    assert pending_loader.call_count >= 1, pending_loader.call_count
 
     assert not app.exception, app.exception
     assert not app.error, app.error
-    buttons = [item.label for item in app.button]
     markdown = [item.value for item in app.markdown]
     assert any("postal-v2" in value for value in markdown)
     assert any("USD/JPY 157.79" in value for value in markdown)
-    for label in [
-        "\u9078\u53d6\u5168\u90e8",
-        "\u6e05\u9664\u5168\u90e8",
-        "\u958b\u59cb\u88fd\u55ae",
-        "\u91cd\u65b0\u8b80\u53d6",
-        "\u5168\u90e8\u6062\u5fa9\u9810\u8a2d\u8cc7\u6599",
-    ]:
-        assert label in buttons, label
     assert len(
         [
             item.key
@@ -104,6 +113,10 @@ APP_TEST_SCRIPT = textwrap.dedent(
 
 
 class PostalUiV2AppTest(unittest.TestCase):
+    def test_app_test_relies_on_synthetic_loader_instead_of_session_seed(self):
+        self.assertNotIn('app.session_state["last_pending_df"] = mock_pending', APP_TEST_SCRIPT)
+        self.assertIn("pending_loader.call_count >= 1", APP_TEST_SCRIPT)
+
     def test_v2_app_test_with_mock_orders(self):
         probe = subprocess.run(
             [sys.executable, "-c", "from streamlit.testing.v1 import AppTest"],

@@ -8,7 +8,8 @@ os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
 
 import hashlib
 import html
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess
 import sys
@@ -18,16 +19,21 @@ import tempfile
 import streamlit as st
 import pandas as pd
 from app_imports import import_module_with_retry
+from bot.sheets import backfill_results
 
 _job_control = import_module_with_retry("job_control")
 BatchJobRegistry = _job_control.BatchJobRegistry
+apply_writeback_outcome = _job_control.apply_writeback_outcome
 mark_results_completed = _job_control.mark_results_completed
 mark_results_failed = _job_control.mark_results_failed
 mark_unfinished_orders = _job_control.mark_unfinished_orders
+partition_preflight_rows = _job_control.partition_preflight_rows
 preflight_batch_orders = _job_control.preflight_batch_orders
 summarize_job_results = _job_control.summarize_job_results
 summarize_job_progress = _job_control.summarize_job_progress
 update_order_status_from_log = _job_control.update_order_status_from_log
+update_order_status_from_event = _job_control.update_order_status_from_event
+writeback_retry_candidates = _job_control.writeback_retry_candidates
 from pending_editor import (
     SHIPPING_COL,
     SHIPPING_OPTIONS,
@@ -46,6 +52,8 @@ from fx_rates import fetch_usd_jpy_rate
 from postal_ui_feedback import (
     completed_order_ids,
     filter_pending_orders_after_batch,
+    fully_completed_order_ids,
+    preserve_incomplete_submitted_orders,
     summarize_batch_results,
     summarize_pending_read_logs,
 )
@@ -55,6 +63,18 @@ from postal_ui_v2 import (
     format_secondary_rate_badge,
     restore_v2_item_frame,
 )
+from refresh_cache import (
+    RefreshResult,
+    SharedRefreshCoordinator,
+    may_apply_pending_snapshot,
+)
+from refresh_payloads import (
+    PendingPayload,
+    copy_pending_payload,
+    copy_picking_payload,
+)
+from safe_logging import redact_operational_log, safe_log_event
+from features.picking_labels import apply_picking_payload, load_picking_payload
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -114,6 +134,13 @@ def _get_job_registry(cache_version: str = _JOB_REGISTRY_CACHE_VERSION) -> Batch
 _JOB_REGISTRY = _get_job_registry(_JOB_REGISTRY_CACHE_VERSION)
 
 
+@st.cache_resource(show_spinner=False)
+def _get_refresh_coordinator(
+    cache_version="2026-08-13-v1",
+) -> SharedRefreshCoordinator:
+    return SharedRefreshCoordinator(ttl=timedelta(minutes=20))
+
+
 def _job_lock_path(email: str) -> Path:
     digest = hashlib.sha256((email or "anonymous").encode("utf-8")).hexdigest()[:24]
     return Path(tempfile.gettempdir()) / "jppost-job-locks" / f"{digest}.lock"
@@ -150,18 +177,316 @@ def _get_job(email: str) -> dict | None:
     return _JOB_REGISTRY.get(email)
 
 
-def _load_pending_orders() -> tuple[pd.DataFrame, list[str]]:
+def _dataframe_sensitive_values(dataframe: pd.DataFrame | None) -> tuple[str, ...]:
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return ()
+    values: list[str] = []
+    seen: set[str] = set()
+    sensitive_markers = (
+        "注文番号",
+        "order",
+        "shipping name",
+        "receiver",
+        "recipient",
+        "email",
+        "mail",
+        "tracking",
+        "追跡",
+        "運單",
+        "address",
+        "住所",
+        "地址",
+        "收件人",
+        "phone",
+        "電話",
+        "pccc",
+        "prc id",
+    )
+    for column in dataframe.columns:
+        column_name = str(column).strip().lower()
+        is_status_column = "製單上傳狀態" in column_name
+        if not is_status_column and not any(
+            marker in column_name for marker in sensitive_markers
+        ):
+            continue
+        for value in dataframe[column].tolist():
+            if value is None:
+                continue
+            try:
+                if pd.isna(value):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            text = str(value).strip()
+            if is_status_column and not re.fullmatch(
+                r"[A-Z]{2}\d{9}[A-Z]{2}",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            lowered = text.lower()
+            if len(text) < 4 or lowered in seen:
+                continue
+            seen.add(lowered)
+            values.append(text)
+    return tuple(values)
+
+
+def _job_sensitive_values(
+    job: dict | None,
+    *,
+    dataframe: pd.DataFrame | None = None,
+    email: str = "",
+) -> tuple[str, ...]:
+    values = list(_dataframe_sensitive_values(dataframe))
+    if email:
+        values.append(email)
+
+    sensitive_keys = {
+        "order_id",
+        "recipient",
+        "receiver",
+        "tracking",
+        "tracking_no",
+        "email",
+        "name",
+        "address",
+        "phone",
+        "pccc",
+        "prc_id",
+        "reason_text",
+        "message",
+        "error",
+    }
+
+    def _collect(value, *, include_scalar: bool = False) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                _collect(
+                    nested,
+                    include_scalar=str(key).strip().lower() in sensitive_keys,
+                )
+        elif isinstance(value, (list, tuple, set)):
+            for nested in value:
+                _collect(nested, include_scalar=include_scalar)
+        elif include_scalar:
+            if value is None:
+                return
+            try:
+                if pd.isna(value):
+                    return
+            except (TypeError, ValueError):
+                pass
+            text = str(value).strip()
+            if len(text) >= 4:
+                values.append(text)
+
+    if isinstance(job, dict):
+        for key in ("orders", "results", "backfill_outcome"):
+            _collect(job.get(key))
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        lowered = value.lower()
+        if lowered not in seen:
+            seen.add(lowered)
+            unique.append(value)
+    return tuple(unique)
+
+
+def _safe_operational_log_lines(
+    logs,
+    *,
+    sensitive_values=(),
+) -> list[str]:
+    return [
+        redact_operational_log(line, sensitive_values=sensitive_values)
+        for line in logs or []
+    ]
+
+
+def _load_pending_orders(
+    *,
+    strict: bool = False,
+    exclude_completed: bool = True,
+) -> tuple[pd.DataFrame, list[str]]:
     from bot.sheets import get_pending_orders
 
     pending_logs: list[str] = []
-    df_pending = get_pending_orders(log_cb=pending_logs.append)
-    return df_pending, pending_logs
+    df_pending = get_pending_orders(
+        log_cb=pending_logs.append,
+        strict=strict,
+        exclude_completed=exclude_completed,
+    )
+    safe_logs = _safe_operational_log_lines(
+        pending_logs,
+        sensitive_values=_dataframe_sensitive_values(df_pending),
+    )
+    return df_pending, safe_logs
 
 
-def _visible_pending_logs(logs: list[str]) -> list[str]:
+def load_pending_payload() -> PendingPayload:
+    dataframe, logs = _load_pending_orders(strict=True, exclude_completed=True)
+    return PendingPayload(dataframe=dataframe, logs=tuple(logs))
+
+
+def _refresh_source(source: str, *, force: bool):
+    coordinator = _get_refresh_coordinator()
+    if source == "pending":
+        return coordinator.get(
+            source,
+            load_pending_payload,
+            force=force,
+            copier=copy_pending_payload,
+        )
+    if source == "picking":
+        return coordinator.get(
+            source,
+            load_picking_payload,
+            force=force,
+            copier=copy_picking_payload,
+        )
+    raise ValueError(f"unknown refresh source: {source}")
+
+
+def _mark_pending_editor_dirty() -> None:
+    st.session_state["pending_editor_dirty"] = True
+
+
+def _clear_pending_editor_keys() -> None:
+    prefixes = (
+        "pending_v2_name_",
+        "pending_v2_trans_",
+        "pending_v2_extra_trans_",
+        "pending_v2_prc_id_",
+        "pending_v2_pccc_",
+        "pending_v2_items_",
+    )
+    for key in list(st.session_state):
+        if str(key).startswith(prefixes):
+            st.session_state.pop(key, None)
+
+
+def _apply_pending_result(
+    result: RefreshResult[PendingPayload],
+    *,
+    is_busy: bool,
+    allow_dirty_reset: bool = False,
+    job=None,
+) -> bool:
+    error_code = str(result.status.error_code or "").strip()
+    if error_code:
+        st.session_state["pending_refresh_error_code"] = error_code
+    else:
+        st.session_state.pop("pending_refresh_error_code", None)
+
+    if result.data is None:
+        st.session_state["pending_refresh_error_code"] = error_code or "unavailable"
+        return False
+
+    if not may_apply_pending_snapshot(
+        is_busy=is_busy,
+        editor_dirty=bool(st.session_state.get("pending_editor_dirty")),
+        allow_dirty_reset=allow_dirty_reset,
+    ):
+        return False
+
+    payload = copy_pending_payload(result.data)
+    dataframe = payload.dataframe.copy(deep=True)
+    if job:
+        dataframe = preserve_incomplete_submitted_orders(
+            existing=st.session_state.get("last_pending_df"),
+            refreshed=dataframe,
+            submitted_orders=job.get("orders") or [],
+            results=job.get("results") or [],
+        )
+        if job.get("results"):
+            dataframe = filter_pending_orders_after_batch(
+                dataframe,
+                job["results"],
+                submitted_packages=job.get("orders") or [],
+            )
+    logs = _safe_operational_log_lines(
+        payload.logs,
+        sensitive_values=_dataframe_sensitive_values(dataframe),
+    )
+    st.session_state["last_pending_df"] = dataframe
+    st.session_state["last_pending_logs"] = logs
+    st.session_state["last_pending_loaded_at"] = result.status.loaded_at
+    st.session_state["last_pending_read_summary"] = summarize_pending_read_logs(logs)
+    st.session_state["last_pending_error"] = error_code
+    return True
+
+
+def _pending_refresh_warning_message() -> str:
+    if not st.session_state.get("pending_refresh_error_code"):
+        return ""
+    if isinstance(st.session_state.get("last_pending_df"), pd.DataFrame):
+        return "暫時無法取得最新資料，目前顯示上次成功讀取的內容。"
+    return "目前無法取得待製郵便運單資料，請稍後重新讀取。"
+
+
+if not hasattr(st, "fragment"):
+    st.fragment = lambda **_kwargs: (lambda function: function)
+
+
+@st.fragment(run_every="20m")
+def _active_refresh_tick(*, is_busy: bool, job) -> None:
+    before_pending = st.session_state.get("last_pending_loaded_at")
+    before_picking = st.session_state.get("picking_snapshot_loaded_at")
+    pending_applied = False
+    picking_applied = False
+
+    try:
+        pending_result = _refresh_source("pending", force=False)
+        pending_applied = _apply_pending_result(
+            pending_result,
+            is_busy=is_busy,
+            allow_dirty_reset=False,
+            job=job,
+        )
+    except Exception:
+        pending_result = None
+        st.session_state["pending_refresh_error_code"] = "unavailable"
+
+    try:
+        picking_result = _refresh_source("picking", force=False)
+        if picking_result.data is not None:
+            apply_picking_payload(
+                picking_result.data,
+                preserve_selection=True,
+                loaded_at=picking_result.status.loaded_at,
+            )
+            st.session_state["picking_snapshot_loaded_at"] = picking_result.status.loaded_at
+            picking_applied = True
+    except Exception:
+        picking_result = None
+
+    changed = (
+        pending_applied
+        and pending_result is not None
+        and pending_result.status.loaded_at != before_pending
+    ) or (
+        picking_applied
+        and picking_result is not None
+        and picking_result.status.loaded_at != before_picking
+    )
+    if changed:
+        try:
+            st.rerun(scope="app")
+        except TypeError:
+            st.rerun()
+
+
+def _visible_pending_logs(logs: list[str], *, sensitive_values=()) -> list[str]:
+    safe_logs = _safe_operational_log_lines(
+        logs,
+        sensitive_values=sensitive_values,
+    )
     return [
         line
-        for line in logs
+        for line in safe_logs
         if "關注訂單診斷（WhoWhy/WhoWht）" not in line
         and "關注訂單診斷(WhoWhy/WhoWht)" not in line
     ]
@@ -185,84 +510,8 @@ def _zero_value_warning_lines(df: pd.DataFrame) -> list[str]:
     return warnings
 
 
-def _reset_key_for(order_id: str) -> str:
-    return f"pending_reset_{order_id}"
-
-
-def _reset_version(order_id: str) -> int:
-    return int(st.session_state.get(_reset_key_for(order_id), 0))
-
-
-def _reset_order_editor(order_id: str) -> None:
-    st.session_state[_reset_key_for(order_id)] = _reset_version(order_id) + 1
-    selected_by_order = st.session_state.get("pending_selected_by_order")
-    if isinstance(selected_by_order, dict):
-        selected_by_order[order_id] = True
-
-
-def _reset_all_order_editors(df: pd.DataFrame) -> None:
-    for _, row in df.iterrows():
-        order_id = str(row.get("注文番号(貼上原始資料)", "")).strip()
-        if order_id:
-            _reset_order_editor(order_id)
-
-
-def _name_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_name_{position}_{order_id}_{reset_version}"
-
-
-def _prc_id_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_prc_id_{position}_{order_id}_{reset_version}"
-
-
-def _pccc_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_pccc_{position}_{order_id}_{reset_version}"
-
-
 def _order_id_for_position(row: pd.Series, position: int) -> str:
     return str(row.get("注文番号(貼上原始資料)", row.get("Order No.", ""))).strip() or f"row-{position + 1}"
-
-
-def _selected_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_selected_{position}_{order_id}_{reset_version}"
-
-
-def _selected_by_order_state() -> dict[str, bool]:
-    selected_by_order = st.session_state.get("pending_selected_by_order")
-    if not isinstance(selected_by_order, dict):
-        selected_by_order = {}
-        st.session_state["pending_selected_by_order"] = selected_by_order
-    return selected_by_order
-
-
-def _is_order_selected(order_id: str) -> bool:
-    return bool(_selected_by_order_state().get(order_id, True))
-
-
-def _sync_order_selected_from_widget(order_id: str, widget_key: str) -> None:
-    _selected_by_order_state()[order_id] = bool(st.session_state.get(widget_key, True))
-
-
-def _initialize_order_selected_widget(order_id: str, widget_key: str) -> None:
-    selected_by_order = _selected_by_order_state()
-    if order_id not in selected_by_order:
-        selected_by_order[order_id] = bool(st.session_state.get(widget_key, True))
-    st.session_state[widget_key] = bool(selected_by_order.get(order_id, True))
-
-
-def _sync_visible_order_selection_from_widgets(df_pending: pd.DataFrame, editable_count: int) -> None:
-    selected_by_order = _selected_by_order_state()
-    for position in range(editable_count):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        reset_version = _reset_version(order_id)
-        widget_key = _selected_key_for(position, order_id, reset_version)
-        if widget_key in st.session_state:
-            selected_by_order[order_id] = bool(st.session_state.get(widget_key))
-
-
-def _extra_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_extra_trans_single_{position}_{order_id}_{reset_version}"
 
 
 def _sync_recipient_id_session_fields(name_key: str, prc_id_key: str, pccc_key: str) -> None:
@@ -302,17 +551,6 @@ def _pending_data_warning_lines(df: pd.DataFrame) -> list[str]:
     return warnings
 
 
-def _format_short_rate(rate: float | None, rate_date: str) -> str:
-    rate_text = f"{rate:.2f}" if rate else "N/A"
-    date_text = ""
-    if rate_date:
-        try:
-            date_text = datetime.strptime(rate_date, "%Y-%m-%d").strftime("%y/%m/%d")
-        except Exception:
-            date_text = str(rate_date)
-    return f"USD/JPY {rate_text}" + (f"｜{date_text}" if date_text else "")
-
-
 def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFrame:
     edited = frame.copy()
     state = st.session_state.get(widget_key)
@@ -336,92 +574,6 @@ def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFra
                     value = sanitize_hscode(value)
                 edited.at[edited.index[index], column] = value
     return edited
-
-
-def _build_pending_run_frame_from_state(
-    df_pending: pd.DataFrame,
-    editable_count: int,
-    usd_jpy_rate: float | None,
-) -> pd.DataFrame:
-    edited_summary_rows: list[dict[str, str]] = []
-    edited_items_by_position: dict[int, pd.DataFrame] = {}
-    for position in range(editable_count):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        country = str(row.get("收件人國家", row.get("Country", ""))).strip()
-        parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
-        default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
-        reset_version = _reset_version(order_id)
-        item_frame = build_pending_item_frame(row)
-        item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-        trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
-        name_key = _name_key_for(position, order_id, reset_version)
-        prc_id_key = _prc_id_key_for(position, order_id, reset_version)
-        pccc_key = _pccc_key_for(position, order_id, reset_version)
-        _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
-        edited_name = st.session_state.get(name_key, parsed_name["clean_name"])
-        edited_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
-        edited_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
-        shipping_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
-        edited_summary_rows.append(
-            {
-                "Order No.": order_id,
-                "Name": shipping_name,
-                "Country": country,
-                "TransType": st.session_state.get(trans_key, default_trans_type),
-                "TotalValue(USD)": "",
-                "TotalValue(JPY)": "",
-            }
-        )
-        edited_items_by_position[position] = _apply_data_editor_state(item_frame, item_key)
-    if not edited_summary_rows:
-        return df_pending
-    return apply_pending_order_editor_values(
-        df_pending,
-        pd.DataFrame(edited_summary_rows),
-        edited_items_by_position,
-        usd_jpy_rate=usd_jpy_rate,
-    )
-
-
-def _selected_source_indices_from_state(df_pending: pd.DataFrame, editable_count: int) -> list[object]:
-    selected_indices: list[object] = []
-    for position, source_index in enumerate(df_pending.index[:editable_count]):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        if _is_order_selected(order_id):
-            selected_indices.append(source_index)
-    selected_indices.extend(list(df_pending.index[editable_count:]))
-    return selected_indices
-
-
-def _extra_trans_types_by_index_from_state(df_pending: pd.DataFrame, editable_count: int) -> dict[object, list[str]]:
-    extra_trans_types: dict[object, list[str]] = {}
-    for position, source_index in enumerate(df_pending.index[:editable_count]):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        reset_version = _reset_version(order_id)
-        extra_key = _extra_trans_key_for(position, order_id, reset_version)
-        selected = st.session_state.get(extra_key, [])
-        if isinstance(selected, str):
-            extra_trans_types[source_index] = [] if selected == "無" else [selected]
-        elif isinstance(selected, (list, tuple)):
-            extra_trans_types[source_index] = [str(value) for value in selected]
-    return extra_trans_types
-
-
-def _prepare_pending_run_frame_from_state(
-    df_pending: pd.DataFrame,
-    editable_count: int,
-    usd_jpy_rate: float | None,
-) -> pd.DataFrame:
-    edited = _build_pending_run_frame_from_state(df_pending, editable_count, usd_jpy_rate)
-    selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
-    if not selected_indices:
-        return edited.iloc[0:0].copy()
-    selected = edited.loc[selected_indices].copy()
-    extra_trans_types = _extra_trans_types_by_index_from_state(df_pending, editable_count)
-    return expand_pending_orders_for_trans_types(selected, extra_trans_types)
 
 
 def _v2_reset_key_for(order_id: str) -> str:
@@ -596,6 +748,22 @@ def _build_pending_run_frame_from_v2_state(
     )
 
 
+def _retry_writeback_results(job):
+    candidates = writeback_retry_candidates((job or {}).get("results"))
+    if not candidates:
+        return {
+            "ok": False,
+            "message": "運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。",
+        }
+    outcome = backfill_results(candidates)
+    terminal_status = apply_writeback_outcome(job, candidates, outcome)
+    _JOB_REGISTRY.finish(job, terminal_status)
+    return {
+        "ok": outcome["ok"],
+        "message": "回填已完成" if outcome["ok"] else "仍有資料需要確認",
+    }
+
+
 def _render_postal_pending_v2(
     *,
     email: str,
@@ -603,7 +771,6 @@ def _render_postal_pending_v2(
     pending_logs: list[str],
     rate: float | None,
     rate_date: str,
-    rate_source: str,
     job: dict | None,
     is_running: bool,
     is_launching: bool,
@@ -611,8 +778,6 @@ def _render_postal_pending_v2(
     pending_count: int,
     done: int,
     batch_summary: dict,
-    pending_manual_reload_requested: bool,
-    pending_read_error: str,
 ) -> None:
     """Render the isolated v2 postal page using the existing job pipeline."""
     st.markdown('<span class="postal-v2-page-marker"></span>', unsafe_allow_html=True)
@@ -742,17 +907,31 @@ def _render_postal_pending_v2(
                 )
 
                 if reload_requested:
-                    st.session_state.pop("last_pending_df", None)
-                    st.session_state.pop("last_pending_logs", None)
-                    st.session_state.pop("pending_refresh_notice", None)
-                    st.session_state.pop("pending_selected_by_order", None)
-                    st.session_state.pop("pending_v2_selected_by_order", None)
-                    st.session_state["pending_manual_reload_requested"] = True
+                    pending_result = _refresh_source("pending", force=True)
+                    if _apply_pending_result(
+                        pending_result,
+                        is_busy=is_busy,
+                        allow_dirty_reset=False,
+                        job=job,
+                    ):
+                        st.session_state.pop("pending_refresh_warning", None)
+                    else:
+                        st.session_state["pending_refresh_warning"] = (
+                            "目前有尚未送出的編輯，已保留畫面資料。"
+                        )
                     st.rerun()
-                if reset_all_requested and not df_pending.empty:
-                    st.session_state.pop("pending_v2_selected_by_order", None)
-                    _v2_reset_all_order_editors(df_pending, editable_count)
-                    st.rerun()
+                if reset_all_requested:
+                    pending_result = _refresh_source("pending", force=True)
+                    if _apply_pending_result(
+                        pending_result,
+                        is_busy=is_busy,
+                        allow_dirty_reset=True,
+                        job=job,
+                    ):
+                        st.session_state["pending_editor_dirty"] = False
+                        st.session_state.pop("pending_v2_selected_by_order", None)
+                        _clear_pending_editor_keys()
+                        st.rerun()
 
                 if start_requested:
                     if df_pending.empty:
@@ -772,20 +951,18 @@ def _render_postal_pending_v2(
                         else:
                             st.error("任務執行中，請稍候")
 
-                if pending_manual_reload_requested and not is_busy:
-                    if pending_read_error:
-                        st.warning(f"重新讀取失敗：{pending_read_error}")
-                    else:
-                        read_summary = st.session_state.get("last_pending_read_summary") or {}
-                        st.success(
-                            "重新讀取完成："
-                            f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
-                            f"耗時 {read_summary.get('elapsed', '-')}。"
-                        )
+                pending_loaded_at = st.session_state.get("last_pending_loaded_at")
+                if isinstance(pending_loaded_at, datetime):
+                    st.caption(f"資料更新於 {pending_loaded_at.astimezone().strftime('%H:%M')}")
+                refresh_error_message = _pending_refresh_warning_message()
+                if refresh_error_message:
+                    st.warning(refresh_error_message)
+                elif st.session_state.get("pending_refresh_warning"):
+                    st.warning(st.session_state["pending_refresh_warning"])
                 if not rate and not df_pending.empty:
                     st.warning(
                         "暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，"
-                        f"TotalValue(JPY) 會保留來源預設值。{rate_source}"
+                        "TotalValue(JPY) 會保留來源預設值。"
                     )
                 if zero_value_warnings:
                     st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
@@ -928,7 +1105,12 @@ def _render_postal_pending_v2(
                                 vertical_alignment="center",
                             )
                         with action_cols[0]:
-                            edited_name = st.text_input("姓名", value=pending_name, key=name_key)
+                            edited_name = st.text_input(
+                                "姓名",
+                                value=pending_name,
+                                key=name_key,
+                                on_change=_mark_pending_editor_dirty,
+                            )
                         with action_cols[1]:
                             trans_type = st.selectbox(
                                 "寄送方式",
@@ -937,6 +1119,7 @@ def _render_postal_pending_v2(
                                 if default_trans_type in SHIPPING_OPTIONS
                                 else 0,
                                 key=trans_key,
+                                on_change=_mark_pending_editor_dirty,
                             )
                         extra_options = ["無"] + SHIPPING_OPTIONS
                         if st.session_state.get(extra_trans_key, "無") not in extra_options:
@@ -944,15 +1127,30 @@ def _render_postal_pending_v2(
                         if extra_trans_key not in st.session_state:
                             st.session_state[extra_trans_key] = "無"
                         with action_cols[2]:
-                            st.selectbox("追加製作", options=extra_options, key=extra_trans_key)
+                            st.selectbox(
+                                "追加製作",
+                                options=extra_options,
+                                key=extra_trans_key,
+                                on_change=_mark_pending_editor_dirty,
+                            )
                         edited_prc_id = pending_prc_id
                         edited_pccc = pending_pccc
                         if kind == "china":
                             with action_cols[3]:
-                                edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
+                                edited_prc_id = st.text_input(
+                                    "PRC ID",
+                                    value=pending_prc_id,
+                                    key=prc_id_key,
+                                    on_change=_mark_pending_editor_dirty,
+                                )
                         elif kind == "korea":
                             with action_cols[3]:
-                                edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
+                                edited_pccc = st.text_input(
+                                    "PCCC",
+                                    value=pending_pccc,
+                                    key=pccc_key,
+                                    on_change=_mark_pending_editor_dirty,
+                                )
                         with action_cols[-1]:
                             if st.button(
                                 "恢復預設",
@@ -993,6 +1191,7 @@ def _render_postal_pending_v2(
                                 "Quantity": st.column_config.TextColumn("數量", width=90),
                             },
                             key=item_key,
+                            on_change=_mark_pending_editor_dirty,
                         )
                         edited_items_by_position[position] = restore_v2_item_frame(edited_display_frame)
 
@@ -1000,6 +1199,12 @@ def _render_postal_pending_v2(
                     st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
 
         if job and job.get("results") and not is_busy:
+            retry_notice = st.session_state.pop("pending_v2_writeback_retry_notice", None)
+            if retry_notice == "回填已完成":
+                st.success(retry_notice)
+            elif retry_notice:
+                st.warning(retry_notice)
+
             if batch_summary["failure_alerts"]:
                 st.warning(
                     f"本批完成 {batch_summary['completed_count']} 筆，"
@@ -1012,6 +1217,21 @@ def _render_postal_pending_v2(
                     f"製單完成：本次完成 {batch_summary['completed_count']} 筆。"
                     "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
                 )
+
+            retry_candidates = writeback_retry_candidates(job.get("results"))
+            missing_tracking_failures = [
+                result
+                for result in job.get("results") or []
+                if str(result.get("status") or "").strip().lower() == "backfill_failed"
+                and not str(result.get("tracking") or "").strip()
+            ]
+            if retry_candidates:
+                if st.button("重新回填資料", key="pending_v2_retry_writeback"):
+                    retry_result = _retry_writeback_results(job)
+                    st.session_state["pending_v2_writeback_retry_notice"] = retry_result["message"]
+                    st.rerun()
+            if missing_tracking_failures:
+                st.warning("運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。")
 
         if job and job.get("orders"):
             st.markdown('<div class="postal-v2-status-heading">製單狀態</div>', unsafe_allow_html=True)
@@ -1059,7 +1279,11 @@ def _render_postal_pending_v2(
         if job and job.get("logs") and batch_summary["failure_alerts"]:
             with st.expander("詳細除錯日誌", expanded=True):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                st.code("\n".join(job["logs"][-200:]), language="text")
+                safe_job_logs = _safe_operational_log_lines(
+                    job["logs"][-200:],
+                    sensitive_values=_job_sensitive_values(job, email=email),
+                )
+                st.code("\n".join(safe_job_logs), language="text")
 
 
 def _render_running_progress(job: dict) -> None:
@@ -1100,15 +1324,6 @@ def _render_blocking_running_guard(job: dict | None, launching: bool = False) ->
     )
 
 
-def _summary_cell(label: str, value: str) -> str:
-    return (
-        '<div class="summary-cell">'
-        f'<div class="summary-label">{html.escape(label)}</div>'
-        f'<div class="summary-value">{html.escape(str(value))}</div>'
-        '</div>'
-    )
-
-
 def _native_info(label: str, value: str) -> str:
     if label == "Order No.":
         label_class = "native-info-order"
@@ -1124,10 +1339,6 @@ def _native_info(label: str, value: str) -> str:
     )
 
 
-def _summary_label(label: str) -> str:
-    return f'<div class="summary-label select-summary-label">{html.escape(label)}</div>'
-
-
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
     ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
     if not ok or job is None:
@@ -1135,35 +1346,56 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
     _write_job_lock(email)
 
     def _run():
-        import traceback as tb
-
         def _log(msg: str):
-            ts = time.strftime("%H:%M:%S")
-            entry = f"[{ts}] {msg}"
-            print(f"[BOT] {entry}", file=sys.stderr, flush=True)
             try:
-                job["logs"].append(entry)
                 update_order_status_from_log(job, msg)
+                safe_message = redact_operational_log(
+                    msg,
+                    sensitive_values=_job_sensitive_values(
+                        job,
+                        dataframe=df,
+                        email=email,
+                    ),
+                )
+                ts = time.strftime("%H:%M:%S")
+                entry = f"[{ts}] {safe_message}"
+                print(f"[BOT] {entry}", file=sys.stderr, flush=True)
+                job["logs"].append(entry)
             except Exception as log_err:
-                print(f"[LOG_ERR] {log_err}", file=sys.stderr, flush=True)
+                print(
+                    f"[LOG_ERR] {type(log_err).__name__}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        def _status(event):
+            try:
+                update_order_status_from_event(job, event)
+            except Exception:
+                safe_log_event(
+                    _log,
+                    "job_exception",
+                    error_type="StatusEventError",
+                )
 
         try:
             rows_for_run = df if max_rows is None else df.head(max_rows)
             from bot.sheets import (
                 COUNTRY_CODE_MAP,
-                backfill_results,
                 get_pending_orders,
-                read_completed_order_ids,
+                read_completion_authority,
             )
 
             _log("🔐 製單前重新確認 Google Sheets 完成狀態與來源快照...")
             try:
-                completed_ids = read_completed_order_ids()
+                completion_authority = read_completion_authority()
             except Exception as preflight_error:
-                reason_text = f"無法確認完成狀態，這批未開始製單：{preflight_error}"
+                reason_text = "無法確認完成狀態，這批未開始製單。"
                 preflight_results = [
                     {
                         "order_id": str(order.get("order_id") or "").strip(),
+                        "trans_type": str(order.get("trans_type") or "").strip(),
+                        "shipment_role": str(order.get("shipment_role") or "primary").strip(),
                         "status": "blocked",
                         "reason_code": "target_read_error",
                         "reason_text": reason_text,
@@ -1173,42 +1405,88 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 ]
                 job["results"] = preflight_results
                 mark_results_failed(job, preflight_results)
-                _log(f"❌ {reason_text}")
+                safe_log_event(
+                    _log,
+                    "preflight_blocked",
+                    error_type=type(preflight_error).__name__,
+                )
                 _JOB_REGISTRY.finish(job, "error")
                 _clear_job_lock(email)
                 return
 
-            latest_pending_df = get_pending_orders(log_cb=_log)
+            latest_pending_df = get_pending_orders(
+                log_cb=_log,
+                strict=True,
+                exclude_completed=False,
+            )
             preflight_checks = preflight_batch_orders(
                 rows_for_run,
                 latest_pending_df,
-                completed_ids,
+                completion_authority,
             )
             job["preflight_checks"] = preflight_checks
-            blocked_checks = [check for check in preflight_checks if check.get("status") != "ready"]
-            if blocked_checks:
-                preflight_results = [
+            ready_rows, already_completed_items, hard_blocked_items = partition_preflight_rows(
+                rows_for_run,
+                preflight_checks,
+            )
+            preflight_completed_results = [
+                {
+                    **check,
+                    "status": "completed",
+                    "message": check.get("reason_text", ""),
+                }
+                for check in already_completed_items
+            ]
+            preflight_blocked_results = [
                     {
-                        "order_id": check["order_id"],
+                        **check,
                         "status": "blocked",
                         "reason_code": check.get("reason_code", "source_changed"),
                         "reason_text": check.get("reason_text", "製單前檢查未通過"),
                         "message": check.get("reason_text", "製單前檢查未通過"),
                     }
-                    for check in blocked_checks
-                ]
-                job["results"] = preflight_results
-                mark_results_failed(job, preflight_results)
-                _log(
-                    "🛑 製單前檢查阻擋："
-                    + ", ".join(
-                        f"{check['order_id']}({check.get('reason_code', 'unknown')})"
-                        for check in blocked_checks
-                    )
+                    for check in hard_blocked_items
+            ]
+            initial_results = preflight_completed_results + preflight_blocked_results
+            job["results"] = list(initial_results)
+            if preflight_completed_results:
+                mark_results_completed(job, preflight_completed_results)
+            if preflight_blocked_results:
+                mark_results_failed(job, preflight_blocked_results)
+                safe_log_event(
+                    _log,
+                    "preflight_blocked",
+                    count=len(preflight_blocked_results),
                 )
-                _JOB_REGISTRY.finish(job, "partial_failure")
+                aborted_results = [
+                    {
+                        "order_id": str(row.get("order_id") or row.get("注文番号(貼上原始資料)") or "").strip(),
+                        "trans_type": str(row.get("trans_type") or row.get("TransType") or row.get("郵局運送方式(複數商品請自行確認是否走小包)") or "").strip(),
+                        "shipment_role": str(row.get("shipment_role") or row.get("_shipment_role") or "primary").strip(),
+                        "status": "blocked",
+                        "reason_code": "batch_preflight_blocked",
+                        "reason_text": "本批含未通過製單前檢查的包裹，整批停止。",
+                        "message": "本批含未通過製單前檢查的包裹，整批停止。",
+                    }
+                    for _, row in ready_rows.iterrows()
+                ]
+                job["results"].extend(aborted_results)
+                mark_results_failed(job, aborted_results)
+                _JOB_REGISTRY.finish(job, "error")
                 _clear_job_lock(email)
                 return
+            if ready_rows.empty:
+                terminal_status = (
+                    "completed" if preflight_completed_results and not preflight_blocked_results
+                    else "partial_failure"
+                )
+                _JOB_REGISTRY.finish(job, terminal_status)
+                if preflight_completed_results:
+                    job["pending_refresh_needed"] = True
+                _clear_job_lock(email)
+                return
+
+            rows_for_run = ready_rows
 
             _log("🚀 任務啟動，正在載入模組...")
             _log("🧰 正在準備 Playwright Chromium 環境...")
@@ -1231,9 +1509,10 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     )
             _log("✅ 模組載入成功，開始 Playwright 自動化...")
             results = run_automation(
-                df,
-                max_rows=max_rows,
+                rows_for_run,
+                max_rows=None,
                 log_cb=_log,
+                status_cb=_status,
                 headless=True,
                 precomputed_hs_codes=hs_codes_by_order,
             )
@@ -1247,67 +1526,94 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                         "reason_text": "自動化完成但沒有產生新結果",
                         "message": "自動化完成但沒有產生新結果",
                     }
-                    for order in job.get("orders") or []
+                    for _, row in rows_for_run.iterrows()
+                    for order in [
+                        {
+                            "order_id": str(row.get("order_id") or row.get("注文番号(貼上原始資料)") or "").strip(),
+                            "trans_type": str(row.get("trans_type") or row.get("TransType") or row.get("郵局運送方式(複數商品請自行確認是否走小包)") or "").strip(),
+                            "shipment_role": str(row.get("shipment_role") or row.get("_shipment_role") or "primary").strip(),
+                        }
+                    ]
                 ]
 
+            for result in results:
+                if (
+                    str(result.get("status") or "success").strip() in {"success", "completed"}
+                    and not str(result.get("tracking") or "").strip()
+                ):
+                    result.update(
+                        {
+                            "status": "failed",
+                            "reason_code": "invalid_writeback_identity",
+                            "reason_text": "製單結果缺少貨運單號，未進行回填。",
+                            "message": "製單結果缺少貨運單號，未進行回填。",
+                        }
+                    )
             successful_results = [
                 result
                 for result in results
                 if str(result.get("status") or "success").strip() in {"success", "completed"}
+                and str(result.get("tracking") or "").strip()
             ]
             failed_results = [
                 result
                 for result in results
                 if str(result.get("status") or "success").strip() not in {"success", "completed"}
             ]
+            results = initial_results + results
+            job["results"] = results
             mark_results_failed(job, failed_results)
             if successful_results:
-                _log(f"📋 正在回填 {len(successful_results)} 筆至 Google Sheets...")
-                backfill_outcome = backfill_results(successful_results, log_cb=_log) or {
+                writeback_candidates = successful_results
+                for result in successful_results:
+                    _status({"event": "writeback_pending", **result})
+                _log(f"📋 正在回填 {len(writeback_candidates)} 筆至 Google Sheets...")
+                backfill_outcome = backfill_results(writeback_candidates, log_cb=_log) or {
                     "ok": False,
                     "written": 0,
-                    "failed": [str(result.get("order_id") or "") for result in successful_results],
+                    "failed": [str(result.get("order_id") or "") for result in writeback_candidates],
                     "error": "回填函式沒有回傳驗證結果",
                 }
-                job["backfill_outcome"] = backfill_outcome
-                if backfill_outcome.get("ok"):
-                    mark_results_completed(job, successful_results)
-                    _log(f"✅ 完成！本次實際完成 {len(successful_results)} 筆訂單。")
-                    job["pending_refresh_needed"] = True
-                else:
-                    error_text = backfill_outcome.get("error") or "Google Sheets 回填驗證失敗"
-                    for result in successful_results:
-                        result.update(
-                            {
-                                "status": "backfill_failed",
-                                "reason_code": "backfill_failed",
-                                "reason_text": error_text,
-                                "message": error_text,
-                            }
-                        )
-                    mark_results_failed(job, successful_results)
-                    _log(f"❌ {error_text}")
+                terminal_status = apply_writeback_outcome(
+                    job,
+                    writeback_candidates,
+                    backfill_outcome,
+                )
+                verified_results = [
+                    result for result in writeback_candidates if result.get("status") == "completed"
+                ]
+                for result in verified_results:
+                    _status({"event": "writeback_verified", **result})
+                if backfill_outcome.get("ok") and verified_results:
+                    _log(f"✅ 本次已確認 {len(verified_results)} 筆回填完成。")
+                if len(verified_results) != len(writeback_candidates):
+                    _log("❌ 部分運單已產生，但資料回填仍需確認。")
             else:
                 job["backfill_outcome"] = {"ok": True, "written": 0, "failed": [], "error": ""}
-
-            job["results"] = results
-            result_summary = summarize_job_results(results)
-            terminal_status = "completed" if (
-                result_summary["completed"] == result_summary["total"]
-                and result_summary["total"] > 0
-            ) else "partial_failure"
+                result_summary = summarize_job_results(results)
+                terminal_status = "completed" if (
+                    result_summary["completed"] == result_summary["total"]
+                    and result_summary["total"] > 0
+                ) else "partial_failure"
+                job["pending_refresh_needed"] = terminal_status == "completed"
             _JOB_REGISTRY.finish(job, terminal_status)
             _clear_job_lock(email)
         except BaseException as e:
-            err_text = tb.format_exc()
-            print(f"[BOT_ERROR] {err_text}", file=sys.stderr, flush=True)
+            print(
+                f"[BOT_ERROR] {type(e).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
             try:
-                _log(f"❌ 例外：{type(e).__name__}: {e}")
-                _log(f"詳細：{err_text}")
+                safe_log_event(
+                    _log,
+                    "job_exception",
+                    error_type=type(e).__name__,
+                )
             except Exception:
                 pass
             try:
-                reason_text = f"{type(e).__name__}: {e}"
+                reason_text = "製單流程發生錯誤，請查看安全診斷。"
                 unfinished_results = [
                     {
                         "order_id": str(order.get("order_id") or "").strip(),
@@ -1388,6 +1694,17 @@ def _render_login_page():
 
 
 def _render_main_app():
+    pending_initial_result = None
+    picking_initial_result = None
+    try:
+        pending_initial_result = _refresh_source("pending", force=False)
+    except Exception:
+        st.session_state["pending_refresh_error_code"] = "unavailable"
+    try:
+        picking_initial_result = _refresh_source("picking", force=False)
+    except Exception:
+        pass
+
     email = st.session_state.get("user_email", "")
     name = st.session_state.get("user_name", email)
     picture = st.session_state.get("user_picture", "")
@@ -2337,427 +2654,83 @@ def _render_main_app():
     is_launching = bool(st.session_state.get("job_launching"))
     is_busy = is_running or is_launching
 
-    df_pending = pd.DataFrame()
-    pending_count = 0
-    pending_logs: list[str] = []
-    pending_manual_reload_requested = False
-    pending_read_error = ""
-    if is_busy:
-        df_pending = st.session_state.get("last_pending_df", pd.DataFrame())
-        pending_logs = st.session_state.get("last_pending_logs", [])
-        pending_count = len(df_pending)
+    if pending_initial_result is not None:
+        _apply_pending_result(
+            pending_initial_result,
+            is_busy=is_busy,
+            allow_dirty_reset=False,
+            job=job,
+        )
+    if picking_initial_result is not None and picking_initial_result.data is not None:
+        picking_was_loaded = "picking_orders" in st.session_state
+        apply_picking_payload(
+            picking_initial_result.data,
+            preserve_selection=picking_was_loaded,
+            loaded_at=picking_initial_result.status.loaded_at,
+        )
+        st.session_state["picking_snapshot_loaded_at"] = picking_initial_result.status.loaded_at
+
+    refresh_notice = bool(job and job.pop("pending_refresh_needed", False))
+    if refresh_notice and not is_busy:
+        st.session_state["pending_refresh_notice"] = True
+        completed_refresh = _refresh_source("pending", force=True)
+        if _apply_pending_result(
+            completed_refresh,
+            is_busy=is_busy,
+            allow_dirty_reset=True,
+            job=job,
+        ):
+            st.session_state["pending_editor_dirty"] = False
+            _clear_pending_editor_keys()
+
+    cached_pending = st.session_state.get("last_pending_df")
+    if isinstance(cached_pending, pd.DataFrame):
+        df_pending = cached_pending
+        pending_logs = list(st.session_state.get("last_pending_logs", []))
     else:
-        pending_manual_reload_requested = bool(st.session_state.pop("pending_manual_reload_requested", False))
-        refresh_notice = bool(job and job.pop("pending_refresh_needed", False))
-        if refresh_notice:
-            st.session_state["pending_refresh_notice"] = True
-        cached_pending = st.session_state.get("last_pending_df")
-        cached_logs = st.session_state.get("last_pending_logs", [])
-        if isinstance(cached_pending, pd.DataFrame):
-            df_pending = cached_pending
-            pending_logs = cached_logs
-            pending_count = len(df_pending)
-        else:
-            df_pending = pd.DataFrame()
-            pending_logs = []
-            pending_count = 0
-        if pending_manual_reload_requested:
-            with st.spinner("讀取 Google Sheets 待打單資料..."):
-                try:
-                    df_pending, pending_logs = _load_pending_orders()
-                    pending_count = len(df_pending)
-                    st.session_state.last_pending_df = df_pending
-                    st.session_state.last_pending_logs = pending_logs
-                    st.session_state.last_pending_loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    st.session_state.last_pending_read_summary = summarize_pending_read_logs(pending_logs)
-                except Exception as e:
-                    pending_read_error = str(e)
-                    st.warning(f"無法讀取 Google Sheets：{e}")
+        df_pending = pd.DataFrame()
+        pending_logs = []
+    pending_count = len(df_pending)
 
     if not is_busy and job and job.get("results"):
-        filtered_pending = filter_pending_orders_after_batch(df_pending, job["results"])
+        filtered_pending = filter_pending_orders_after_batch(
+            df_pending,
+            job["results"],
+            submitted_packages=job.get("orders") or [],
+        )
         if len(filtered_pending) != len(df_pending):
             df_pending = filtered_pending
             st.session_state["last_pending_df"] = df_pending
-            selected_by_order = st.session_state.get("pending_selected_by_order")
+            selected_by_order = st.session_state.get("pending_v2_selected_by_order")
             if isinstance(selected_by_order, dict):
-                for order_id in completed_order_ids(job["results"]):
+                for order_id in fully_completed_order_ids(
+                    job["results"],
+                    job.get("orders") or [],
+                ):
                     selected_by_order.pop(order_id, None)
 
     pending_count = len(df_pending)
-    rate, rate_date, rate_source = _load_usd_jpy_rate()
-    editable_count = min(len(df_pending), 20)
-    if not is_busy and not df_pending.empty:
-        _sync_visible_order_selection_from_widgets(df_pending, editable_count)
-    if is_busy or df_pending.empty:
-        df_pending_for_run = df_pending
-        if is_running and job:
-            selected_order_ids = {
-                str(order.get("order_id", "")).strip()
-                for order in (job.get("orders") or [])
-                if str(order.get("order_id", "")).strip()
-            }
-            selected_count = len(selected_order_ids)
-        else:
-            selected_count = pending_count
-    else:
-        selected_count = len(_selected_source_indices_from_state(df_pending, editable_count))
-        df_pending_for_run = _prepare_pending_run_frame_from_state(df_pending, editable_count, rate)
-    zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
-    required_id_warnings = _required_id_warning_lines(df_pending_for_run)
-    pending_data_warnings = _pending_data_warning_lines(df_pending_for_run)
+    rate, rate_date, _ = _load_usd_jpy_rate()
     batch_summary = summarize_batch_results((job or {}).get("results") or [])
     done = int(batch_summary["completed_count"])
 
-    picking_tab, preview_tab, postal_v2_tab, guide_tab, diagnostics_tab = st.tabs(
-        ["跨境揀貨單", "郵局待打單", "郵局待打單（新版測試）", "使用說明", "讀取診斷"]
+    _active_refresh_tick(is_busy=is_busy, job=job)
+
+    picking_tab, postal_tab, guide_tab, diagnostics_tab = st.tabs(
+        ["跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷"]
     )
 
     with picking_tab:
         picking_labels_module = import_module_with_retry("features.picking_labels")
-        picking_labels_module.render_picking_label_tab()
+        picking_labels_module.render_picking_label_tab(refresh_source=_refresh_source)
 
-    with preview_tab:
-        toolbar_info_cols = st.columns([1.75, 1, 1, 1], gap="medium", vertical_alignment="center")
-        with toolbar_info_cols[0]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-rate"><span>匯率</span><strong>{html.escape(_format_short_rate(rate, rate_date))}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        with toolbar_info_cols[1]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-count"><span>待製單</span><strong>{pending_count}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        with toolbar_info_cols[2]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-count"><span>已選取</span><strong>{selected_count}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        with toolbar_info_cols[3]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
-        toolbar_action_cols = st.columns([.88, .45, 1.0, 1.0, 1.5, 1.12], gap="small", vertical_alignment="center")
-        with toolbar_action_cols[0]:
-            max_rows_input = st.number_input(
-                "最大處理",
-                min_value=0, max_value=500, value=20, step=1,
-                disabled=is_busy,
-            )
-        with toolbar_action_cols[1]:
-            st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
-        max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-        with toolbar_action_cols[2]:
-            btn_label = "製單啟動中…" if is_launching else ("執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單"))
-            if st.button(btn_label, type="primary",
-                         disabled=(
-                             is_busy
-                             or pending_count == 0
-                             or selected_count == 0
-                             or bool(zero_value_warnings)
-                             or bool(required_id_warnings)
-                             or bool(pending_data_warnings)
-                         ), width="stretch"):
-                if df_pending.empty:
-                    st.warning("沒有符合條件的待打單資料")
-                elif df_pending_for_run.empty:
-                    st.warning("目前未選取任何訂單")
-                else:
-                    ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
-                    if ok:
-                        st.session_state["job_launching"] = True
-                        st.session_state["job_launching_started_at"] = time.time()
-                        if hasattr(st, "toast"):
-                            st.toast("✅ 已啟動自動製單")
-                        st.rerun()
-                    elif reason == "batch_running":
-                        st.error("同一批製單已在執行中，已阻止重複啟動。")
-                    else:
-                        st.error("任務執行中，請稍候")
-        with toolbar_action_cols[3]:
-            if is_busy:
-                if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
-                    st.rerun()
-            elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
-                st.session_state.pop("last_pending_df", None)
-                st.session_state.pop("last_pending_logs", None)
-                st.session_state.pop("pending_refresh_notice", None)
-                st.session_state.pop("pending_selected_by_order", None)
-                st.session_state["pending_manual_reload_requested"] = True
-                st.rerun()
-        with toolbar_action_cols[5]:
-            reset_all_requested = st.button(
-                "恢復全部預設",
-                width="stretch",
-                key="reset_all_pending",
-                disabled=is_busy or df_pending.empty,
-            )
-
-        if reset_all_requested and not df_pending.empty:
-            st.session_state.pop("pending_selected_by_order", None)
-            _reset_all_order_editors(df_pending.head(editable_count))
-            st.rerun()
-        read_summary = st.session_state.get("last_pending_read_summary") or summarize_pending_read_logs(pending_logs)
-        if pending_manual_reload_requested and not is_busy:
-            if pending_read_error:
-                st.warning(f"重新讀取失敗：{pending_read_error}")
-            else:
-                st.success(
-                    "重新讀取完成："
-                    f"最終可打單 {read_summary.get('final_count', pending_count)} 筆，"
-                    f"耗時 {read_summary.get('elapsed', '-')}。"
-                )
-        if not rate and not df_pending.empty:
-            st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
-        if is_busy and zero_value_warnings:
-            st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
-        if is_busy and required_id_warnings:
-            st.error("；".join(required_id_warnings[:5]))
-        if pending_data_warnings:
-            st.error("資料需要先修正：" + "；".join(pending_data_warnings[:8]))
-        if job and job.get("results") and not is_busy:
-            if batch_summary["failure_alerts"]:
-                st.warning(
-                    f"本批完成 {batch_summary['completed_count']} 筆，"
-                    f"未完成 {batch_summary['failed_count'] + batch_summary['skipped_count']} 筆。"
-                )
-                for alert in batch_summary["failure_alerts"]:
-                    st.error(alert)
-            elif st.session_state.get("pending_refresh_notice"):
-                st.success(
-                    f"製單完成：本次完成 {batch_summary['completed_count']} 筆。"
-                    "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
-                )
-        if is_busy:
-            if job:
-                _render_running_progress(job)
-            _render_blocking_running_guard(job, launching=is_launching)
-
-        if not df_pending.empty:
-            if is_busy:
-                running_orders = pd.DataFrame((job or {}).get("orders") or [])
-                if not running_orders.empty:
-                    run_cols = ["position", "order_id", "recipient", "country", "trans_type", "total_usd", "total_jpy"]
-                    run_cols = [column for column in run_cols if column in running_orders.columns]
-                    running_preview = running_orders[run_cols].rename(columns={
-                        "position": "#",
-                        "order_id": "注文番号",
-                        "recipient": "收件人",
-                        "country": "國家",
-                        "trans_type": "TransType",
-                        "total_usd": "USD",
-                        "total_jpy": "JPY",
-                    })
-                    st.caption("本次送出製單")
-                    st.dataframe(running_preview, hide_index=True, width="stretch")
-            elif not is_busy:
-                edited_summary_rows: list[dict[str, str]] = []
-                edited_items_by_position: dict[int, pd.DataFrame] = {}
-                for position in range(editable_count):
-                    row = df_pending.iloc[position]
-                    order_id = _order_id_for_position(row, position)
-                    country = str(row.get("收件人國家", row.get("Country", ""))).strip()
-                    kind = country_kind(country)
-                    parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
-                    default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
-                    reset_version = _reset_version(order_id)
-                    item_frame = build_pending_item_frame(row)
-                    item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-                    summary_item_frame = _apply_data_editor_state(item_frame, item_key)
-                    trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
-                    name_key = _name_key_for(position, order_id, reset_version)
-                    prc_id_key = _prc_id_key_for(position, order_id, reset_version)
-                    pccc_key = _pccc_key_for(position, order_id, reset_version)
-                    selected_key = _selected_key_for(position, order_id, reset_version)
-                    extra_trans_key = _extra_trans_key_for(position, order_id, reset_version)
-                    _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
-                    pending_trans = st.session_state.get(trans_key, default_trans_type)
-                    pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
-                    pending_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
-                    pending_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
-                    composed_name_preview = compose_shipping_name(pending_name, country, pending_prc_id, pending_pccc)
-                    summary_preview = {
-                        "Order No.": order_id,
-                        "Name": composed_name_preview,
-                        "Country": country,
-                        "TransType": pending_trans,
-                        "TotalValue(USD)": "",
-                        "TotalValue(JPY)": "",
-                    }
-                    preview_df = apply_pending_order_editor_values(
-                        df_pending.iloc[[position]],
-                        pd.DataFrame([summary_preview]),
-                        {0: summary_item_frame},
-                        usd_jpy_rate=rate,
-                    )
-                    summary_row = build_pending_summary_frame(preview_df).iloc[0]
-
-                    with st.container(border=True):
-                        st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                        st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
-                        info_cols = st.columns([.58, 2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
-                        with info_cols[0]:
-                            _initialize_order_selected_widget(order_id, selected_key)
-                            st.checkbox(
-                                "製單",
-                                key=selected_key,
-                                on_change=_sync_order_selected_from_widget,
-                                args=(order_id, selected_key),
-                            )
-                        with info_cols[1]:
-                            st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
-                        with info_cols[2]:
-                            st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
-                        with info_cols[3]:
-                            st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                        with info_cols[4]:
-                            st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
-
-                        st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
-                        if kind in {"china", "korea"}:
-                            action_cols = st.columns([1.42, 1.2, 1.2, 1.35, 1.65, .9], gap="small", vertical_alignment="center")
-                        else:
-                            action_cols = st.columns([1.42, 1.2, 1.2, 2.45, .9], gap="small", vertical_alignment="center")
-                        with action_cols[0]:
-                            edited_name = st.text_input(
-                                "Name",
-                                value=pending_name,
-                                key=name_key,
-                            )
-                        with action_cols[1]:
-                            trans_type = st.selectbox(
-                                "TransType",
-                                options=SHIPPING_OPTIONS,
-                                index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                                key=trans_key,
-                            )
-                        extra_options = ["無"] + SHIPPING_OPTIONS
-                        if st.session_state.get(extra_trans_key, "無") not in extra_options:
-                            st.session_state[extra_trans_key] = "無"
-                        if extra_trans_key not in st.session_state:
-                            st.session_state[extra_trans_key] = "無"
-                        with action_cols[2]:
-                            st.selectbox(
-                                "追加",
-                                options=extra_options,
-                                key=extra_trans_key,
-                            )
-                        edited_prc_id = pending_prc_id
-                        edited_pccc = pending_pccc
-                        if kind == "china":
-                            with action_cols[3]:
-                                edited_prc_id = st.text_input("PRC ID", value=pending_prc_id, key=prc_id_key)
-                        elif kind == "korea":
-                            with action_cols[3]:
-                                edited_pccc = st.text_input("PCCC", value=pending_pccc, key=pccc_key)
-                        with action_cols[-1]:
-                            if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
-                                _reset_order_editor(order_id)
-                                st.rerun()
-                        composed_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
-
-                        edited_summary_rows.append(
-                            {
-                                "Order No.": order_id,
-                                "Name": composed_name,
-                                "Country": country,
-                                "TransType": trans_type,
-                                "TotalValue(USD)": "",
-                                "TotalValue(JPY)": "",
-                            }
-                        )
-                        zero_items = has_zero_value_items(row)
-                        if zero_items:
-                            st.error(
-                                "Value is 0 for "
-                                + ", ".join(f"Content{i}" for i in zero_items)
-                                + ". Please edit before starting."
-                            )
-                        edited_items_by_position[position] = st.data_editor(
-                            item_frame,
-                            hide_index=True,
-                            width="stretch",
-                            num_rows="fixed",
-                            disabled=["Content"],
-                            column_config={
-                                "Content": st.column_config.TextColumn("Content", width=70),
-                                "Description": st.column_config.TextColumn("Description", width="large"),
-                                "HSCode": st.column_config.TextColumn("HSCode", width=120),
-                                "Value": st.column_config.TextColumn("Value", width=100),
-                                "Quantity": st.column_config.TextColumn("Quantity", width=90),
-                            },
-                            key=item_key,
-                        )
-                edited_df = apply_pending_order_editor_values(
-                    df_pending,
-                    pd.DataFrame(edited_summary_rows),
-                    edited_items_by_position,
-                    usd_jpy_rate=rate,
-                )
-                selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
-                if selected_indices:
-                    df_pending_for_run = expand_pending_orders_for_trans_types(
-                        edited_df.loc[selected_indices].copy(),
-                        _extra_trans_types_by_index_from_state(df_pending, editable_count),
-                    )
-                else:
-                    df_pending_for_run = edited_df.iloc[0:0].copy()
-                final_zero_warnings = _zero_value_warning_lines(df_pending_for_run)
-                final_required_warnings = _required_id_warning_lines(df_pending_for_run)
-                if final_zero_warnings:
-                    st.error("有品項 Value 為 0，請先修正：" + "；".join(final_zero_warnings[:5]))
-                if final_required_warnings:
-                    st.error("；".join(final_required_warnings[:5]))
-                if len(df_pending) > editable_count:
-                    st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
-        else:
-            st.info("目前沒有待製單資料。")
-
-        if job and job.get("orders"):
-            st.subheader("🧾 製單狀態")
-            status_label = {
-                "queued": "待機中",
-                "running": "製單中",
-                "success": "完成",
-                "completed": "完成",
-                "failed": "需排查",
-                "skipped": "略過",
-                "blocked": "未製單",
-            }
-            df_status = pd.DataFrame(job["orders"])
-            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
-            df_status = df_status.rename(columns={
-                "position": "#",
-                "order_id": "注文番号",
-                "recipient": "收件人",
-                "country": "國家",
-                "trans_type": "TransType",
-                "status": "狀態",
-                "stage": "階段",
-                "tracking_no": "貨運單號",
-                "hs_codes": "HSCode",
-                "message": "訊息",
-            })
-            if "HSCode" not in df_status.columns:
-                df_status["HSCode"] = ""
-            show_cols = ["#", "注文番号", "收件人", "國家", "TransType", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
-            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
-
-        if job and job.get("logs") and batch_summary["failure_alerts"]:
-            with st.expander("🔧 詳細除錯日誌", expanded=True):
-                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                st.code("\n".join(job["logs"][-200:]), language="text")
-    with postal_v2_tab:
+    with postal_tab:
         _render_postal_pending_v2(
             email=email,
             df_pending=df_pending,
             pending_logs=pending_logs,
             rate=rate,
             rate_date=rate_date,
-            rate_source=rate_source,
             job=job,
             is_running=is_running,
             is_launching=is_launching,
@@ -2765,8 +2738,6 @@ def _render_main_app():
             pending_count=pending_count,
             done=done,
             batch_summary=batch_summary,
-            pending_manual_reload_requested=pending_manual_reload_requested,
-            pending_read_error=pending_read_error,
         )
 
     with guide_tab:
@@ -2796,7 +2767,7 @@ def _render_main_app():
 
 郵局製單基本操作流程如下：
 
-1. 進入系統後，打開「郵局待打單」頁籤
+1. 進入系統後，打開「待製郵便運單」頁籤
 2. 檢查目前待製單訂單
 3. 視需要調整 **Name、TransType、PRC ID、PCCC、HS Code、Value、Quantity** 等欄位
 4. 勾選本批要製單的訂單
@@ -2883,9 +2854,9 @@ PDF 檔名格式為：
 
 系統會在上傳前檢查 Google Drive 目標資料夾，依照當日既有檔名自動使用下一個序號，避免覆蓋既有檔案。
 
-## 六、郵局待打單
+## 六、待製郵便運單
 
-「郵局待打單」頁籤會顯示目前可製單的訂單。
+「待製郵便運單」頁籤會顯示目前可製單的訂單。
 
 每筆訂單會顯示以下資訊：
 
@@ -3212,7 +3183,10 @@ PDF 會上傳至指定 Google Drive 資料夾。
         )
 
     with diagnostics_tab:
-        visible_pending_logs = _visible_pending_logs(pending_logs)
+        visible_pending_logs = _visible_pending_logs(
+            pending_logs,
+            sensitive_values=_dataframe_sensitive_values(df_pending),
+        )
         if visible_pending_logs:
             with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=True):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)

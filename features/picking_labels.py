@@ -27,6 +27,7 @@ from bot.picking_labels import (
 )
 from bot.picking_pdf import get_registered_cjk_font_info, render_picking_labels_pdf
 from bot.sheets import batch_mark_picking_done, load_sheet_values
+from refresh_payloads import PickingPayload, copy_picking_payload
 
 
 def _config_value(name: str, default: str) -> str:
@@ -57,22 +58,52 @@ def _picking_output_drive_folder_id() -> str:
     return _config_value("PICKING_OUTPUT_DRIVE_FOLDER_ID", PICKING_OUTPUT_DRIVE_FOLDER_ID)
 
 
-def _load_orders() -> None:
+def load_picking_payload() -> PickingPayload:
     values = load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name())
     status_values = load_sheet_values(_shipping_status_spreadsheet_id(), _shipping_status_sheet_name())
     shipping_deadlines = build_shipping_deadline_lookup(status_values)
     orders, warnings = parse_picking_label_candidates(values, shipping_deadlines=shipping_deadlines)
-    st.session_state["picking_orders"] = orders
-    st.session_state["picking_warnings"] = warnings
     diagnostics = build_picking_source_diagnostics(values, orders, warnings)
     diagnostics["source_spreadsheet_id"] = _picking_source_spreadsheet_id()
     diagnostics["source_sheet"] = _picking_source_sheet_name()
     diagnostics["shipping_status_spreadsheet_id"] = _shipping_status_spreadsheet_id()
     diagnostics["shipping_status_sheet"] = _shipping_status_sheet_name()
     diagnostics["pdf_cjk_font"] = get_registered_cjk_font_info()
-    st.session_state["picking_diagnostics"] = diagnostics
-    st.session_state["picking_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
+    return PickingPayload(
+        orders=tuple(orders),
+        warnings=tuple(warnings),
+        diagnostics=diagnostics,
+    )
+
+
+def apply_picking_payload(
+    payload: PickingPayload,
+    *,
+    preserve_selection: bool,
+    loaded_at: datetime | None = None,
+) -> None:
+    copied = copy_picking_payload(payload)
+    valid_rows = {order.source_row_number for order in copied.orders}
+    if preserve_selection:
+        selected_rows = set(st.session_state.get("picking_selected_rows", set())) & valid_rows
+    else:
+        selected_rows = set(valid_rows)
+
+    st.session_state["picking_orders"] = copied.orders
+    st.session_state["picking_warnings"] = copied.warnings
+    st.session_state["picking_diagnostics"] = copied.diagnostics
+    st.session_state["picking_selected_rows"] = selected_rows
+    if loaded_at is not None:
+        st.session_state["picking_loaded_at"] = loaded_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _load_orders() -> None:
+    payload = load_picking_payload()
+    apply_picking_payload(
+        payload,
+        preserve_selection=False,
+        loaded_at=datetime.now().astimezone(),
+    )
 
 
 def _orders_to_dataframe(orders: list[PickingOrder], selected_rows: set[int]) -> pd.DataFrame:
@@ -122,10 +153,10 @@ def _preview_pdf(selected_orders: list[PickingOrder]) -> None:
         st.json(build_picking_label_summary(selected_orders))
 
 
-def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
+def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
     if not selected_orders:
         st.warning("請先選取至少一筆訂單。")
-        return
+        return False
 
     row_numbers = {order.source_row_number for order in selected_orders}
     with st.spinner("重新確認來源表狀態..."):
@@ -137,7 +168,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
 
     if len(fresh_selected) != len(selected_orders):
         st.error("部分訂單已不符合可製作條件，請重新讀取後再試。")
-        return
+        return False
 
     def _mark_done_after_revalidation(_rows: list[int]) -> list[int]:
         resolved_rows = resolve_picking_done_row_numbers(
@@ -161,8 +192,8 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
     except Exception as exc:
-        st.error(f"正式產生前檢查 Google Drive 檔名失敗，已中止：{exc}")
-        return
+        st.error("正式產生前檢查 Google Drive 檔名失敗，已中止。")
+        return False
 
     output_path = Path(result.local_path)
     if not result.success and not result.drive_file:
@@ -174,7 +205,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
             mime="application/pdf",
             width="stretch",
         )
-        return
+        return False
 
     if not result.success and result.drive_file:
         st.error(
@@ -183,15 +214,15 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> None:
         )
         if result.drive_file.get("webViewLink"):
             st.link_button("開啟已上傳 PDF", result.drive_file["webViewLink"])
-        return
+        return False
 
     st.success(f"完成：{result.filename}，已標記來源列：{', '.join(str(row) for row in result.marked_rows)}")
     if result.drive_file and result.drive_file.get("webViewLink"):
         st.link_button("開啟 Google Drive PDF", result.drive_file["webViewLink"])
-    _load_orders()
+    return True
 
 
-def render_picking_label_tab() -> None:
+def render_picking_label_tab(refresh_source=None) -> None:
     st.info("列印設定：PDF檔尺寸為 100mm × 150mm，請使用對應Label大小輸出。")
 
     has_loaded_orders = "picking_orders" in st.session_state
@@ -279,13 +310,35 @@ def render_picking_label_tab() -> None:
         width="stretch",
         disabled=not has_selection,
     ):
-        _generate_and_upload(selected_orders)
+        if _generate_and_upload(selected_orders):
+            if refresh_source is None:
+                _load_orders()
+            else:
+                refresh_result = refresh_source("picking", force=True)
+                if refresh_result.data is not None:
+                    apply_picking_payload(
+                        refresh_result.data,
+                        preserve_selection=False,
+                        loaded_at=refresh_result.status.loaded_at,
+                    )
+                    st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
     if actions[1].button("重新讀取", width="stretch"):
         try:
-            _load_orders()
+            if refresh_source is None:
+                _load_orders()
+            else:
+                refresh_result = refresh_source("picking", force=True)
+                if refresh_result.data is None:
+                    raise RuntimeError("picking_refresh_failed")
+                apply_picking_payload(
+                    refresh_result.data,
+                    preserve_selection=False,
+                    loaded_at=refresh_result.status.loaded_at,
+                )
+                st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
             st.rerun()
-        except Exception as exc:
-            st.error(f"重新讀取失敗：{exc}")
+        except Exception:
+            st.error("重新讀取失敗，請稍後再試。")
     if actions[2].button("全選", width="stretch", disabled=not orders):
         st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
         st.rerun()

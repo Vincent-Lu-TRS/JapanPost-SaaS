@@ -1,21 +1,53 @@
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 
 import pandas as pd
 
 from job_control import (
     BatchJobRegistry,
+    apply_writeback_outcome,
     build_batch_fingerprint,
     create_order_states,
     filter_key_log_lines,
     mark_results_completed,
     mark_results_failed,
+    partition_preflight_rows,
     preflight_batch_orders,
+    shipment_package_key,
     summarize_job_results,
     summarize_job_progress,
+    update_order_status_from_event,
     update_order_status_from_log,
+    writeback_retry_candidates,
 )
+
+
+def _mixed_writeback_job():
+    frame = pd.DataFrame(
+        [
+            {"order_id": "ORDER-1", "TransType": "EMS", "_shipment_role": "primary"},
+            {"order_id": "ORDER-1", "TransType": "AIR", "_shipment_role": "additional"},
+        ]
+    )
+    results = [
+        {
+            "order_id": "ORDER-1",
+            "tracking": "EE123456789JP",
+            "trans_type": "EMS",
+            "shipment_role": "primary",
+            "status": "success",
+        },
+        {
+            "order_id": "ORDER-1",
+            "tracking": "EE987654321JP",
+            "trans_type": "AIR",
+            "shipment_role": "additional",
+            "status": "success",
+        },
+    ]
+    return {"status": "running", "orders": create_order_states(frame, None), "results": results}
 
 
 class JobControlTests(unittest.TestCase):
@@ -26,11 +58,13 @@ class JobControlTests(unittest.TestCase):
                     "注文番号(貼上原始資料)": "WhoWhy-Test5",
                     "Shipping Name": "Ada",
                     "收件人國家": "GERMANY",
+                    "TransType": "EMS",
                 },
                 {
                     "注文番号(貼上原始資料)": "WhoWhy-Test7",
                     "Shipping Name": "Ines",
                     "收件人國家": "GERMANY",
+                    "TransType": "ePacket",
                 },
             ]
         )
@@ -62,6 +96,50 @@ class JobControlTests(unittest.TestCase):
             build_batch_fingerprint(first, max_rows=None),
             build_batch_fingerprint(second, max_rows=None),
         )
+
+    def test_batch_fingerprint_changes_when_shipment_role_changes(self):
+        primary = pd.DataFrame(
+            [{"order_id": "Synthetic-Order-1", "TransType": "EMS", "_shipment_role": "primary"}]
+        )
+        additional = primary.copy()
+        additional.loc[0, "_shipment_role"] = "additional"
+
+        self.assertNotEqual(
+            build_batch_fingerprint(primary, max_rows=None),
+            build_batch_fingerprint(additional, max_rows=None),
+        )
+
+    def test_shipment_package_key_reads_production_series_shape(self):
+        row = pd.Series(
+            {
+                "注文番号(貼上原始資料)": "Synthetic-Order-1",
+                "郵局運送方式(複數商品請自行確認是否走小包)": "EMS",
+                "_shipment_role": "additional",
+            }
+        )
+
+        self.assertEqual(
+            shipment_package_key(row),
+            ("Synthetic-Order-1", "EMS", "additional"),
+        )
+
+    def test_shipment_package_key_reads_dict_and_defaults_legacy_role(self):
+        row = {"order_id": "Synthetic-Order-2", "trans_type": "ePacket"}
+
+        self.assertEqual(
+            shipment_package_key(row),
+            ("Synthetic-Order-2", "ePacket", "primary"),
+        )
+
+    def test_shipment_package_key_rejects_invalid_role(self):
+        row = {
+            "order_id": "Synthetic-Order-3",
+            "trans_type": "EMS",
+            "shipment_role": "unexpected",
+        }
+
+        with self.assertRaisesRegex(ValueError, "invalid shipment role"):
+            shipment_package_key(row)
 
     def test_registry_rejects_second_start_for_same_running_user(self):
         registry = BatchJobRegistry()
@@ -113,6 +191,20 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(states[0]["order_id"], "WhoWhy-Test5")
         self.assertEqual(states[0]["status"], "queued")
         self.assertEqual(states[0]["stage"], "待機中")
+        self.assertEqual(states[0]["shipment_role"], "primary")
+
+    def test_create_order_states_assigns_distinct_state_ids_by_shipment_role(self):
+        rows = pd.DataFrame(
+            [
+                {"order_id": "Synthetic-Order-1", "TransType": "EMS", "_shipment_role": "primary"},
+                {"order_id": "Synthetic-Order-1", "TransType": "EMS", "_shipment_role": "additional"},
+            ]
+        )
+
+        states = create_order_states(rows, max_rows=None)
+
+        self.assertEqual([state["shipment_role"] for state in states], ["primary", "additional"])
+        self.assertNotEqual(states[0]["state_id"], states[1]["state_id"])
 
     def test_mark_results_completed_matches_duplicate_order_by_trans_type(self):
         job = {
@@ -159,16 +251,16 @@ class JobControlTests(unittest.TestCase):
     def test_preflight_batch_orders_blocks_completed_and_changed_orders(self):
         selected = pd.DataFrame(
             [
-                {"注文番号(貼上原始資料)": "imy2038510", "_source_fingerprint": "fp-1"},
-                {"注文番号(貼上原始資料)": "imy2038490", "_source_fingerprint": "fp-2"},
-                {"注文番号(貼上原始資料)": "imy2038410", "_source_fingerprint": "fp-3"},
+                {"注文番号(貼上原始資料)": "imy2038510", "TransType": "EMS", "_source_fingerprint": "fp-1"},
+                {"注文番号(貼上原始資料)": "imy2038490", "TransType": "EMS", "_source_fingerprint": "fp-2"},
+                {"注文番号(貼上原始資料)": "imy2038410", "TransType": "EMS", "_source_fingerprint": "fp-3"},
             ]
         )
         latest = pd.DataFrame(
             [
-                {"注文番号(貼上原始資料)": "imy2038510", "_source_fingerprint": "fp-1"},
+                {"注文番号(貼上原始資料)": "imy2038510", "TransType": "EMS", "_source_fingerprint": "fp-1"},
                 {"注文號": "not-used"},
-                {"注文番号(貼上原始資料)": "imy2038410", "_source_fingerprint": "fp-new"},
+                {"注文番号(貼上原始資料)": "imy2038410", "TransType": "EMS", "_source_fingerprint": "fp-new"},
             ]
         )
 
@@ -182,6 +274,135 @@ class JobControlTests(unittest.TestCase):
                 "imy2038410": "source_changed",
             },
         )
+
+    def test_preflight_batch_orders_blocks_invalid_shipment_role(self):
+        selected = pd.DataFrame(
+            [
+                {
+                    "order_id": "Synthetic-Order-3",
+                    "TransType": "EMS",
+                    "_shipment_role": "unexpected",
+                }
+            ]
+        )
+
+        checks = preflight_batch_orders(selected, selected.copy(), set())
+
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["status"], "blocked")
+        self.assertEqual(checks[0]["reason_code"], "invalid_shipment_role")
+
+    def test_preflight_is_package_aware_and_partitions_completed_primary_from_ready_additional(self):
+        selected = pd.DataFrame(
+            [
+                {
+                    "注文番号(貼上原始資料)": "Synthetic-Order-1",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "EMS",
+                    "_shipment_role": "primary",
+                    "_source_fingerprint": "fp-1",
+                },
+                {
+                    "注文番号(貼上原始資料)": "Synthetic-Order-1",
+                    "郵局運送方式(複數商品請自行確認是否走小包)": "ePacket",
+                    "_shipment_role": "additional",
+                    "_source_fingerprint": "fp-1",
+                },
+            ],
+            index=[17, 42],
+        )
+        latest = selected.iloc[[0]].copy()
+        completion = SimpleNamespace(
+            legacy_order_ids=frozenset({"Synthetic-Order-1"}),
+            exact_pairs=frozenset({("Synthetic-Order-1", "LX123456789JP")}),
+        )
+
+        checks = preflight_batch_orders(selected, latest, completion)
+        ready, already_completed, hard_blocked = partition_preflight_rows(selected, checks)
+
+        self.assertEqual([check["row_index"] for check in checks], [0, 1])
+        self.assertEqual([check["status"] for check in checks], ["already_completed", "ready"])
+        self.assertEqual(ready.index.tolist(), [42])
+        self.assertEqual(len(already_completed), 1)
+        self.assertEqual(hard_blocked, [])
+        for check in checks:
+            self.assertEqual(
+                set(("order_id", "trans_type", "shipment_role", "row_index", "reason_code", "reason_text", "status"))
+                - set(check),
+                set(),
+            )
+
+    def test_preflight_blocks_duplicate_package_and_additional_matching_primary_transport(self):
+        selected = pd.DataFrame(
+            [
+                {"order_id": "Synthetic-Order-2", "TransType": "EMS", "shipment_role": "primary"},
+                {"order_id": "Synthetic-Order-2", "TransType": "EMS", "shipment_role": "additional"},
+                {"order_id": "Synthetic-Order-2", "TransType": "ePacket", "shipment_role": "additional"},
+                {"order_id": "Synthetic-Order-2", "TransType": "ePacket", "shipment_role": "additional"},
+            ]
+        )
+        latest = selected.iloc[[0]].copy()
+
+        checks = preflight_batch_orders(
+            selected,
+            latest,
+            SimpleNamespace(legacy_order_ids=frozenset(), exact_pairs=frozenset()),
+        )
+
+        self.assertEqual(
+            [check["reason_code"] for check in checks],
+            ["", "additional_transport_matches_primary", "", "duplicate_package_request"],
+        )
+
+    def test_preflight_compares_additional_transport_to_selected_primary_package(self):
+        selected = pd.DataFrame(
+            [
+                {
+                    "order_id": "Synthetic-Order-Selected-Primary",
+                    "TransType": "AIR",
+                    "shipment_role": "primary",
+                },
+                {
+                    "order_id": "Synthetic-Order-Selected-Primary",
+                    "TransType": "AIR",
+                    "shipment_role": "additional",
+                },
+            ]
+        )
+        latest = pd.DataFrame(
+            [
+                {
+                    "order_id": "Synthetic-Order-Selected-Primary",
+                    "TransType": "EMS",
+                }
+            ]
+        )
+
+        checks = preflight_batch_orders(selected, latest, set())
+
+        self.assertEqual(checks[0]["status"], "ready")
+        self.assertEqual(checks[1]["status"], "blocked")
+        self.assertEqual(
+            checks[1]["reason_code"],
+            "additional_transport_matches_primary",
+        )
+
+    def test_preflight_missing_identity_and_partition_missing_result_fail_closed(self):
+        selected = pd.DataFrame(
+            [
+                {"order_id": "", "TransType": "EMS", "shipment_role": "primary"},
+                {"order_id": "Synthetic-Order-3", "TransType": "", "shipment_role": "additional"},
+                {"order_id": "Synthetic-Order-4", "TransType": "ePacket", "shipment_role": "primary"},
+            ]
+        )
+
+        checks = preflight_batch_orders(selected, selected.copy(), set())
+        ready, already_completed, hard_blocked = partition_preflight_rows(selected, checks[:2])
+
+        self.assertEqual([check["reason_code"] for check in checks[:2]], ["missing_package_identity"] * 2)
+        self.assertTrue(ready.empty)
+        self.assertEqual(already_completed, [])
+        self.assertEqual(hard_blocked[-1]["reason_code"], "missing_preflight_result")
+        self.assertEqual(hard_blocked[-1]["row_index"], 2)
 
     def test_summarize_job_results_counts_success_and_failure_reasons(self):
         summary = summarize_job_results(
@@ -225,8 +446,177 @@ class JobControlTests(unittest.TestCase):
 
         update_order_status_from_log(job, "✅ 訂單 WhoWhy-Test5 完成，單號 CN123456789JP")
 
-        self.assertEqual(job["orders"][0]["status"], "success")
+        self.assertEqual(job["orders"][0]["status"], "running")
         self.assertEqual(job["orders"][0]["tracking_no"], "CN123456789JP")
+        self.assertEqual(summarize_job_progress(job)["done"], 0)
+
+    def test_update_order_status_from_event_targets_package_without_false_success(self):
+        job = {
+            "orders": create_order_states(
+                pd.DataFrame(
+                    [
+                        {
+                            "order_id": "Synthetic-Order-1",
+                            "TransType": "EMS",
+                            "_shipment_role": "primary",
+                        },
+                        {
+                            "order_id": "Synthetic-Order-1",
+                            "TransType": "ePacket",
+                            "_shipment_role": "additional",
+                        },
+                    ]
+                ),
+                None,
+            )
+        }
+
+        updated = update_order_status_from_event(
+            job,
+            {
+                "event": "automation_completed",
+                "order_id": "Synthetic-Order-1",
+                "trans_type": "ePacket",
+                "shipment_role": "additional",
+                "tracking": "LX123456789JP",
+            },
+        )
+
+        self.assertFalse(updated)
+        self.assertEqual(job["orders"][0]["status"], "queued")
+        self.assertEqual(job["orders"][1]["status"], "queued")
+        self.assertEqual(job["orders"][1]["tracking_no"], "")
+        self.assertEqual(summarize_job_progress(job)["done"], 0)
+
+    def test_status_events_are_strict_and_label_creation_never_completes(self):
+        rows = pd.DataFrame(
+            [
+                {"order_id": "Synthetic-Order-5", "TransType": "EMS", "shipment_role": "primary"},
+                {"order_id": "Synthetic-Order-5", "TransType": "ePacket", "shipment_role": "additional"},
+            ],
+            index=[8, 99],
+        )
+        job = {"orders": create_order_states(rows, None)}
+        package = {
+            "order_id": "Synthetic-Order-5",
+            "trans_type": "ePacket",
+            "shipment_role": "additional",
+            "row_index": 1,
+        }
+
+        update_order_status_from_event(job, {"event": "unknown", **package})
+        self.assertEqual([row["status"] for row in job["orders"]], ["queued", "queued"])
+
+        update_order_status_from_event(
+            job,
+            {"event": "label_created", "tracking": "LX123456789JP", **package},
+        )
+        self.assertEqual(job["orders"][1]["status"], "running")
+        self.assertIn("回填", job["orders"][1]["stage"])
+        self.assertEqual(summarize_job_progress(job)["done"], 0)
+
+        update_order_status_from_event(
+            job,
+            {"event": "order_failed", "reason_code": "writeback_readback_failed", **package},
+        )
+        self.assertEqual(job["orders"][1]["status"], "failed")
+        self.assertEqual(job["orders"][0]["status"], "queued")
+
+    def test_writeback_verified_is_only_success_event_and_requires_exact_package(self):
+        rows = pd.DataFrame(
+            [
+                {"order_id": "Synthetic-Order-6", "TransType": "EMS", "shipment_role": "primary"},
+                {"order_id": "Synthetic-Order-6", "TransType": "ePacket", "shipment_role": "additional"},
+            ]
+        )
+        job = {"orders": create_order_states(rows, None)}
+
+        update_order_status_from_event(
+            job,
+            {"event": "writeback_verified", "order_id": "Synthetic-Order-6"},
+        )
+        self.assertEqual([row["status"] for row in job["orders"]], ["queued", "queued"])
+
+        update_order_status_from_event(
+            job,
+            {
+                "event": "writeback_verified",
+                "order_id": "Synthetic-Order-6",
+                "trans_type": "EMS",
+                "shipment_role": "primary",
+                "tracking": "LX123456789JP",
+            },
+        )
+        self.assertEqual([row["status"] for row in job["orders"]], ["success", "queued"])
+
+    def test_qualified_log_targets_package_and_legacy_ambiguous_log_marks_neither(self):
+        rows = pd.DataFrame(
+            [
+                {
+                    "order_id": "Synthetic-Order-1",
+                    "TransType": "EMS",
+                    "_shipment_role": "primary",
+                },
+                {
+                    "order_id": "Synthetic-Order-1",
+                    "TransType": "ePacket",
+                    "_shipment_role": "additional",
+                },
+            ]
+        )
+        ambiguous_job = {"orders": create_order_states(rows, None)}
+
+        update_order_status_from_log(
+            ambiguous_job,
+            "✅ 訂單 Synthetic-Order-1 完成，單號 LX123456789JP",
+        )
+
+        self.assertEqual(
+            [order["status"] for order in ambiguous_job["orders"]],
+            ["queued", "queued"],
+        )
+
+        qualified_job = {"orders": create_order_states(rows, None)}
+        update_order_status_from_log(
+            qualified_job,
+            "✅ 訂單 Synthetic-Order-1 完成，單號 LX123456789JP "
+            "[trans_type=ePacket shipment_role=additional]",
+        )
+
+        self.assertEqual(
+            [order["status"] for order in qualified_job["orders"]],
+            ["queued", "running"],
+        )
+        self.assertEqual(qualified_job["orders"][1]["tracking_no"], "LX123456789JP")
+        self.assertEqual(summarize_job_progress(qualified_job)["done"], 0)
+
+    def test_qualified_failure_log_targets_only_matching_package(self):
+        rows = pd.DataFrame(
+            [
+                {
+                    "order_id": "Synthetic-Order-1",
+                    "TransType": "EMS",
+                    "_shipment_role": "primary",
+                },
+                {
+                    "order_id": "Synthetic-Order-1",
+                    "TransType": "ePacket",
+                    "_shipment_role": "additional",
+                },
+            ]
+        )
+        job = {"orders": create_order_states(rows, None)}
+
+        update_order_status_from_log(
+            job,
+            "⏸️ 訂單 Synthetic-Order-1 requests 流程已停止但未取得完整結果 "
+            "[trans_type=ePacket shipment_role=additional]",
+        )
+
+        self.assertEqual(
+            [order["status"] for order in job["orders"]],
+            ["queued", "failed"],
+        )
 
     def test_filter_key_log_lines_keeps_human_progress(self):
         logs = [
@@ -245,6 +635,91 @@ class JobControlTests(unittest.TestCase):
                 "[12:00:03] ✅ 完成！共處理 1 筆訂單。",
             ],
         )
+
+    def test_one_verified_package_completes_while_conflict_waits_for_review(self):
+        job = _mixed_writeback_job()
+
+        terminal = apply_writeback_outcome(
+            job,
+            job["results"],
+            {
+                "ok": False,
+                "items": [
+                    {"input_index": 0, "status": "written", "reason_code": "", "row": 2},
+                    {
+                        "input_index": 1,
+                        "status": "conflict",
+                        "reason_code": "tracking_owned_by_other_order",
+                        "row": 3,
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(job["results"][0]["status"], "completed")
+        self.assertEqual(job["results"][1]["status"], "backfill_failed")
+        self.assertEqual(job["results"][1]["reason_code"], "writeback_tracking_conflict")
+        self.assertEqual([item["status"] for item in job["orders"]], ["success", "failed"])
+        self.assertEqual(terminal, "partial_failure")
+        self.assertEqual(job["status"], "partial_failure")
+        self.assertFalse(job["pending_refresh_needed"])
+
+    def test_writeback_retry_candidates_require_existing_tracking(self):
+        results = [
+            {"status": "backfill_failed", "order_id": "ORDER-1", "tracking": "TRACK-1"},
+            {"status": "backfill_failed", "order_id": "ORDER-2", "tracking": ""},
+            {"status": "failed", "order_id": "ORDER-3", "tracking": "TRACK-3"},
+        ]
+
+        self.assertEqual(writeback_retry_candidates(results), [results[0]])
+
+    def test_retry_success_recomputes_order_and_job_terminal_state(self):
+        job = _mixed_writeback_job()
+        failed = job["results"][1]
+        job["results"][0]["status"] = "completed"
+        mark_results_completed(job, [job["results"][0]])
+        failed.update({"status": "backfill_failed", "reason_code": "writeback_failed"})
+        mark_results_failed(job, [failed])
+
+        terminal = apply_writeback_outcome(
+            job,
+            [failed],
+            {
+                "ok": True,
+                "items": [
+                    {"input_index": 0, "status": "already_present", "reason_code": "", "row": 3},
+                ],
+            },
+        )
+
+        self.assertEqual(failed["status"], "completed")
+        self.assertEqual([item["status"] for item in job["orders"]], ["success", "success"])
+        self.assertTrue(job["pending_refresh_needed"])
+        self.assertEqual(terminal, "completed")
+        self.assertEqual(job["status"], "completed")
+
+    def test_missing_submitted_package_prevents_refresh_after_primary_writeback(self):
+        job = _mixed_writeback_job()
+        primary = job["results"][0]
+        job["results"] = [primary]
+
+        terminal = apply_writeback_outcome(
+            job,
+            [primary],
+            {
+                "ok": True,
+                "items": [
+                    {"input_index": 0, "status": "written", "reason_code": "", "row": 2},
+                ],
+            },
+        )
+
+        self.assertEqual(primary["status"], "completed")
+        self.assertEqual(job["orders"][0]["status"], "success")
+        self.assertNotEqual(job["orders"][1]["status"], "success")
+        self.assertEqual(terminal, "partial_failure")
+        self.assertEqual(job["status"], "partial_failure")
+        self.assertFalse(job["pending_refresh_needed"])
 
 
 if __name__ == "__main__":

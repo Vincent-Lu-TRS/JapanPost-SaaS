@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 try:
     import pandas  # noqa: F401
@@ -59,6 +60,8 @@ from bot.automation import (
     _summarize_m060800_item_state,
     _summarize_submit_commands,
     _with_base_href,
+    _shipment_log_qualifier,
+    run_automation,
 )
 
 
@@ -1843,7 +1846,58 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["items_expected"], 1)
         self.assertEqual(result["items_submitted"], 1)
+        self.assertEqual(result["shipment_role"], "primary")
         self.assertRegex(result["date"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_result_records_preserve_explicit_additional_shipment_role(self):
+        row = {
+            "Shipping Name": "Synthetic Recipient",
+            "_shipment_role": "additional",
+        }
+
+        success = _build_result_record(row, "Synthetic-Order-1", "LX123456789JP")
+        failure = _build_failure_record(row, "Synthetic-Order-1", RuntimeError("synthetic failure"))
+
+        self.assertEqual(success["shipment_role"], "additional")
+        self.assertEqual(failure["shipment_role"], "additional")
+
+    def test_failure_record_defaults_legacy_shipment_role_to_primary(self):
+        failure = _build_failure_record({}, "Synthetic-Order-2", RuntimeError("synthetic failure"))
+
+        self.assertEqual(failure["shipment_role"], "primary")
+
+    def test_run_automation_rejects_invalid_role_before_credentials_or_browser(self):
+        rows = pandas.DataFrame(
+            [{"order_id": "Synthetic-Order-3", "_shipment_role": "unexpected"}]
+        )
+
+        with patch(
+            "bot.automation._get_jp_post_creds",
+            side_effect=AssertionError("credentials must not be read"),
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid shipment role"):
+                run_automation(rows)
+
+    def test_run_automation_accepts_status_callback_and_uses_positional_row_indexes(self):
+        from pathlib import Path
+
+        source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(encoding="utf-8")
+
+        self.assertIn("status_cb=None", source)
+        self.assertIn("for row_index, (_, row) in enumerate(rows.iterrows()):", source)
+        self.assertIn('_emit_status("order_started"', source)
+        self.assertIn('"label_created",', source)
+        self.assertIn('"order_failed",', source)
+        self.assertNotIn("_tb.format_exc()", source)
+        self.assertNotIn("logging.info(msg)", source)
+
+    def test_shipment_log_qualifier_includes_transport_and_role(self):
+        row = {"TransType": "ePacket", "_shipment_role": "additional"}
+
+        self.assertEqual(
+            _shipment_log_qualifier(row),
+            "[trans_type=ePacket shipment_role=additional]",
+        )
 
     def test_playwright_success_path_uses_structured_result_record(self):
         from pathlib import Path

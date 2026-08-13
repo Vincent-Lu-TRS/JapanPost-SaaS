@@ -9,10 +9,12 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from safe_logging import redact_operational_log, safe_log_event
 
 from .countries import resolve_country_code
 
@@ -21,6 +23,18 @@ SOURCE_SHEET_ID = "1HDndg8GU35v6ft02pcOcfvABVt_J3rtCLfMuXWi14KM"
 SOURCE_GID = "605188303"
 TARGET_SHEET_ID = "1QJFFW7aWGpYX3W5nPW_HgUnVWk9AtggFvYow14BRW8U"
 TARGET_GID = "465870894"
+
+
+@dataclass(frozen=True)
+class CompletionAuthority:
+    legacy_order_ids: frozenset[str]
+    exact_pairs: frozenset[tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class WritebackGrid:
+    columns: dict[str, list[str]]
+    occupied_formula_rows: frozenset[int]
 
 SCOPES = [
     "https://spreadsheets.google.com/feeds",
@@ -124,13 +138,52 @@ def _prefer_shipping_method_rows(
     return ranked.drop(columns=["_source_order", "_shipping_priority"])
 
 
-def _format_sample(values, limit: int = 8) -> str:
-    sample = [str(v).strip() for v in values if str(v).strip()]
-    if not sample:
-        return "-"
-    shown = sample[:limit]
-    suffix = "" if len(sample) <= limit else f"...(+{len(sample) - limit})"
-    return ", ".join(shown) + suffix
+def _dataframe_sensitive_log_values(df: pd.DataFrame) -> tuple[str, ...]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return ()
+    values: list[str] = []
+    seen: set[str] = set()
+    sensitive_markers = (
+        "注文番号",
+        "order",
+        "shipping name",
+        "receiver",
+        "recipient",
+        "email",
+        "mail",
+        "tracking",
+        "追跡",
+        "運單",
+        "address",
+        "住所",
+        "地址",
+        "收件人",
+        "phone",
+        "電話",
+        "pccc",
+        "prc id",
+    )
+    for column in df.columns:
+        column_name = str(column).strip().lower()
+        is_status_column = "製單上傳狀態" in column_name
+        if not is_status_column and not any(
+            marker in column_name for marker in sensitive_markers
+        ):
+            continue
+        for value in df[column].tolist():
+            text = _clean_cell(value)
+            if is_status_column and not re.fullmatch(
+                r"[A-Z]{2}\d{9}[A-Z]{2}",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            lowered = text.lower()
+            if len(text) < 4 or lowered in seen:
+                continue
+            seen.add(lowered)
+            values.append(text)
+    return tuple(values)
 
 
 def _looks_like_jp_tracking(value: str) -> bool:
@@ -142,11 +195,17 @@ def _filter_pending_orders_dataframe(
     completed_ids: set[str] | None = None,
     log_cb=None,
 ) -> pd.DataFrame:
+    sensitive_values = _dataframe_sensitive_log_values(df)
+
     def _log(msg):
+        safe_message = redact_operational_log(
+            msg,
+            sensitive_values=sensitive_values,
+        )
         if log_cb:
-            log_cb(msg)
+            log_cb(safe_message)
         else:
-            logging.info(msg)
+            logging.info(safe_message)
 
     if df.empty:
         return df
@@ -193,8 +252,7 @@ def _filter_pending_orders_dataframe(
         stale_rows = df[stale_source_status_mask]
         _log(
             "🛑 來源狀態疑似快取過期，目標表缺少完成證據，"
-            f"阻擋自動製單 {len(stale_rows)} 筆："
-            f"{_format_sample(stale_rows[order_id_col].tolist())}"
+            f"阻擋自動製單 {len(stale_rows)} 筆"
         )
 
     status_pending_mask = (df[status_col] == "未打單")
@@ -245,7 +303,7 @@ def _filter_pending_orders_dataframe(
         if not completed_rows.empty:
             _log(
                 "🔥 已在目標表完成而排除 "
-                f"{len(completed_rows)} 筆：{_format_sample(completed_rows[order_id_col].tolist())}"
+                f"{len(completed_rows)} 筆"
             )
         before_completed = len(df_filtered)
         df_filtered = df_filtered[~completed_mask]
@@ -288,31 +346,293 @@ def _get_worksheet_by_gid(spreadsheet, gid: str):
         return None
 
 
-def _last_non_empty_row_sample(df: pd.DataFrame, order_id_col: str, limit: int = 5) -> str:
-    if df.empty or order_id_col not in df.columns:
-        return "-"
-    ids = [str(v).strip() for v in df[order_id_col].tolist() if str(v).strip()]
-    if not ids:
-        return "-"
-    return ", ".join(ids[-limit:])
+def _get_target_worksheet(client=None):
+    client = client or _get_gspread_client()
+    spreadsheet = client.open_by_key(TARGET_SHEET_ID)
+    worksheet = spreadsheet.get_worksheet_by_id(int(TARGET_GID))
+    if worksheet is None:
+        raise RuntimeError("target worksheet unavailable")
+    return worksheet
 
 
-def read_completed_order_ids(client: gspread.Client | None = None) -> set[str]:
-    """Read the target sheet completion authority, failing closed on errors."""
+def _read_writeback_grid(worksheet) -> WritebackGrid:
+    columns = {
+        column: worksheet.col_values(index)
+        for column, index in {"B": 2, "C": 3, "D": 4, "J": 10}.items()
+    }
+    formula_grid = worksheet.get("B:J", value_render_option="FORMULA")
+    for values in columns.values():
+        values.extend([""] * (len(formula_grid) - len(values)))
+    relevant_offsets = {0, 1, 2, 8}
+    occupied = frozenset(
+        row_number
+        for row_number, row in enumerate(formula_grid, start=1)
+        if any(
+            offset < len(row) and str(row[offset]).startswith("=")
+            for offset in relevant_offsets
+        )
+    )
+    return WritebackGrid(columns=columns, occupied_formula_rows=occupied)
+
+
+def _last_used_writeback_row(columns, *, occupied_formula_rows) -> int:
+    value_rows = {
+        index
+        for values in columns.values()
+        for index, value in enumerate(values, start=1)
+        if str(value).strip()
+    }
+    return max(value_rows | set(occupied_formula_rows) | {1})
+
+
+def _ensure_row_capacity(worksheet, required_last_row: int) -> None:
+    missing = required_last_row - int(worksheet.row_count)
+    if missing > 0:
+        worksheet.add_rows(missing)
+
+
+def _safe_sheet_error_code(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "writeback_permission_denied"
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "writeback_network_error"
+    return "writeback_api_error"
+
+
+def _outcome_item(index, result, *, status, reason_code, row=None):
+    return {
+        "input_index": index,
+        "order_id": str(result.get("order_id") or "").strip(),
+        "tracking": str(result.get("tracking") or "").strip(),
+        "trans_type": str(result.get("trans_type") or "").strip(),
+        "shipment_role": str(result.get("shipment_role") or "primary").strip().lower(),
+        "status": status,
+        "reason_code": reason_code,
+        "row": row,
+    }
+
+
+def _column_rows(columns: dict[str, list[str]]):
+    row_count = max((len(values) for values in columns.values()), default=0)
+    for row_number in range(2, row_count + 1):
+        yield row_number, {
+            column: (
+                str(values[row_number - 1]).strip()
+                if row_number <= len(values)
+                else ""
+            )
+            for column, values in columns.items()
+        }
+
+
+def _classify_writeback_records(results, columns):
+    existing_rows = list(_column_rows(columns))
+    exact_pairs = {
+        (values["C"], values["D"]): row_number
+        for row_number, values in existing_rows
+        if values["C"] and values["D"]
+    }
+    tracking_owners = {
+        values["D"]: values["C"]
+        for _, values in existing_rows
+        if values["C"] and values["D"]
+    }
+    tracking_by_order: dict[str, set[str]] = {}
+    partial_orders = set()
+    partial_tracking = set()
+    for _, values in existing_rows:
+        if values["C"] and values["D"]:
+            tracking_by_order.setdefault(values["C"], set()).add(values["D"])
+        elif values["C"]:
+            partial_orders.add(values["C"])
+        elif values["D"]:
+            partial_tracking.add(values["D"])
+
+    candidates = []
+    immediate = []
+    planned_pairs = set()
+    planned_tracking_owners = dict(tracking_owners)
+    for position, raw in enumerate(results):
+        result = dict(raw)
+        index = int(result.pop("_input_index", position))
+        order_id = str(result.get("order_id") or "").strip()
+        tracking = str(result.get("tracking") or "").strip()
+        role = str(result.get("shipment_role") or "primary").strip().lower()
+        result["order_id"] = order_id
+        result["tracking"] = tracking
+        result["shipment_role"] = role
+        pair = (order_id, tracking)
+        if not order_id or not tracking or role not in {"primary", "additional"}:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="invalid_writeback_identity",
+                )
+            )
+        elif pair in exact_pairs:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="already_present",
+                    reason_code="exact_pair_exists",
+                    row=exact_pairs[pair],
+                )
+            )
+        elif tracking in planned_tracking_owners and planned_tracking_owners[tracking] != order_id:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="conflict",
+                    reason_code="tracking_owned_by_other_order",
+                )
+            )
+        elif pair in planned_pairs:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="duplicate_batch_pair",
+                )
+            )
+        elif order_id in partial_orders or tracking in partial_tracking:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="incomplete_existing_row",
+                )
+            )
+        elif tracking_by_order.get(order_id) and role != "additional":
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="unexpected_second_tracking",
+                )
+            )
+        else:
+            result["input_index"] = index
+            candidates.append(result)
+            planned_pairs.add(pair)
+            planned_tracking_owners[tracking] = order_id
+            tracking_by_order.setdefault(order_id, set()).add(tracking)
+    return candidates, immediate
+
+
+def _verify_writeback_rows(
+    worksheet,
+    expected_by_row,
+    *,
+    attempts,
+    delay_seconds,
+    sleep_fn,
+):
+    attempts = max(int(attempts), 1)
+    final = {
+        row_number: "writeback_readback_failed"
+        for row_number in expected_by_row
+    }
+    for attempt in range(attempts):
+        columns = _read_writeback_grid(worksheet).columns
+        for row_number, expected in expected_by_row.items():
+            actual = tuple(
+                str(columns[column][row_number - 1]).strip()
+                if row_number <= len(columns[column])
+                else ""
+                for column in ("B", "C", "D", "J")
+            )
+            matches = sum(
+                bool(actual_value)
+                and actual_value == expected_value
+                for actual_value, expected_value in zip(actual, expected)
+            )
+            exact_identity = (
+                bool(actual[1])
+                and bool(actual[2])
+                and actual[1] == expected[1]
+                and actual[2] == expected[2]
+            )
+            all_required = all(actual)
+            final[row_number] = (
+                "verified"
+                if exact_identity and all_required and actual == expected
+                else "partial_write"
+                if matches
+                else "writeback_readback_failed"
+            )
+        if all(reason == "verified" for reason in final.values()):
+            break
+        if attempt + 1 < attempts:
+            sleep_fn(delay_seconds)
+    return final
+
+
+def read_completion_authority(
+    client: gspread.Client | None = None,
+) -> CompletionAuthority:
+    """Read legacy order IDs and verified order/tracking pairs from target C:D."""
     client = client or _get_gspread_client()
     spreadsheet = client.open_by_key(TARGET_SHEET_ID)
     worksheet = _get_worksheet_by_gid(spreadsheet, TARGET_GID)
     if worksheet is None:
-        raise RuntimeError(f"找不到目標表單 GID {TARGET_GID}")
-    values = worksheet.col_values(3)
-    return {
-        _clean_cell(value)
-        for value in values[1:]
-        if _clean_cell(value)
-    }
+        raise RuntimeError("target worksheet unavailable")
+    values = worksheet.get("C:D")
+    legacy_order_ids: set[str] = set()
+    exact_pairs: set[tuple[str, str]] = set()
+    for row in values[1:]:
+        order_id = _clean_cell(row[0]) if row else ""
+        tracking = _clean_cell(row[1]) if len(row) > 1 else ""
+        if order_id:
+            legacy_order_ids.add(order_id)
+        if order_id and tracking:
+            exact_pairs.add((order_id, tracking))
+    return CompletionAuthority(
+        legacy_order_ids=frozenset(legacy_order_ids),
+        exact_pairs=frozenset(exact_pairs),
+    )
 
 
-def get_pending_orders(log_cb=None) -> pd.DataFrame:
+def read_completed_order_ids(client: gspread.Client | None = None) -> set[str]:
+    """Compatibility view of the legacy order-level completion authority."""
+    return set(read_completion_authority(client).legacy_order_ids)
+
+
+def _pending_read_failure(exc: Exception, log_cb, *, strict: bool) -> pd.DataFrame:
+    safe_log_event(
+        log_cb or logging.error,
+        "pending_read_failed",
+        error_type=type(exc).__name__,
+    )
+    if strict:
+        if isinstance(exc, PermissionError):
+            code = "pending_read_permission_denied"
+        elif isinstance(exc, (TimeoutError, ConnectionError)):
+            code = "pending_read_network"
+        else:
+            error_name = type(exc).__name__.lower()
+            if any(token in error_name for token in ("permission", "forbidden", "unauthorized")):
+                code = "pending_read_permission_denied"
+            elif any(token in error_name for token in ("timeout", "connection", "network")):
+                code = "pending_read_network"
+            else:
+                code = "pending_read_failed"
+        raise RuntimeError(code) from None
+    return pd.DataFrame()
+
+
+def get_pending_orders(
+    log_cb=None,
+    *,
+    strict: bool = False,
+    exclude_completed: bool = True,
+) -> pd.DataFrame:
     """
     從來源表單取得待打單清單，並執行雙重過濾防重製：
     1. 篩選狀態為「未打單」且必要欄位不為空
@@ -321,11 +641,17 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
 
     回傳: pandas DataFrame，若無資料則為空 DataFrame
     """
+    sensitive_values: list[str] = []
+
     def _log(msg):
+        safe_message = redact_operational_log(
+            msg,
+            sensitive_values=sensitive_values,
+        )
         if log_cb:
-            log_cb(msg)
+            log_cb(safe_message)
         else:
-            logging.info(msg)
+            logging.info(safe_message)
 
     try:
         started_at = time.perf_counter()
@@ -336,8 +662,7 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         sh_source = client.open_by_key(SOURCE_SHEET_ID)
         ws_source = _get_worksheet_by_gid(sh_source, SOURCE_GID)
         if not ws_source:
-            _log(f"❌ 找不到來源表單 GID {SOURCE_GID}")
-            return pd.DataFrame()
+            raise RuntimeError("source worksheet unavailable")
 
         _log(f"🌐 讀取來源表單：{sh_source.title}")
         all_values = ws_source.get_all_values()
@@ -363,28 +688,33 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
         df = pd.DataFrame(all_values[1:], columns=header)
         df["_source_row_number"] = [str(row_number) for row_number in range(2, len(df) + 2)]
         df["_source_fingerprint"] = df.apply(_source_row_fingerprint, axis=1)
+        sensitive_values.extend(_dataframe_sensitive_log_values(df))
         _log(f"📊 來源原始筆數：{len(df)}")
-        _log(
-            "🧾 API 讀到的來源末端注文番号："
-            f"{_last_non_empty_row_sample(df, '注文番号(貼上原始資料)')}"
-        )
+        order_id_col = "注文番号(貼上原始資料)"
+        source_order_count = 0
+        if order_id_col in df.columns:
+            source_order_count = int(df[order_id_col].fillna("").astype(str).str.strip().ne("").sum())
+        _log(f"🧾 來源有效注文番号：{source_order_count} 筆")
 
         # ── 🔥 雙重過濾：即時讀取目標表單已完成單號 ──────
-        try:
-            target_started_at = time.perf_counter()
-            completed_ids = read_completed_order_ids(client)
-            _log(
-                "⏱️ 目標表 C 欄讀取完成："
-                f"{len(completed_ids)} 個完成單號，耗時 {time.perf_counter() - target_started_at:.1f}s"
-            )
-        except Exception as e:
-            _log(f"❌ 無法讀取目標表單，已停止本次待製單讀取（fail-closed）: {e}")
-            return pd.DataFrame()
+        completed_ids: set[str] = set()
+        if exclude_completed:
+            try:
+                target_started_at = time.perf_counter()
+                completed_ids = read_completed_order_ids(client)
+                _log(
+                    "⏱️ 目標表 C 欄讀取完成："
+                    f"{len(completed_ids)} 個完成單號，耗時 {time.perf_counter() - target_started_at:.1f}s"
+                )
+            except Exception as exc:
+                if strict:
+                    raise
+                return _pending_read_failure(exc, log_cb, strict=strict)
 
         df_filtered = _filter_pending_orders_dataframe(
             df,
             completed_ids=completed_ids,
-            log_cb=log_cb,
+            log_cb=_log,
         )
         _log(
             f"✅ 最終可打單：{len(df_filtered)} 筆，總讀取耗時 {time.perf_counter() - started_at:.1f}s"
@@ -392,93 +722,201 @@ def get_pending_orders(log_cb=None) -> pd.DataFrame:
 
         return df_filtered
 
-    except Exception as e:
-        logging.error(f"❌ 取得待打單清單失敗: {e}")
-        if log_cb:
-            log_cb(f"❌ 取得待打單清單失敗: {e}")
-        return pd.DataFrame()
+    except Exception as exc:
+        return _pending_read_failure(exc, log_cb, strict=strict)
 
 
-def backfill_results(results: list[dict], log_cb=None):
-    """
-    將成功打單結果批量回填至目標表單 GID 465870894。
-    每筆結果格式：{"name", "order_id", "tracking", "country_raw", "date"}
-    """
-    def _log(msg):
-        if log_cb:
-            log_cb(msg)
-        else:
-            logging.info(msg)
+def backfill_results(
+    results: list[dict],
+    log_cb=None,
+    *,
+    client=None,
+    sleep_fn=time.sleep,
+    readback_attempts: int = 3,
+    readback_delay_seconds: float = 0.5,
+) -> dict:
+    """Append postal results and report a verified outcome for every input."""
+
+    def summarize(items, *, preferred_error=""):
+        items = sorted(items, key=lambda item: item["input_index"])
+        written = sum(item["status"] == "written" for item in items)
+        existing = sum(item["status"] == "already_present" for item in items)
+        failed = [
+            item["reason_code"]
+            for item in items
+            if item["status"] not in {"written", "already_present"}
+        ]
+        return {
+            "ok": not failed,
+            "written": written,
+            "existing": existing,
+            "failed": failed,
+            "error": (
+                ""
+                if not failed
+                else preferred_error or (
+                    failed[0] if len(items) == 1 else "writeback_not_fully_verified"
+                )
+            ),
+            "items": items,
+        }
+
+    def failed_items(records, reason_code):
+        return [
+            _outcome_item(
+                index,
+                result,
+                status="write_failed",
+                reason_code=reason_code,
+            )
+            for index, result in records
+        ]
 
     if not results:
-        _log("ℹ️ 無需回填（results 為空）")
-        return {"ok": True, "written": 0, "failed": [], "error": ""}
+        return {
+            "ok": True,
+            "written": 0,
+            "existing": 0,
+            "failed": [],
+            "error": "",
+            "items": [],
+        }
+
+    valid_inputs = []
+    immediate_items = []
+    for index, raw in enumerate(results):
+        result = dict(raw)
+        order_id = _clean_cell(result.get("order_id"))
+        tracking = _clean_cell(result.get("tracking"))
+        role = _clean_cell(result.get("shipment_role") or "primary").lower()
+        result.update(
+            order_id=order_id,
+            tracking=tracking,
+            shipment_role=role,
+            _input_index=index,
+        )
+        if not order_id or not tracking or role not in {"primary", "additional"}:
+            immediate_items.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="invalid_writeback_identity",
+                )
+            )
+        else:
+            valid_inputs.append(result)
+
+    if not valid_inputs:
+        return summarize(immediate_items, preferred_error="invalid_writeback_identity")
 
     try:
-        client = _get_gspread_client()
-        sh = client.open_by_key(TARGET_SHEET_ID)
-        ws = next(
-            (w for w in sh.worksheets() if str(w.id) == TARGET_GID), None
+        worksheet = _get_target_worksheet(client=client)
+        grid = _read_writeback_grid(worksheet)
+        classified, classified_items = _classify_writeback_records(
+            valid_inputs,
+            grid.columns,
         )
-        if not ws:
-            _log(f"❌ 找不到目標表單 GID {TARGET_GID}")
-            return {
-                "ok": False,
-                "written": 0,
-                "failed": [str(r.get("order_id") or "") for r in results],
-                "error": f"找不到目標表單 GID {TARGET_GID}",
+        immediate_items.extend(classified_items)
+    except Exception as exc:
+        reason_code = _safe_sheet_error_code(exc)
+        safe_log_event(
+            log_cb or (lambda message: logging.error("%s", message)),
+            "writeback_initialization_failed",
+            count=len(results),
+            reason=reason_code,
+        )
+        immediate_items.extend(
+            failed_items(
+                [
+                    (int(result["_input_index"]), result)
+                    for result in valid_inputs
+                ],
+                reason_code,
+            )
+        )
+        return summarize(immediate_items, preferred_error=reason_code)
+
+    next_row = _last_used_writeback_row(
+        grid.columns,
+        occupied_formula_rows=grid.occupied_formula_rows,
+    ) + 1
+    expected_by_row = {}
+    for offset, candidate in enumerate(classified):
+        row_number = next_row + offset
+        candidate["row"] = row_number
+        country_raw = candidate.get("country_raw", "")
+        country_code = (
+            resolve_country_code(country_raw, COUNTRY_CODE_MAP)
+            or _clean_cell(country_raw)
+        )
+        expected_by_row[row_number] = (
+            _clean_cell(candidate.get("name")),
+            candidate["order_id"],
+            candidate["tracking"],
+            country_code,
+        )
+
+    verified = {}
+    if expected_by_row:
+        try:
+            _ensure_row_capacity(worksheet, max(expected_by_row))
+            updates = []
+            for row_number, values in expected_by_row.items():
+                name, order_id, tracking, country_code = values
+                updates.extend(
+                    [
+                        {
+                            "range": f"B{row_number}:D{row_number}",
+                            "values": [[name, order_id, tracking]],
+                        },
+                        {
+                            "range": f"J{row_number}:J{row_number}",
+                            "values": [[country_code]],
+                        },
+                    ]
+                )
+            worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+            verified = _verify_writeback_rows(
+                worksheet,
+                expected_by_row,
+                attempts=readback_attempts,
+                delay_seconds=readback_delay_seconds,
+                sleep_fn=sleep_fn,
+            )
+        except Exception as exc:
+            safe_code = _safe_sheet_error_code(exc)
+            safe_log_event(
+                log_cb or (lambda message: logging.error("%s", message)),
+                "writeback_batch_finished",
+                count=len(expected_by_row),
+                reason=safe_code,
+            )
+            verified = {
+                row_number: safe_code
+                for row_number in expected_by_row
             }
 
-        # 找最後一列
-        col_b = ws.col_values(2)
-        last_row = len(col_b)
-        while last_row > 0 and not str(col_b[last_row - 1]).strip():
-            last_row -= 1
-        start_row = last_row + 1
-        _log(f"📍 從第 {start_row} 列開始回填 {len(results)} 筆")
-
-        batch = []
-        for i, r in enumerate(results):
-            row_n = start_row + i
-            country_raw = r.get("country_raw", "")
-            country_code = resolve_country_code(country_raw, COUNTRY_CODE_MAP) or country_raw
-            batch.append({
-                "range": f"B{row_n}:D{row_n}",
-                "values": [[r.get("name", ""), r.get("order_id", ""), r.get("tracking", "")]],
-            })
-            batch.append({
-                "range": f"J{row_n}:J{row_n}",
-                "values": [[country_code]],
-            })
-
-        ws.batch_update(batch, value_input_option="USER_ENTERED")
-        written_order_ids = ws.col_values(3)
-        written_tracking = ws.col_values(4)
-        written_pairs = {
-            (_clean_cell(order_id), _clean_cell(tracking))
-            for order_id, tracking in zip(written_order_ids[1:], written_tracking[1:])
-            if _clean_cell(order_id)
-        }
-        missing = [
-            str(result.get("order_id") or "")
-            for result in results
-            if (_clean_cell(result.get("order_id")), _clean_cell(result.get("tracking"))) not in written_pairs
-        ]
-        if missing:
-            error = "回填後讀回驗證失敗：" + ", ".join(missing[:8])
-            _log(f"❌ {error}")
-            return {"ok": False, "written": len(results), "failed": missing, "error": error}
-        _log(f"🚀 回填完成並驗證：{len(results)} 筆")
-        return {"ok": True, "written": len(results), "failed": [], "error": ""}
-
-    except Exception as e:
-        _log(f"❌ 回填失敗: {e}")
-        return {
-            "ok": False,
-            "written": 0,
-            "failed": [str(r.get("order_id") or "") for r in results],
-            "error": str(e),
-        }
+    items = list(immediate_items)
+    for candidate in classified:
+        reason_code = verified[candidate["row"]]
+        status = (
+            "written"
+            if reason_code == "verified"
+            else "partial_write"
+            if reason_code == "partial_write"
+            else "write_failed"
+        )
+        items.append(
+            _outcome_item(
+                candidate["input_index"],
+                candidate,
+                status=status,
+                reason_code=reason_code,
+                row=candidate["row"],
+            )
+        )
+    return summarize(items)
 
 
 def load_sheet_values(spreadsheet_id: str, sheet_name: str) -> list[list[str]]:

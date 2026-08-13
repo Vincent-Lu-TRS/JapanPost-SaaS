@@ -3,7 +3,10 @@ import unittest
 import pandas as pd
 
 from postal_ui_feedback import (
+    completed_package_keys,
     filter_pending_orders_after_batch,
+    fully_completed_order_ids,
+    preserve_incomplete_submitted_orders,
     summarize_batch_results,
     summarize_pending_read_logs,
 )
@@ -59,6 +62,21 @@ class PostalUiFeedbackTests(unittest.TestCase):
         self.assertEqual(summary["completed_count"], 1)
         self.assertEqual(summary["failure_alerts"], [])
 
+    def test_backfill_failed_copy_says_label_exists(self):
+        summary = summarize_batch_results(
+            [
+                {
+                    "status": "backfill_failed",
+                    "order_id": "ORDER-1",
+                    "reason_code": "writeback_failed",
+                }
+            ]
+        )
+
+        message = "\n".join(summary["failure_alerts"])
+        self.assertIn("運單已產生，但資料回填未完成", message)
+        self.assertNotIn("未製單", message)
+
     def test_completed_orders_are_removed_from_cached_pending_view(self):
         pending = pd.DataFrame(
             {
@@ -89,6 +107,92 @@ class PostalUiFeedbackTests(unittest.TestCase):
         )
 
         self.assertEqual(visible["注文番号(貼上原始資料)"].tolist(), ["blocked-1", "retry-1"])
+
+    def test_mixed_package_outcomes_keep_order_visible_until_every_submitted_package_completes(self):
+        pending = pd.DataFrame({"order_id": ["mixed-1", "all-ok-1"]})
+        results = [
+            {"order_id": "mixed-1", "trans_type": "EMS", "shipment_role": "primary", "status": "completed"},
+            {"order_id": "mixed-1", "trans_type": "ePacket", "shipment_role": "additional", "status": "backfill_failed"},
+            {"order_id": "all-ok-1", "trans_type": "EMS", "shipment_role": "primary", "status": "completed"},
+            {"order_id": "all-ok-1", "trans_type": "ePacket", "shipment_role": "additional", "status": "completed"},
+        ]
+
+        self.assertEqual(
+            completed_package_keys(results),
+            {
+                ("mixed-1", "EMS", "primary"),
+                ("all-ok-1", "EMS", "primary"),
+                ("all-ok-1", "ePacket", "additional"),
+            },
+        )
+        self.assertEqual(fully_completed_order_ids(results), {"all-ok-1"})
+        visible = filter_pending_orders_after_batch(pending, results)
+        self.assertEqual(visible["order_id"].tolist(), ["mixed-1"])
+
+    def test_missing_additional_result_keeps_order_visible_and_duplicate_tracking_is_legal(self):
+        pending = pd.DataFrame({"order_id": ["missing-1"]})
+        submitted = [
+            {"order_id": "missing-1", "trans_type": "EMS", "shipment_role": "primary"},
+            {"order_id": "missing-1", "trans_type": "ePacket", "shipment_role": "additional"},
+        ]
+        results = [
+            {
+                "order_id": "missing-1",
+                "trans_type": "EMS",
+                "shipment_role": "primary",
+                "tracking": "LX123456789JP",
+                "status": "completed",
+            }
+        ]
+
+        visible = filter_pending_orders_after_batch(pending, results, submitted_packages=submitted)
+
+        self.assertEqual(visible["order_id"].tolist(), ["missing-1"])
+
+    def test_refresh_restores_existing_order_when_additional_package_is_failed_or_missing(self):
+        existing = pd.DataFrame(
+            [
+                {"order_id": "mixed-1", "Shipping Name": "Existing Mixed"},
+                {"order_id": "fresh-1", "Shipping Name": "Existing Fresh"},
+            ]
+        )
+        refreshed = pd.DataFrame(
+            [{"order_id": "fresh-1", "Shipping Name": "Refreshed Fresh"}]
+        )
+        submitted = [
+            {"order_id": "mixed-1", "trans_type": "AIR", "shipment_role": "primary"},
+            {"order_id": "mixed-1", "trans_type": "EMS", "shipment_role": "additional"},
+        ]
+
+        for additional_result in (
+            {
+                "order_id": "mixed-1",
+                "trans_type": "EMS",
+                "shipment_role": "additional",
+                "status": "failed",
+            },
+            None,
+        ):
+            results = [
+                {
+                    "order_id": "mixed-1",
+                    "trans_type": "AIR",
+                    "shipment_role": "primary",
+                    "status": "completed",
+                }
+            ]
+            if additional_result is not None:
+                results.append(additional_result)
+
+            visible = preserve_incomplete_submitted_orders(
+                existing,
+                refreshed,
+                submitted,
+                results,
+            )
+
+            self.assertEqual(visible["order_id"].tolist(), ["fresh-1", "mixed-1"])
+            self.assertEqual(visible.iloc[0]["Shipping Name"], "Refreshed Fresh")
 
 
 if __name__ == "__main__":

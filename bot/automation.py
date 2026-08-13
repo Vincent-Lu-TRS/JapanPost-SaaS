@@ -22,6 +22,7 @@ from datetime import date
 import pandas as pd
 
 from shipment_quantity import parse_shipment_quantity
+from safe_logging import build_safe_automation_logger
 
 AUTOMATION_BUILD_ID = "2026-08-05-m060505-address1-width-fix"
 
@@ -484,6 +485,23 @@ def _format_addr_to_bean_name(row, order_id: str) -> str:
     return f"{recipient_fields['name']} {_clean(order_id)}".strip()
 
 
+def _shipment_role(row) -> str:
+    role = _row_val(row, ["_shipment_role", "shipment_role"]).lower()
+    if not role:
+        return "primary"
+    if role in {"primary", "additional"}:
+        return role
+    raise ValueError(f"invalid shipment role: {role}")
+
+
+def _shipment_log_qualifier(row) -> str:
+    trans_type = _row_val(
+        row,
+        ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"],
+    )
+    return f"[trans_type={trans_type} shipment_role={_shipment_role(row)}]"
+
+
 def _build_result_record(row, order_id: str, tracking: str) -> dict:
     country_raw = _row_val(row, ["收件人國家", "Country"])
     trans_type = _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"])
@@ -497,13 +515,18 @@ def _build_result_record(row, order_id: str, tracking: str) -> dict:
         "country": country_raw,
         "country_raw": country_raw,
         "trans_type": trans_type,
+        "shipment_role": _shipment_role(row),
         "date": time.strftime("%Y-%m-%d"),
     }
 
 
 def _build_failure_record(row, order_id: str, error: Exception, status: str = "failed") -> dict:
     reason_code = getattr(error, "reason_code", "") or _classify_address_error(error)
-    reason_text = str(error or "未知錯誤").strip() or "未知錯誤"
+    reason_text = {
+        "address_too_long": "日本郵局收件地址過長",
+        "address_invalid_character": "日本郵局收件地址含無效字元",
+        "address_remote_rejected": "日本郵局拒絕收件地址",
+    }.get(reason_code, "製單流程失敗，請查看安全診斷")
     items_expected = len(_iter_content_items(row))
     return {
         "name": _row_val(row, ["Shipping Name", "Shipping Name_1"]),
@@ -518,6 +541,7 @@ def _build_failure_record(row, order_id: str, error: Exception, status: str = "f
         "country": _row_val(row, ["收件人國家", "Country"]),
         "country_raw": _row_val(row, ["收件人國家", "Country"]),
         "trans_type": _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]),
+        "shipment_role": _shipment_role(row),
         "date": time.strftime("%Y-%m-%d"),
     }
 
@@ -1019,8 +1043,9 @@ def _summarize_forms(html: str, max_forms: int = 4, max_fields: int = 8) -> str:
         if len(fields) > max_fields:
             field_summary += ",..."
         select_summary = ",".join(selects[:max_fields])
+        action = str(form.get("action", "")).split("?", 1)[0].rsplit("/", 1)[-1]
         parts.append(
-            f"#{idx} action={form.get('action', '')} "
+            f"#{idx} action={action} "
             f"fields={field_summary or '-'} selects={select_summary or '-'}"
         )
     return " | ".join(parts) if parts else "(no forms)"
@@ -1054,7 +1079,7 @@ def _summarize_m060800_item_state(html: str) -> str:
         "itemBean.hsCode.value",
     ]
     pending = ",".join(
-        f"{name}={_clean(form['fields'].get(name, '')) or '-'}"
+        name
         for name in pending_names
         if name in form.get("fields", {})
     )
@@ -1553,6 +1578,7 @@ def run_automation(
     df: pd.DataFrame,
     max_rows: int | None = None,
     log_cb=None,
+    status_cb=None,
     headless: bool = True,
     precomputed_hs_codes: dict[str, dict[str, str]] | None = None,
 ) -> list[dict]:
@@ -1563,20 +1589,60 @@ def run_automation(
         df        : 待打單 DataFrame（來自 sheets.get_pending_orders）
         max_rows  : 最多處理幾筆（None = 全部）
         log_cb    : 進度回呼函數 (str -> None)
+        status_cb : package-qualified 狀態事件回呼函數 (dict -> None)
         headless  : 是否以 headless 模式執行（生產環境固定 True）
         precomputed_hs_codes: 預先查好的 HS Code，避免重複呼叫 AI
 
     Returns:
         結果清單；成功項目包含 tracking，失敗項目包含 status、reason_code、reason_text。
     """
-    def _log(msg: str):
-        if log_cb:
-            log_cb(msg)
-        logging.info(msg)
+    rows = df if max_rows is None else df.head(max_rows)
+    sensitive_columns = [
+        column
+        for column in rows.columns
+        if re.search(
+            r"order|注文番号|name|receiver|email|phone|address|tracking|內容物|郵遞|郵便|電話",
+            str(column),
+            flags=re.IGNORECASE,
+        )
+    ]
+    sensitive_values = tuple(
+        _clean(value)
+        for column in sensitive_columns
+        for value in rows[column].tolist()
+        if _clean(value)
+    )
+
+    _log = build_safe_automation_logger(
+        log_cb,
+        sensitive_values=sensitive_values,
+        logger=logging.getLogger(__name__),
+    )
+
+    def _emit_status(event_type: str, row, row_index: int, **fields) -> None:
+        if status_cb is None:
+            return
+        payload = {
+            "event": event_type,
+            "order_id": _row_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1", "order_id"]),
+            "trans_type": _row_val(
+                row,
+                ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"],
+            ),
+            "shipment_role": _shipment_role(row),
+            "row_index": row_index,
+        }
+        payload.update(fields)
+        try:
+            status_cb(payload)
+        except Exception:
+            _log("status_callback_failed")
+
+    for _, row in rows.iterrows():
+        _shipment_role(row)
 
     from playwright.sync_api import sync_playwright
 
-    rows = df if max_rows is None else df.head(max_rows)
     results: list[dict] = []
     user, pwd = _get_jp_post_creds()
     pw_cookies = []
@@ -1782,7 +1848,7 @@ def run_automation(
                 retry(_, attempts=2, delay=1, name=label)
             except Exception as e:
                 if critical:
-                    _log(f"❌ 關鍵點擊失敗 [{label}]: {e}")
+                    _log(f"critical_click_failed label={label} error_type={type(e).__name__}")
                     raise
                 else:
                     _log(f"⚠️ 非關鍵點擊失敗 [{label}]，繼續執行")
@@ -1797,7 +1863,7 @@ def run_automation(
                 retry(_, attempts=2, delay=1, name=label)
             except Exception as e:
                 if critical:
-                    _log(f"❌ 填寫失敗 [{label}]: {e}")
+                    _log(f"critical_fill_failed label={label} error_type={type(e).__name__}")
                     raise
                 else:
                     _log(f"⚠️ 填寫失敗 [{label}]，跳過")
@@ -1942,10 +2008,7 @@ def run_automation(
                 timeout=30,
                 allow_redirects=True,
             )
-            _log(f"  → {r2.status_code}, final URL: {r2.url}")
-            # 回應 body 前 300 字（debug 用）
-            _body_snip = r2.text[:300].replace('\n', ' ').replace('\r', '')
-            _log(f"  → body[:300]: {_body_snip}")
+            _log(f"login_http_finished status={r2.status_code}")
 
             success = (
                 "M010001.do" in r2.url
@@ -2041,17 +2104,13 @@ def run_automation(
                     "Create New Labels" in post_html
                     or _extract_submit_command_for_label(post_html, "Create New Labels")
                 ) else 0
-                _log(
-                    "🧭 requests 已取得登入後主選單 HTML："
-                    f"url={main_menu_url}, create_buttons={create_count}"
-                )
+                _log(f"login_menu_received create_buttons={create_count}")
                 if create_count == 0:
-                    body_snip = post_html[:300].replace("\n", " ").replace("\r", "")
-                    _log(f"⚠️ 主選單 HTML 未找到 Create New Labels，body[:300]={body_snip!r}")
+                    _log("login_menu_missing_create_label_marker")
                 _login_ok = True
                 _log("✅ requests 登入成功，Cookies 與主選單 HTML 已就位；不回灌 Playwright HTML")
         except Exception as _re_err:
-            _log(f"⚠️ requests 登入例外：{_re_err}")
+            _log(f"requests_login_failed error_type={type(_re_err).__name__}")
 
         if not _login_ok:
             _log("❌ requests 登入失敗，請確認帳號密碼")
@@ -2083,7 +2142,7 @@ def run_automation(
                 command,
                 "https://www.int-mypage.post.japanpost.jp/mypage/",
             )
-            _log(f"↩️ requests 回主選單：command={command}, action={action}")
+            _log(f"return_to_menu_started command={command}")
             r = req_session.post(
                 action,
                 data=payload,
@@ -2094,8 +2153,7 @@ def run_automation(
                 timeout=30,
                 allow_redirects=True,
             )
-            body_snip = r.text[:240].replace("\n", " ").replace("\r", "")
-            _log(f"  → returnTop HTTP {r.status_code}, url={r.url}, body[:240]={body_snip}")
+            _log(f"return_to_menu_finished status={r.status_code}")
             if r.status_code >= 400:
                 return False
             main_menu_html = r.text
@@ -2135,7 +2193,7 @@ def run_automation(
                         command,
                         "https://www.int-mypage.post.japanpost.jp/mypage/",
                     )
-                    _log(f"🌐 requests 開啟打單頁：step={step_idx}, command={command}, action={action}")
+                    _log(f"open_label_form_started step={step_idx} command={command}")
                     r = req_session.post(
                         action,
                         data=payload,
@@ -2146,8 +2204,7 @@ def run_automation(
                         timeout=30,
                         allow_redirects=True,
                     )
-                    body_snip = r.text[:240].replace("\n", " ").replace("\r", "")
-                    _log(f"  → {r.status_code}, final URL: {r.url}, body[:240]: {body_snip}")
+                    _log(f"open_label_form_finished step={step_idx} status={r.status_code}")
                     if r.status_code != 200:
                         return False
                     looks_like_sender_form = (
@@ -2158,10 +2215,7 @@ def run_automation(
                     if looks_like_sender_form:
                         label_form_html = r.text
                         label_form_url = r.url
-                        _log(
-                            "✅ requests 已取得 M060505/addrToBean 表單 HTML；"
-                            f"url={label_form_url}，不回灌 Playwright"
-                        )
+                        _log("label_form_received form=M060505")
                         return True
                     current_html = r.text
                     referer_url = r.url
@@ -2171,7 +2225,7 @@ def run_automation(
                 )
                 raise RuntimeError("requests 多步提交後仍未到寄件人表單，停止以避免 Playwright crash")
             except Exception as e:
-                _log(f"❌ requests 開啟打單頁例外：{e}")
+                _log(f"open_label_form_failed error_type={type(e).__name__}")
                 raise
 
         def submit_addr_to_bean_via_requests(row: pd.Series, order_id: str):
@@ -2244,9 +2298,7 @@ def run_automation(
             post_target = urljoin(label_form_url or main_menu_url, form.get("action") or label_form_url)
             _log(
                 "🌐 requests 提交 M060505/addrToBean 收件人 payload："
-                f"command={command}, action={post_target}, name={final_name}, "
-                f"address_id={recipient_fields['recipient_id'] or '-'}, country={country_raw}, "
-                f"country_value={country_value}, "
+                f"command={command}, country_code_present={bool(country_value)}, "
                 f"add1_len={len(data.get('addrToBean.add1', ''))}, "
                 f"add1_units={_japan_post_text_width(data.get('addrToBean.add1', ''))}, "
                 f"add2_len={len(data.get('addrToBean.add2', ''))}, "
@@ -2266,8 +2318,7 @@ def run_automation(
                 timeout=30,
                 allow_redirects=True,
             )
-            body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
-            _log(f"  → addrToBean HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+            _log(f"address_submit_finished status={resp.status_code}")
             marker_summary = ", ".join(
                 marker
                 for marker in [
@@ -2285,9 +2336,7 @@ def run_automation(
                 "🔎 addrToBean response diagnostics："
                 f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                 f"markers={marker_summary}; "
-                f"forms={_summarize_forms(resp.text)}; "
-                f"errors={_summarize_error_text(resp.text)}; "
-                f"field_context={_summarize_field_context(resp.text, ['addrToBean.sortNum', 'addrToBean.add1', 'addrToBean.add2', 'addrToBean.add3'])}"
+                f"forms={_summarize_forms(resp.text)}"
             )
             if resp.status_code >= 400:
                 reason_code = _classify_address_error(
@@ -2381,11 +2430,8 @@ def run_automation(
                 )
                 _log(
                     "🌐 requests 提交 M060800 Confirm 內容物 payload："
-                    f"item={pos}/{len(items)}, action={action}, "
-                    f"pkg={payload.get('itemBean.pkg', '')}, "
-                    f"cost={payload.get('itemBean.cost.value', '')}, "
-                    f"num={payload.get('itemBean.num.value', '')}, "
-                    f"hsCode={hs_code or '-'}, "
+                    f"item={pos}/{len(items)}, "
+                    f"hs_code_present={bool(hs_code)}, "
                     f"profile={_shipping_profile(row) or '-'}, "
                     f"sendType={payload.get('shippingBean.sendType', '')}, "
                     f"transType={payload.get('shippingBean.transType', '')}, "
@@ -2401,8 +2447,7 @@ def run_automation(
                     timeout=30,
                     allow_redirects=True,
                 )
-                body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
-                _log(f"  → M060800 HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+                _log(f"m060800_item_finished status={resp.status_code}")
                 marker_summary = ", ".join(
                     marker
                     for marker in [
@@ -2468,12 +2513,11 @@ def run_automation(
                 ]
                 _log(
                     "🌐 requests 提交 M060800 Next payload："
-                    f"action={next_action}, "
                     f"command={next_payload.get('command', '')}, "
                     f"sendType={next_payload.get('shippingBean.sendType', '')}, "
                     f"transType={next_payload.get('shippingBean.transType', '')}, "
                     f"pkgType={next_payload.get('shippingBean.pkgType', '')}, "
-                    f"totalJpy={next_payload.get('shippingBean.pkgTotalPrice.value', '')}"
+                    f"total_value_present={bool(next_payload.get('shippingBean.pkgTotalPrice.value', ''))}"
                 )
                 _log(
                     "🔬 M060800 Next payload diagnostics："
@@ -2493,8 +2537,7 @@ def run_automation(
                     timeout=30,
                     allow_redirects=True,
                 )
-                body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
-                _log(f"  → M060800 Next HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+                _log(f"m060800_next_finished status={resp.status_code}")
                 marker_summary = ", ".join(
                     marker
                     for marker in [
@@ -2515,8 +2558,7 @@ def run_automation(
                     f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                     f"markers={marker_summary}; "
                     f"forms={_summarize_forms(resp.text)}; "
-                    f"state={_summarize_m060800_item_state(resp.text)}; "
-                    f"errors={_summarize_error_text(resp.text)}"
+                    f"state={_summarize_m060800_item_state(resp.text)}"
                 )
                 if resp.status_code >= 400:
                     raise RuntimeError(f"M060800 next submit failed: HTTP {resp.status_code}")
@@ -2537,7 +2579,7 @@ def run_automation(
             )
             _log(
                 "🌐 requests 提交 M060900 重量 payload："
-                f"action={action}, weight={payload.get('shippingBean.totalWeight.value', '')}, "
+                f"weight={payload.get('shippingBean.totalWeight.value', '')}, "
                 f"num={payload.get('shippingBean.num.value', '')}, "
                 f"totalNum={payload.get('shippingBean.totalNum.value', '')}, "
                 f"cost={payload.get('shippingBean.cost.value', '')}, "
@@ -2558,8 +2600,7 @@ def run_automation(
                 timeout=30,
                 allow_redirects=True,
             )
-            body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
-            _log(f"  → M060900 HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+            _log(f"m060900_finished status={resp.status_code}")
             marker_summary = ", ".join(
                 marker
                 for marker in [
@@ -2578,8 +2619,7 @@ def run_automation(
                 "🔎 M060900 response diagnostics："
                 f"commands={_summarize_submit_commands(resp.text) or '-'}; "
                 f"markers={marker_summary}; "
-                f"forms={_summarize_forms(resp.text)}; "
-                f"errors={_summarize_error_text(resp.text)}"
+                f"forms={_summarize_forms(resp.text)}"
             )
             if resp.status_code >= 400:
                 raise RuntimeError(f"M060900 weight submit failed: HTTP {resp.status_code}")
@@ -2590,7 +2630,7 @@ def run_automation(
                 html,
                 page_url,
             )
-            _log(f"🌐 requests 提交 M061000 Register Shipment payload：action={action}")
+            _log("m061000_started")
             resp = req_session.post(
                 action,
                 data=payload,
@@ -2601,8 +2641,7 @@ def run_automation(
                 timeout=30,
                 allow_redirects=True,
             )
-            body_snip = resp.text[:240].replace("\n", " ").replace("\r", "")
-            _log(f"  → M061000 HTTP {resp.status_code}, url={resp.url}, body[:240]={body_snip}")
+            _log(f"m061000_finished status={resp.status_code}")
             tracking_match = re.search(r"([A-Z]{2}\d{9}JP)", resp.text or "")
             marker_summary = ", ".join(
                 marker
@@ -2632,7 +2671,7 @@ def run_automation(
                 html,
                 page_url,
             )
-            _log(f"🌐 requests 提交 M061100 Print payload：action={action}")
+            _log("m061100_started")
             resp = req_session.post(
                 action,
                 data=payload,
@@ -2646,12 +2685,11 @@ def run_automation(
             content_type = resp.headers.get("Content-Type", "")
             pdf_bytes = resp.content if "%PDF" in resp.content[:16].decode("latin1", errors="ignore") else b""
             text = "" if pdf_bytes else (resp.text or "")
-            body_snip = text[:240].replace("\n", " ").replace("\r", "") if text else "<binary>"
             tracking_match = re.search(r"([A-Z]{2}\d{9}JP)", text)
             _log(
-                "  → M061100 HTTP "
-                f"{resp.status_code}, url={resp.url}, content-type={content_type}, "
-                f"pdf_bytes={len(pdf_bytes)}, body[:240]={body_snip}"
+                "m061100_finished "
+                f"status={resp.status_code} content_type={content_type.split(';', 1)[0]} "
+                f"pdf_bytes={len(pdf_bytes)}"
             )
             marker_summary = ", ".join(
                 marker
@@ -2700,14 +2738,14 @@ def run_automation(
                 fname = _sanitize_filename(
                     f"{content_name}_{order_id}_{tracking_for_name}_{ship_name}.pdf"
                 )
-                upload_pdf(pdf_bytes, fname, log_cb=log_cb)
+                upload_pdf(pdf_bytes, fname, log_cb=_log)
                 pdf_uploaded = True
                 _log(f"✅ PDF 已透過 requests 取得並上傳：{fname}")
             completed = False
             completed_response = None
             if text and "M061101" in text:
                 action, completed_payload = _build_m061101_completed_payload(text, resp.url)
-                _log(f"🌐 requests 提交 M061101 Completed payload：action={action}")
+                _log("m061101_started")
                 done_resp = req_session.post(
                     action,
                     data=completed_payload,
@@ -2718,11 +2756,7 @@ def run_automation(
                     timeout=30,
                     allow_redirects=True,
                 )
-                done_snip = (done_resp.text or "")[:240].replace("\n", " ").replace("\r", "")
-                _log(
-                    f"  → M061101 HTTP {done_resp.status_code}, url={done_resp.url}, "
-                    f"body[:240]={done_snip}"
-                )
+                _log(f"m061101_finished status={done_resp.status_code}")
                 if done_resp.status_code >= 400:
                     raise RuntimeError(f"M061101 completed submit failed: HTTP {done_resp.status_code}")
                 completed = True
@@ -2735,9 +2769,14 @@ def run_automation(
                 "completed": completed,
             }
 
-        for row_idx, row in rows.iterrows():
+        for row_index, (_, row) in enumerate(rows.iterrows()):
             order_id = _get_excel_val(row, ["注文番号(貼上原始資料)", "注文番号(貼上原始資料)_1"])
-            _log(f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_idx}）")
+            package_qualifier = _shipment_log_qualifier(row)
+            _log(
+                f"\n{'='*50}\n▶ 開始處理訂單：{order_id}（索引 {row_index}） "
+                f"{package_qualifier}"
+            )
+            _emit_status("order_started", row, row_index)
 
             tracking = "ERROR"
             results_before_order = len(results)
@@ -2794,7 +2833,7 @@ def run_automation(
                                 if completed_resp is not None and "text/html" in completed_resp.headers.get("Content-Type", ""):
                                     main_menu_html = completed_resp.text
                                     main_menu_url = completed_resp.url
-                                    _log(f"🔁 已更新下一筆起點為 Completed 後主選單：url={main_menu_url}")
+                                    _log("completed_menu_state_updated")
                                 elif "text/html" in print_resp.headers.get("Content-Type", ""):
                                     main_menu_html = print_resp.text
                                     main_menu_url = print_resp.url
@@ -2802,15 +2841,30 @@ def run_automation(
                                 if print_result.get("tracking") and print_result.get("pdf_uploaded"):
                                     tracking = print_result["tracking"]
                                     results.append(_build_result_record(row, order_id, tracking))
-                                    _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
+                                    _emit_status(
+                                        "label_created",
+                                        row,
+                                        row_index,
+                                        tracking=tracking,
+                                    )
+                                    _log(
+                                        f"📌 訂單 {order_id} 完成，貨運單號：{tracking} "
+                                        f"{package_qualifier}"
+                                    )
                 if len(results) > results_before_order:
                     _log(f"✅ 訂單 {order_id} requests 打單流程已完成並回傳結果")
                 else:
                     failure = RuntimeError(
                         "requests 流程已停止但未取得完整結果；請依最後一段 diagnostics 繼續排查"
                     )
-                    _log(f"⏸️ 訂單 {order_id} {failure}")
+                    _log(f"⏸️ 訂單 {order_id} {failure} {package_qualifier}")
                     results.append(_build_failure_record(row, order_id, failure))
+                    _emit_status(
+                        "order_failed",
+                        row,
+                        row_index,
+                        reason_code="no_result",
+                    )
                 continue
 
                 # ── Step 3: 運送方式分流 ──────────────
@@ -2844,7 +2898,7 @@ def run_automation(
 
                         # EU → Gemini HS Code
                         if is_eu:
-                            hs = predict_hs_code(pkg, log_cb=log_cb)
+                            hs = predict_hs_code(pkg, log_cb=_log)
                             if hs:
                                 # 嘗試帶 .value 後綴變體
                                 for hs_sel in [
@@ -2918,7 +2972,7 @@ def run_automation(
                         safe_fill("input[name='itemBean.num.value']", num, label="parcel_num")
 
                         if is_eu:
-                            hs = predict_hs_code(pkg, log_cb=log_cb)
+                            hs = predict_hs_code(pkg, log_cb=_log)
                             if hs:
                                 for hs_sel in [
                                     "input[name='itemBean.hsCode']",
@@ -2992,7 +3046,7 @@ def run_automation(
                     else:
                         _log(f"⚠️ PDF 請求失敗: HTTP {resp.status}")
                 except Exception as e:
-                    _log(f"⚠️ PDF 攔截失敗: {e}")
+                    _log(f"pdf_intercept_failed error_type={type(e).__name__}")
 
                 # ── Step 7: 擷取貨運單號（M061100.do）──
                 _log("🔍 等待跳轉至 M061100.do 擷取貨運單號...")
@@ -3032,7 +3086,7 @@ def run_automation(
                     fname = _sanitize_filename(
                         f"{content_name}_{order_id}_{tracking}_{ship_name}.pdf"
                     )
-                    upload_pdf(pdf_content, fname, log_cb=log_cb)
+                    upload_pdf(pdf_content, fname, log_cb=_log)
 
                 # ── Step 9: 點擊 Completed 返回首頁 ────
                 try:
@@ -3046,17 +3100,31 @@ def run_automation(
                     else:
                         _log("⚠️ 未找到 Completed 按鈕，略過")
                 except Exception as e:
-                    _log(f"⚠️ Step 9 點擊 Completed 失敗（略過）：{e}")
+                    _log(f"completed_click_failed error_type={type(e).__name__}")
 
                 # ── 收集結果 ────────────────────────────
                 results.append(_build_result_record(row, order_id, tracking))
-                _log(f"📌 訂單 {order_id} 完成，貨運單號：{tracking}")
+                _emit_status(
+                    "label_created",
+                    row,
+                    row_index,
+                    tracking=tracking,
+                )
+                _log(
+                    f"📌 訂單 {order_id} 完成，貨運單號：{tracking} "
+                    f"{package_qualifier}"
+                )
 
             except Exception as e:
-                import traceback as _tb
-                _log(f"❌ 訂單 {order_id} 例外：{type(e).__name__}: {e}")
-                _log(f"詳細：{_tb.format_exc()}")
+                _log(f"order_failed error_type={type(e).__name__}")
                 if len(results) == results_before_order:
-                    results.append(_build_failure_record(row, order_id, e))
+                    failure_record = _build_failure_record(row, order_id, e)
+                    results.append(failure_record)
+                    _emit_status(
+                        "order_failed",
+                        row,
+                        row_index,
+                        reason_code=failure_record["reason_code"],
+                    )
 
     return results
