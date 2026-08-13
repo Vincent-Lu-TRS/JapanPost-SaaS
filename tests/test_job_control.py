@@ -7,6 +7,7 @@ import pandas as pd
 
 from job_control import (
     BatchJobRegistry,
+    apply_writeback_outcome,
     build_batch_fingerprint,
     create_order_states,
     filter_key_log_lines,
@@ -19,7 +20,34 @@ from job_control import (
     summarize_job_progress,
     update_order_status_from_event,
     update_order_status_from_log,
+    writeback_retry_candidates,
 )
+
+
+def _mixed_writeback_job():
+    frame = pd.DataFrame(
+        [
+            {"order_id": "ORDER-1", "TransType": "EMS", "_shipment_role": "primary"},
+            {"order_id": "ORDER-1", "TransType": "AIR", "_shipment_role": "additional"},
+        ]
+    )
+    results = [
+        {
+            "order_id": "ORDER-1",
+            "tracking": "EE123456789JP",
+            "trans_type": "EMS",
+            "shipment_role": "primary",
+            "status": "success",
+        },
+        {
+            "order_id": "ORDER-1",
+            "tracking": "EE987654321JP",
+            "trans_type": "AIR",
+            "shipment_role": "additional",
+            "status": "success",
+        },
+    ]
+    return {"status": "running", "orders": create_order_states(frame, None), "results": results}
 
 
 class JobControlTests(unittest.TestCase):
@@ -607,6 +635,68 @@ class JobControlTests(unittest.TestCase):
                 "[12:00:03] ✅ 完成！共處理 1 筆訂單。",
             ],
         )
+
+    def test_one_verified_package_completes_while_conflict_waits_for_review(self):
+        job = _mixed_writeback_job()
+
+        terminal = apply_writeback_outcome(
+            job,
+            job["results"],
+            {
+                "ok": False,
+                "items": [
+                    {"input_index": 0, "status": "written", "reason_code": "", "row": 2},
+                    {
+                        "input_index": 1,
+                        "status": "conflict",
+                        "reason_code": "tracking_owned_by_other_order",
+                        "row": 3,
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(job["results"][0]["status"], "completed")
+        self.assertEqual(job["results"][1]["status"], "backfill_failed")
+        self.assertEqual(job["results"][1]["reason_code"], "writeback_tracking_conflict")
+        self.assertEqual([item["status"] for item in job["orders"]], ["success", "failed"])
+        self.assertEqual(terminal, "partial_failure")
+        self.assertEqual(job["status"], "partial_failure")
+        self.assertFalse(job["pending_refresh_needed"])
+
+    def test_writeback_retry_candidates_require_existing_tracking(self):
+        results = [
+            {"status": "backfill_failed", "order_id": "ORDER-1", "tracking": "TRACK-1"},
+            {"status": "backfill_failed", "order_id": "ORDER-2", "tracking": ""},
+            {"status": "failed", "order_id": "ORDER-3", "tracking": "TRACK-3"},
+        ]
+
+        self.assertEqual(writeback_retry_candidates(results), [results[0]])
+
+    def test_retry_success_recomputes_order_and_job_terminal_state(self):
+        job = _mixed_writeback_job()
+        failed = job["results"][1]
+        job["results"][0]["status"] = "completed"
+        mark_results_completed(job, [job["results"][0]])
+        failed.update({"status": "backfill_failed", "reason_code": "writeback_failed"})
+        mark_results_failed(job, [failed])
+
+        terminal = apply_writeback_outcome(
+            job,
+            [failed],
+            {
+                "ok": True,
+                "items": [
+                    {"input_index": 0, "status": "already_present", "reason_code": "", "row": 3},
+                ],
+            },
+        )
+
+        self.assertEqual(failed["status"], "completed")
+        self.assertEqual([item["status"] for item in job["orders"]], ["success", "success"])
+        self.assertTrue(job["pending_refresh_needed"])
+        self.assertEqual(terminal, "completed")
+        self.assertEqual(job["status"], "completed")
 
 
 if __name__ == "__main__":

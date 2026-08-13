@@ -19,9 +19,11 @@ import tempfile
 import streamlit as st
 import pandas as pd
 from app_imports import import_module_with_retry
+from bot.sheets import backfill_results
 
 _job_control = import_module_with_retry("job_control")
 BatchJobRegistry = _job_control.BatchJobRegistry
+apply_writeback_outcome = _job_control.apply_writeback_outcome
 mark_results_completed = _job_control.mark_results_completed
 mark_results_failed = _job_control.mark_results_failed
 mark_unfinished_orders = _job_control.mark_unfinished_orders
@@ -31,6 +33,7 @@ summarize_job_results = _job_control.summarize_job_results
 summarize_job_progress = _job_control.summarize_job_progress
 update_order_status_from_log = _job_control.update_order_status_from_log
 update_order_status_from_event = _job_control.update_order_status_from_event
+writeback_retry_candidates = _job_control.writeback_retry_candidates
 from pending_editor import (
     SHIPPING_COL,
     SHIPPING_OPTIONS,
@@ -915,6 +918,22 @@ def _build_pending_run_frame_from_v2_state(
     )
 
 
+def _retry_writeback_results(job):
+    candidates = writeback_retry_candidates((job or {}).get("results"))
+    if not candidates:
+        return {
+            "ok": False,
+            "message": "運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。",
+        }
+    outcome = backfill_results(candidates)
+    terminal_status = apply_writeback_outcome(job, candidates, outcome)
+    _JOB_REGISTRY.finish(job, terminal_status)
+    return {
+        "ok": outcome["ok"],
+        "message": "回填已完成" if outcome["ok"] else "仍有資料需要確認",
+    }
+
+
 def _render_postal_pending_v2(
     *,
     email: str,
@@ -1364,6 +1383,21 @@ def _render_postal_pending_v2(
                     "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
                 )
 
+            retry_candidates = writeback_retry_candidates(job.get("results"))
+            missing_tracking_failures = [
+                result
+                for result in job.get("results") or []
+                if str(result.get("status") or "").strip().lower() == "backfill_failed"
+                and not str(result.get("tracking") or "").strip()
+            ]
+            if retry_candidates:
+                if st.button("重新回填資料", key="pending_v2_retry_writeback"):
+                    retry_result = _retry_writeback_results(job)
+                    st.session_state["pending_v2_writeback_retry_notice"] = retry_result["message"]
+                    st.rerun()
+            if missing_tracking_failures:
+                st.warning("運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。")
+
         if job and job.get("orders"):
             st.markdown('<div class="postal-v2-status-heading">製單狀態</div>', unsafe_allow_html=True)
             status_label = {
@@ -1526,7 +1560,6 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             rows_for_run = df if max_rows is None else df.head(max_rows)
             from bot.sheets import (
                 COUNTRY_CODE_MAP,
-                backfill_results,
                 get_pending_orders,
                 read_completion_authority,
             )
@@ -1703,54 +1736,42 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 for result in results
                 if str(result.get("status") or "success").strip() not in {"success", "completed"}
             ]
-            mark_results_failed(job, failed_results)
-            if successful_results:
-                for result in successful_results:
-                    _status({"event": "writeback_pending", **result})
-                _log(f"📋 正在回填 {len(successful_results)} 筆至 Google Sheets...")
-                backfill_outcome = backfill_results(successful_results, log_cb=_log) or {
-                    "ok": False,
-                    "written": 0,
-                    "failed": [str(result.get("order_id") or "") for result in successful_results],
-                    "error": "回填函式沒有回傳驗證結果",
-                }
-                job["backfill_outcome"] = backfill_outcome
-                if backfill_outcome.get("ok"):
-                    mark_results_completed(job, successful_results)
-                    for result in successful_results:
-                        _status({"event": "writeback_verified", **result})
-                    _log(f"✅ 完成！本次實際完成 {len(successful_results)} 筆訂單。")
-                    job["pending_refresh_needed"] = True
-                else:
-                    error_text = redact_operational_log(
-                        backfill_outcome.get("error") or "Google Sheets 回填驗證失敗",
-                        sensitive_values=_job_sensitive_values(
-                            job,
-                            dataframe=df,
-                            email=email,
-                        ),
-                    )
-                    for result in successful_results:
-                        result.update(
-                            {
-                                "status": "backfill_failed",
-                                "reason_code": "backfill_failed",
-                                "reason_text": error_text,
-                                "message": error_text,
-                            }
-                        )
-                    mark_results_failed(job, successful_results)
-                    _log(f"❌ {error_text}")
-            else:
-                job["backfill_outcome"] = {"ok": True, "written": 0, "failed": [], "error": ""}
-
             results = initial_results + results
             job["results"] = results
-            result_summary = summarize_job_results(results)
-            terminal_status = "completed" if (
-                result_summary["completed"] == result_summary["total"]
-                and result_summary["total"] > 0
-            ) else "partial_failure"
+            mark_results_failed(job, failed_results)
+            if successful_results:
+                writeback_candidates = successful_results
+                for result in successful_results:
+                    _status({"event": "writeback_pending", **result})
+                _log(f"📋 正在回填 {len(writeback_candidates)} 筆至 Google Sheets...")
+                backfill_outcome = backfill_results(writeback_candidates, log_cb=_log) or {
+                    "ok": False,
+                    "written": 0,
+                    "failed": [str(result.get("order_id") or "") for result in writeback_candidates],
+                    "error": "回填函式沒有回傳驗證結果",
+                }
+                terminal_status = apply_writeback_outcome(
+                    job,
+                    writeback_candidates,
+                    backfill_outcome,
+                )
+                verified_results = [
+                    result for result in writeback_candidates if result.get("status") == "completed"
+                ]
+                for result in verified_results:
+                    _status({"event": "writeback_verified", **result})
+                if backfill_outcome.get("ok") and verified_results:
+                    _log(f"✅ 本次已確認 {len(verified_results)} 筆回填完成。")
+                if len(verified_results) != len(writeback_candidates):
+                    _log("❌ 部分運單已產生，但資料回填仍需確認。")
+            else:
+                job["backfill_outcome"] = {"ok": True, "written": 0, "failed": [], "error": ""}
+                result_summary = summarize_job_results(results)
+                terminal_status = "completed" if (
+                    result_summary["completed"] == result_summary["total"]
+                    and result_summary["total"] > 0
+                ) else "partial_failure"
+                job["pending_refresh_needed"] = terminal_status == "completed"
             _JOB_REGISTRY.finish(job, terminal_status)
             _clear_job_lock(email)
         except BaseException as e:

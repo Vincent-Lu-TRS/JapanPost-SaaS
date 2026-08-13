@@ -62,6 +62,21 @@ class PostalUiFeedbackTests(unittest.TestCase):
         self.assertEqual(summary["completed_count"], 1)
         self.assertEqual(summary["failure_alerts"], [])
 
+    def test_backfill_failed_copy_says_label_exists(self):
+        summary = summarize_batch_results(
+            [
+                {
+                    "status": "backfill_failed",
+                    "order_id": "ORDER-1",
+                    "reason_code": "writeback_failed",
+                }
+            ]
+        )
+
+        message = "\n".join(summary["failure_alerts"])
+        self.assertIn("運單已產生，但資料回填未完成", message)
+        self.assertNotIn("未製單", message)
+
     def test_completed_orders_are_removed_from_cached_pending_view(self):
         pending = pd.DataFrame(
             {

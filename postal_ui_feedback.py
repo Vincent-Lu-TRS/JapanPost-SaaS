@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 import pandas as pd
+from job_control import shipment_package_key
 
 
 _PENDING_ORDER_ID_COLUMNS = (
@@ -26,10 +27,11 @@ def completed_order_ids(results: list[dict] | None) -> set[str]:
 
 
 def _package_key(result: dict) -> tuple[str, str, str] | None:
-    order_id = str(result.get("order_id") or "").strip()
-    trans_type = str(result.get("trans_type") or result.get("TransType") or "").strip()
-    shipment_role = str(result.get("shipment_role") or result.get("_shipment_role") or "").strip().lower()
-    if not order_id or not trans_type or shipment_role not in {"primary", "additional"}:
+    try:
+        order_id, trans_type, shipment_role = shipment_package_key(result)
+    except ValueError:
+        return None
+    if not order_id or not trans_type:
         return None
     return order_id, trans_type, shipment_role
 
@@ -164,13 +166,17 @@ def summarize_batch_results(results: list[dict] | None) -> dict[str, object]:
     alerts = []
     for result in failed_rows:
         order_id = str(result.get("order_id") or "未指定").strip()
+        status = str(result.get("status") or "").strip().lower()
         reason = str(
             result.get("reason_text")
             or result.get("message")
             or result.get("reason_code")
             or "未知原因"
         ).strip()
-        alerts.append(f"訂單編號 {order_id}：未製單（{reason}）")
+        if status == "backfill_failed":
+            alerts.append(f"訂單編號 {order_id}：運單已產生，但資料回填未完成（{reason}）")
+        else:
+            alerts.append(f"訂單編號 {order_id}：未製單（{reason}）")
     return {
         "total_count": len(rows),
         "completed_count": completed_count,

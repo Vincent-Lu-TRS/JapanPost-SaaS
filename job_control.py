@@ -364,18 +364,115 @@ def mark_results_failed(job: dict[str, Any], results: list[dict[str, Any]]) -> N
         reason_code = str(result.get("reason_code") or "unknown").strip()
         reason_text = str(result.get("reason_text") or result.get("message") or reason_code).strip()
         status = str(result.get("status") or "failed").strip()
+        if status in {"skipped", "blocked"}:
+            order_status = "skipped"
+            stage = "未製單"
+        elif status == "backfill_failed":
+            order_status = "failed"
+            stage = "回填待確認"
+        else:
+            order_status = "failed"
+            stage = "需排查"
         _mark_order(
             orders,
             order_id,
             {
-                "status": "skipped" if status in {"skipped", "blocked"} else "failed",
-                "stage": "未製單" if status in {"skipped", "blocked"} else "需排查",
+                "status": order_status,
+                "stage": stage,
                 "reason_code": reason_code,
                 "message": reason_text,
             },
             trans_type=str(result.get("trans_type") or result.get("TransType") or "").strip(),
             shipment_role=_shipment_role(result),
         )
+
+
+def apply_writeback_outcome(
+    job: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    outcome: dict[str, Any] | None,
+) -> str:
+    """Map each Sheets writeback item to its submitted package result."""
+    success_statuses = {"written", "already_present"}
+    reason_by_status = {
+        "manual_review": "writeback_manual_review",
+        "conflict": "writeback_tracking_conflict",
+        "partial_write": "writeback_partial",
+        "write_failed": "writeback_failed",
+    }
+    completed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    seen_indexes: set[int] = set()
+    for item in (outcome or {}).get("items") or []:
+        try:
+            index = int(item["input_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if index < 0 or index >= len(candidates) or index in seen_indexes:
+            continue
+        seen_indexes.add(index)
+        result = candidates[index]
+        item_status = str(item.get("status") or "write_failed").strip().lower()
+        result["backfill_status"] = item_status
+        result["backfill_row"] = item.get("row")
+        if item_status in success_statuses:
+            result.update(
+                {
+                    "status": "completed",
+                    "reason_code": "",
+                    "reason_text": "",
+                    "message": "",
+                }
+            )
+            completed.append(result)
+        else:
+            reason_code = reason_by_status.get(item_status, "writeback_failed")
+            result.update(
+                {
+                    "status": "backfill_failed",
+                    "reason_code": reason_code,
+                    "reason_text": "運單已產生，但資料回填未完成",
+                    "message": "運單已產生，但資料回填未完成",
+                }
+            )
+            failed.append(result)
+
+    for index, result in enumerate(candidates):
+        if index in seen_indexes:
+            continue
+        result.update(
+            {
+                "status": "backfill_failed",
+                "backfill_status": "write_failed",
+                "reason_code": "writeback_failed",
+                "reason_text": "運單已產生，但資料回填未完成",
+                "message": "運單已產生，但資料回填未完成",
+            }
+        )
+        failed.append(result)
+
+    mark_results_completed(job, completed)
+    mark_results_failed(job, failed)
+    job["backfill_outcome"] = outcome
+    summary = summarize_job_results(job.get("results"))
+    terminal_status = (
+        "completed"
+        if summary["total"] > 0 and summary["completed"] == summary["total"]
+        else "partial_failure"
+    )
+    job["status"] = terminal_status
+    job["pending_refresh_needed"] = terminal_status == "completed"
+    return terminal_status
+
+
+def writeback_retry_candidates(results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Return writeback failures that retain tracking evidence for a safe retry."""
+    return [
+        result
+        for result in (results or [])
+        if str(result.get("status") or "").strip().lower() == "backfill_failed"
+        and str(result.get("tracking") or "").strip()
+    ]
 
 
 def summarize_job_results(results: list[dict[str, Any]] | None) -> dict[str, Any]:

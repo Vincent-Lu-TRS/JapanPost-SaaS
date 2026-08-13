@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -22,6 +23,9 @@ from job_control import create_order_states, mark_results_completed
 from pending_editor import build_pending_item_frame
 from postal_ui_feedback import summarize_batch_results
 from tests.fake_gspread import FakeClient, FakeWorksheet
+
+
+APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
 class MockJapanPostGateway:
@@ -201,6 +205,28 @@ class PostalMockE2ETests(unittest.TestCase):
             "writeback_readback_failed",
         )
         self.assertNotEqual(result["status"], "completed")
+
+    def test_retry_path_calls_backfill_and_never_carrier_automation(self):
+        source = APP_PATH.read_text(encoding="utf-8")
+        retry_block = source[
+            source.index("def _retry_writeback_results") : source.index(
+                "def _render_postal_pending_v2"
+            )
+        ]
+
+        self.assertIn("backfill_results(", retry_block)
+        self.assertNotIn("run_automation(", retry_block)
+
+    def test_missing_tracking_warning_is_independent_of_retryable_results(self):
+        source = APP_PATH.read_text(encoding="utf-8")
+        render_block = source[
+            source.index("def _render_postal_pending_v2") : source.index(
+                "def _render_running_progress"
+            )
+        ]
+
+        self.assertIn("missing_tracking_failures = [", render_block)
+        self.assertIn("if missing_tracking_failures:", render_block)
 
 
 if __name__ == "__main__":
