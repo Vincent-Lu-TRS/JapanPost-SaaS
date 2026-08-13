@@ -507,84 +507,8 @@ def _zero_value_warning_lines(df: pd.DataFrame) -> list[str]:
     return warnings
 
 
-def _reset_key_for(order_id: str) -> str:
-    return f"pending_reset_{order_id}"
-
-
-def _reset_version(order_id: str) -> int:
-    return int(st.session_state.get(_reset_key_for(order_id), 0))
-
-
-def _reset_order_editor(order_id: str) -> None:
-    st.session_state[_reset_key_for(order_id)] = _reset_version(order_id) + 1
-    selected_by_order = st.session_state.get("pending_selected_by_order")
-    if isinstance(selected_by_order, dict):
-        selected_by_order[order_id] = True
-
-
-def _reset_all_order_editors(df: pd.DataFrame) -> None:
-    for _, row in df.iterrows():
-        order_id = str(row.get("注文番号(貼上原始資料)", "")).strip()
-        if order_id:
-            _reset_order_editor(order_id)
-
-
-def _name_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_name_{position}_{order_id}_{reset_version}"
-
-
-def _prc_id_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_prc_id_{position}_{order_id}_{reset_version}"
-
-
-def _pccc_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_pccc_{position}_{order_id}_{reset_version}"
-
-
 def _order_id_for_position(row: pd.Series, position: int) -> str:
     return str(row.get("注文番号(貼上原始資料)", row.get("Order No.", ""))).strip() or f"row-{position + 1}"
-
-
-def _selected_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_selected_{position}_{order_id}_{reset_version}"
-
-
-def _selected_by_order_state() -> dict[str, bool]:
-    selected_by_order = st.session_state.get("pending_selected_by_order")
-    if not isinstance(selected_by_order, dict):
-        selected_by_order = {}
-        st.session_state["pending_selected_by_order"] = selected_by_order
-    return selected_by_order
-
-
-def _is_order_selected(order_id: str) -> bool:
-    return bool(_selected_by_order_state().get(order_id, True))
-
-
-def _sync_order_selected_from_widget(order_id: str, widget_key: str) -> None:
-    _selected_by_order_state()[order_id] = bool(st.session_state.get(widget_key, True))
-
-
-def _initialize_order_selected_widget(order_id: str, widget_key: str) -> None:
-    selected_by_order = _selected_by_order_state()
-    if order_id not in selected_by_order:
-        selected_by_order[order_id] = bool(st.session_state.get(widget_key, True))
-    st.session_state[widget_key] = bool(selected_by_order.get(order_id, True))
-
-
-def _sync_visible_order_selection_from_widgets(df_pending: pd.DataFrame, editable_count: int) -> None:
-    selected_by_order = _selected_by_order_state()
-    for position in range(editable_count):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        reset_version = _reset_version(order_id)
-        widget_key = _selected_key_for(position, order_id, reset_version)
-        if widget_key in st.session_state:
-            selected_by_order[order_id] = bool(st.session_state.get(widget_key))
-
-
-def _extra_trans_key_for(position: int, order_id: str, reset_version: int) -> str:
-    return f"pending_extra_trans_single_{position}_{order_id}_{reset_version}"
 
 
 def _sync_recipient_id_session_fields(name_key: str, prc_id_key: str, pccc_key: str) -> None:
@@ -624,17 +548,6 @@ def _pending_data_warning_lines(df: pd.DataFrame) -> list[str]:
     return warnings
 
 
-def _format_short_rate(rate: float | None, rate_date: str) -> str:
-    rate_text = f"{rate:.2f}" if rate else "N/A"
-    date_text = ""
-    if rate_date:
-        try:
-            date_text = datetime.strptime(rate_date, "%Y-%m-%d").strftime("%y/%m/%d")
-        except Exception:
-            date_text = str(rate_date)
-    return f"USD/JPY {rate_text}" + (f"｜{date_text}" if date_text else "")
-
-
 def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFrame:
     edited = frame.copy()
     state = st.session_state.get(widget_key)
@@ -658,92 +571,6 @@ def _apply_data_editor_state(frame: pd.DataFrame, widget_key: str) -> pd.DataFra
                     value = sanitize_hscode(value)
                 edited.at[edited.index[index], column] = value
     return edited
-
-
-def _build_pending_run_frame_from_state(
-    df_pending: pd.DataFrame,
-    editable_count: int,
-    usd_jpy_rate: float | None,
-) -> pd.DataFrame:
-    edited_summary_rows: list[dict[str, str]] = []
-    edited_items_by_position: dict[int, pd.DataFrame] = {}
-    for position in range(editable_count):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        country = str(row.get("收件人國家", row.get("Country", ""))).strip()
-        parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
-        default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
-        reset_version = _reset_version(order_id)
-        item_frame = build_pending_item_frame(row)
-        item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-        trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
-        name_key = _name_key_for(position, order_id, reset_version)
-        prc_id_key = _prc_id_key_for(position, order_id, reset_version)
-        pccc_key = _pccc_key_for(position, order_id, reset_version)
-        _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
-        edited_name = st.session_state.get(name_key, parsed_name["clean_name"])
-        edited_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
-        edited_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
-        shipping_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
-        edited_summary_rows.append(
-            {
-                "Order No.": order_id,
-                "Name": shipping_name,
-                "Country": country,
-                "TransType": st.session_state.get(trans_key, default_trans_type),
-                "TotalValue(USD)": "",
-                "TotalValue(JPY)": "",
-            }
-        )
-        edited_items_by_position[position] = _apply_data_editor_state(item_frame, item_key)
-    if not edited_summary_rows:
-        return df_pending
-    return apply_pending_order_editor_values(
-        df_pending,
-        pd.DataFrame(edited_summary_rows),
-        edited_items_by_position,
-        usd_jpy_rate=usd_jpy_rate,
-    )
-
-
-def _selected_source_indices_from_state(df_pending: pd.DataFrame, editable_count: int) -> list[object]:
-    selected_indices: list[object] = []
-    for position, source_index in enumerate(df_pending.index[:editable_count]):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        if _is_order_selected(order_id):
-            selected_indices.append(source_index)
-    selected_indices.extend(list(df_pending.index[editable_count:]))
-    return selected_indices
-
-
-def _extra_trans_types_by_index_from_state(df_pending: pd.DataFrame, editable_count: int) -> dict[object, list[str]]:
-    extra_trans_types: dict[object, list[str]] = {}
-    for position, source_index in enumerate(df_pending.index[:editable_count]):
-        row = df_pending.iloc[position]
-        order_id = _order_id_for_position(row, position)
-        reset_version = _reset_version(order_id)
-        extra_key = _extra_trans_key_for(position, order_id, reset_version)
-        selected = st.session_state.get(extra_key, [])
-        if isinstance(selected, str):
-            extra_trans_types[source_index] = [] if selected == "無" else [selected]
-        elif isinstance(selected, (list, tuple)):
-            extra_trans_types[source_index] = [str(value) for value in selected]
-    return extra_trans_types
-
-
-def _prepare_pending_run_frame_from_state(
-    df_pending: pd.DataFrame,
-    editable_count: int,
-    usd_jpy_rate: float | None,
-) -> pd.DataFrame:
-    edited = _build_pending_run_frame_from_state(df_pending, editable_count, usd_jpy_rate)
-    selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
-    if not selected_indices:
-        return edited.iloc[0:0].copy()
-    selected = edited.loc[selected_indices].copy()
-    extra_trans_types = _extra_trans_types_by_index_from_state(df_pending, editable_count)
-    return expand_pending_orders_for_trans_types(selected, extra_trans_types)
 
 
 def _v2_reset_key_for(order_id: str) -> str:
@@ -941,7 +768,6 @@ def _render_postal_pending_v2(
     pending_logs: list[str],
     rate: float | None,
     rate_date: str,
-    rate_source: str,
     job: dict | None,
     is_running: bool,
     is_launching: bool,
@@ -1133,7 +959,7 @@ def _render_postal_pending_v2(
                 if not rate and not df_pending.empty:
                     st.warning(
                         "暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，"
-                        f"TotalValue(JPY) 會保留來源預設值。{rate_source}"
+                        "TotalValue(JPY) 會保留來源預設值。"
                     )
                 if zero_value_warnings:
                     st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
@@ -1495,15 +1321,6 @@ def _render_blocking_running_guard(job: dict | None, launching: bool = False) ->
     )
 
 
-def _summary_cell(label: str, value: str) -> str:
-    return (
-        '<div class="summary-cell">'
-        f'<div class="summary-label">{html.escape(label)}</div>'
-        f'<div class="summary-value">{html.escape(str(value))}</div>'
-        '</div>'
-    )
-
-
 def _native_info(label: str, value: str) -> str:
     if label == "Order No.":
         label_class = "native-info-order"
@@ -1517,10 +1334,6 @@ def _native_info(label: str, value: str) -> str:
         f'<span class="native-info-value">{html.escape(str(value))}</span>'
         '</div>'
     )
-
-
-def _summary_label(label: str) -> str:
-    return f'<div class="summary-label select-summary-label">{html.escape(label)}</div>'
 
 
 def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool, str]:
@@ -2883,7 +2696,7 @@ def _render_main_app():
         if len(filtered_pending) != len(df_pending):
             df_pending = filtered_pending
             st.session_state["last_pending_df"] = df_pending
-            selected_by_order = st.session_state.get("pending_selected_by_order")
+            selected_by_order = st.session_state.get("pending_v2_selected_by_order")
             if isinstance(selected_by_order, dict):
                 for order_id in fully_completed_order_ids(
                     job["results"],
@@ -2892,402 +2705,27 @@ def _render_main_app():
                     selected_by_order.pop(order_id, None)
 
     pending_count = len(df_pending)
-    rate, rate_date, rate_source = _load_usd_jpy_rate()
-    editable_count = min(len(df_pending), 20)
-    if not is_busy and not df_pending.empty:
-        _sync_visible_order_selection_from_widgets(df_pending, editable_count)
-    if is_busy or df_pending.empty:
-        df_pending_for_run = df_pending
-        if is_running and job:
-            selected_order_ids = {
-                str(order.get("order_id", "")).strip()
-                for order in (job.get("orders") or [])
-                if str(order.get("order_id", "")).strip()
-            }
-            selected_count = len(selected_order_ids)
-        else:
-            selected_count = pending_count
-    else:
-        selected_count = len(_selected_source_indices_from_state(df_pending, editable_count))
-        df_pending_for_run = _prepare_pending_run_frame_from_state(df_pending, editable_count, rate)
-    zero_value_warnings = _zero_value_warning_lines(df_pending_for_run)
-    required_id_warnings = _required_id_warning_lines(df_pending_for_run)
-    pending_data_warnings = _pending_data_warning_lines(df_pending_for_run)
+    rate, rate_date, _ = _load_usd_jpy_rate()
     batch_summary = summarize_batch_results((job or {}).get("results") or [])
     done = int(batch_summary["completed_count"])
 
     _active_refresh_tick(is_busy=is_busy, job=job)
 
-    picking_tab, preview_tab, postal_v2_tab, guide_tab, diagnostics_tab = st.tabs(
-        ["跨境揀貨單", "郵局待打單", "郵局待打單（新版測試）", "使用說明", "讀取診斷"]
+    picking_tab, postal_tab, guide_tab, diagnostics_tab = st.tabs(
+        ["跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷"]
     )
 
     with picking_tab:
         picking_labels_module = import_module_with_retry("features.picking_labels")
         picking_labels_module.render_picking_label_tab(refresh_source=_refresh_source)
 
-    with preview_tab:
-        toolbar_info_cols = st.columns([1.75, 1, 1, 1], gap="medium", vertical_alignment="center")
-        with toolbar_info_cols[0]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-rate"><span>匯率</span><strong>{html.escape(_format_short_rate(rate, rate_date))}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        with toolbar_info_cols[1]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-count"><span>待製單</span><strong>{pending_count}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        with toolbar_info_cols[2]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-count"><span>已選取</span><strong>{selected_count}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        with toolbar_info_cols[3]:
-            st.markdown(
-                f'<div class="toolbar-text toolbar-count"><span>本次完成</span><strong>{done}</strong></div>',
-                unsafe_allow_html=True,
-            )
-        st.markdown('<div style="height:.04rem"></div>', unsafe_allow_html=True)
-        toolbar_action_cols = st.columns([.88, .45, 1.0, 1.0, 1.5, 1.12], gap="small", vertical_alignment="center")
-        with toolbar_action_cols[0]:
-            max_rows_input = st.number_input(
-                "最大處理",
-                min_value=0, max_value=500, value=20, step=1,
-                disabled=is_busy,
-            )
-        with toolbar_action_cols[1]:
-            st.markdown('<div class="toolbar-text"><span class="toolbar-muted">(0=全部)</span></div>', unsafe_allow_html=True)
-        max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
-        with toolbar_action_cols[2]:
-            btn_label = "製單啟動中…" if is_launching else ("執行中…" if is_running else ("🚀 開始製單" if pending_count > 0 else "✅ 無待處理訂單"))
-            if st.button(btn_label, type="primary",
-                         disabled=(
-                             is_busy
-                             or pending_count == 0
-                             or selected_count == 0
-                             or bool(zero_value_warnings)
-                             or bool(required_id_warnings)
-                             or bool(pending_data_warnings)
-                         ), width="stretch"):
-                if df_pending.empty:
-                    st.warning("沒有符合條件的待打單資料")
-                elif df_pending_for_run.empty:
-                    st.warning("目前未選取任何訂單")
-                else:
-                    ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
-                    if ok:
-                        st.session_state["job_launching"] = True
-                        st.session_state["job_launching_started_at"] = time.time()
-                        if hasattr(st, "toast"):
-                            st.toast("✅ 已啟動自動製單")
-                        st.rerun()
-                    elif reason == "batch_running":
-                        st.error("同一批製單已在執行中，已阻止重複啟動。")
-                    else:
-                        st.error("任務執行中，請稍候")
-        with toolbar_action_cols[3]:
-            if is_busy:
-                if st.button("🔄 重新整理", width="stretch", key="refresh_running_top"):
-                    st.rerun()
-            elif st.button("🔁 重新讀取", width="stretch", key="reload_pending_top"):
-                pending_result = _refresh_source("pending", force=True)
-                _apply_pending_result(
-                    pending_result,
-                    is_busy=is_busy,
-                    allow_dirty_reset=False,
-                    job=job,
-                )
-                st.rerun()
-        with toolbar_action_cols[5]:
-            reset_all_requested = st.button(
-                "恢復全部預設",
-                width="stretch",
-                key="reset_all_pending",
-                disabled=is_busy or df_pending.empty,
-            )
-
-        if reset_all_requested:
-            pending_result = _refresh_source("pending", force=True)
-            if _apply_pending_result(
-                pending_result,
-                is_busy=is_busy,
-                allow_dirty_reset=True,
-                job=job,
-            ):
-                st.session_state["pending_editor_dirty"] = False
-                st.session_state.pop("pending_selected_by_order", None)
-                _reset_all_order_editors(df_pending.head(editable_count))
-                st.rerun()
-        refresh_error_message = _pending_refresh_warning_message()
-        if refresh_error_message:
-            st.warning(refresh_error_message)
-        if not rate and not df_pending.empty:
-            st.warning(f"暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，TotalValue(JPY) 會保留來源預設值。{rate_source}")
-        if is_busy and zero_value_warnings:
-            st.error("有品項 Value 為 0，請先修正：" + "；".join(zero_value_warnings[:5]))
-        if is_busy and required_id_warnings:
-            st.error("；".join(required_id_warnings[:5]))
-        if pending_data_warnings:
-            st.error("資料需要先修正：" + "；".join(pending_data_warnings[:8]))
-        if job and job.get("results") and not is_busy:
-            if batch_summary["failure_alerts"]:
-                st.warning(
-                    f"本批完成 {batch_summary['completed_count']} 筆，"
-                    f"未完成 {batch_summary['failed_count'] + batch_summary['skipped_count']} 筆。"
-                )
-                for alert in batch_summary["failure_alerts"]:
-                    st.error(alert)
-            elif st.session_state.get("pending_refresh_notice"):
-                st.success(
-                    f"製單完成：本次完成 {batch_summary['completed_count']} 筆。"
-                    "為避免 Google Sheets 讀取配額過高，目前沿用快取清單；需要最新待製單資料請按「重新讀取」。"
-                )
-        if is_busy:
-            if job:
-                _render_running_progress(job)
-            _render_blocking_running_guard(job, launching=is_launching)
-
-        if not df_pending.empty:
-            if is_busy:
-                running_orders = pd.DataFrame((job or {}).get("orders") or [])
-                if not running_orders.empty:
-                    run_cols = ["position", "order_id", "recipient", "country", "trans_type", "total_usd", "total_jpy"]
-                    run_cols = [column for column in run_cols if column in running_orders.columns]
-                    running_preview = running_orders[run_cols].rename(columns={
-                        "position": "#",
-                        "order_id": "注文番号",
-                        "recipient": "收件人",
-                        "country": "國家",
-                        "trans_type": "TransType",
-                        "total_usd": "USD",
-                        "total_jpy": "JPY",
-                    })
-                    st.caption("本次送出製單")
-                    st.dataframe(running_preview, hide_index=True, width="stretch")
-            elif not is_busy:
-                edited_summary_rows: list[dict[str, str]] = []
-                edited_items_by_position: dict[int, pd.DataFrame] = {}
-                for position in range(editable_count):
-                    row = df_pending.iloc[position]
-                    order_id = _order_id_for_position(row, position)
-                    country = str(row.get("收件人國家", row.get("Country", ""))).strip()
-                    kind = country_kind(country)
-                    parsed_name = parse_shipping_name(row.get("Shipping Name", row.get("Shipping Name_1", "")))
-                    default_trans_type = str(row.get(SHIPPING_COL, "")).strip()
-                    reset_version = _reset_version(order_id)
-                    item_frame = build_pending_item_frame(row)
-                    item_key = f"pending_items_{position}_{order_id}_{reset_version}"
-                    summary_item_frame = _apply_data_editor_state(item_frame, item_key)
-                    trans_key = f"pending_trans_{position}_{order_id}_{reset_version}"
-                    name_key = _name_key_for(position, order_id, reset_version)
-                    prc_id_key = _prc_id_key_for(position, order_id, reset_version)
-                    pccc_key = _pccc_key_for(position, order_id, reset_version)
-                    selected_key = _selected_key_for(position, order_id, reset_version)
-                    extra_trans_key = _extra_trans_key_for(position, order_id, reset_version)
-                    _sync_recipient_id_session_fields(name_key, prc_id_key, pccc_key)
-                    pending_trans = st.session_state.get(trans_key, default_trans_type)
-                    pending_name = st.session_state.get(name_key, parsed_name["clean_name"])
-                    pending_prc_id = st.session_state.get(prc_id_key, parsed_name["prc_id"])
-                    pending_pccc = st.session_state.get(pccc_key, parsed_name["pccc"])
-                    composed_name_preview = compose_shipping_name(pending_name, country, pending_prc_id, pending_pccc)
-                    summary_preview = {
-                        "Order No.": order_id,
-                        "Name": composed_name_preview,
-                        "Country": country,
-                        "TransType": pending_trans,
-                        "TotalValue(USD)": "",
-                        "TotalValue(JPY)": "",
-                    }
-                    preview_df = apply_pending_order_editor_values(
-                        df_pending.iloc[[position]],
-                        pd.DataFrame([summary_preview]),
-                        {0: summary_item_frame},
-                        usd_jpy_rate=rate,
-                    )
-                    summary_row = build_pending_summary_frame(preview_df).iloc[0]
-
-                    with st.container(border=True):
-                        st.markdown('<span class="order-card-marker"></span>', unsafe_allow_html=True)
-                        st.markdown('<div class="order-info-row"></div>', unsafe_allow_html=True)
-                        info_cols = st.columns([.58, 2.25, 1.55, .86, .86, 1.0], gap="small", vertical_alignment="center")
-                        with info_cols[0]:
-                            _initialize_order_selected_widget(order_id, selected_key)
-                            st.checkbox(
-                                "製單",
-                                key=selected_key,
-                                on_change=_sync_order_selected_from_widget,
-                                args=(order_id, selected_key),
-                            )
-                        with info_cols[1]:
-                            st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
-                        with info_cols[2]:
-                            st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
-                        with info_cols[3]:
-                            st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                        with info_cols[4]:
-                            st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
-
-                        st.markdown('<div class="order-action-row"></div>', unsafe_allow_html=True)
-                        if kind in {"china", "korea"}:
-                            action_cols = st.columns([1.42, 1.2, 1.2, 1.35, 1.65, .9], gap="small", vertical_alignment="center")
-                        else:
-                            action_cols = st.columns([1.42, 1.2, 1.2, 2.45, .9], gap="small", vertical_alignment="center")
-                        with action_cols[0]:
-                            edited_name = st.text_input(
-                                "Name",
-                                value=pending_name,
-                                key=name_key,
-                                on_change=_mark_pending_editor_dirty,
-                            )
-                        with action_cols[1]:
-                            trans_type = st.selectbox(
-                                "TransType",
-                                options=SHIPPING_OPTIONS,
-                                index=SHIPPING_OPTIONS.index(default_trans_type) if default_trans_type in SHIPPING_OPTIONS else 0,
-                                key=trans_key,
-                                on_change=_mark_pending_editor_dirty,
-                            )
-                        extra_options = ["無"] + SHIPPING_OPTIONS
-                        if st.session_state.get(extra_trans_key, "無") not in extra_options:
-                            st.session_state[extra_trans_key] = "無"
-                        if extra_trans_key not in st.session_state:
-                            st.session_state[extra_trans_key] = "無"
-                        with action_cols[2]:
-                            st.selectbox(
-                                "追加",
-                                options=extra_options,
-                                key=extra_trans_key,
-                                on_change=_mark_pending_editor_dirty,
-                            )
-                        edited_prc_id = pending_prc_id
-                        edited_pccc = pending_pccc
-                        if kind == "china":
-                            with action_cols[3]:
-                                edited_prc_id = st.text_input(
-                                    "PRC ID",
-                                    value=pending_prc_id,
-                                    key=prc_id_key,
-                                    on_change=_mark_pending_editor_dirty,
-                                )
-                        elif kind == "korea":
-                            with action_cols[3]:
-                                edited_pccc = st.text_input(
-                                    "PCCC",
-                                    value=pending_pccc,
-                                    key=pccc_key,
-                                    on_change=_mark_pending_editor_dirty,
-                                )
-                        with action_cols[-1]:
-                            if st.button("恢復預設", key=f"reset_order_{position}_{order_id}", width="stretch"):
-                                _reset_order_editor(order_id)
-                                st.rerun()
-                        composed_name = compose_shipping_name(edited_name, country, edited_prc_id, edited_pccc)
-
-                        edited_summary_rows.append(
-                            {
-                                "Order No.": order_id,
-                                "Name": composed_name,
-                                "Country": country,
-                                "TransType": trans_type,
-                                "TotalValue(USD)": "",
-                                "TotalValue(JPY)": "",
-                            }
-                        )
-                        zero_items = has_zero_value_items(row)
-                        if zero_items:
-                            st.error(
-                                "Value is 0 for "
-                                + ", ".join(f"Content{i}" for i in zero_items)
-                                + ". Please edit before starting."
-                            )
-                        edited_items_by_position[position] = st.data_editor(
-                            item_frame,
-                            hide_index=True,
-                            width="stretch",
-                            num_rows="fixed",
-                            disabled=["Content"],
-                            column_config={
-                                "Content": st.column_config.TextColumn("Content", width=70),
-                                "Description": st.column_config.TextColumn("Description", width="large"),
-                                "HSCode": st.column_config.TextColumn("HSCode", width=120),
-                                "Value": st.column_config.TextColumn("Value", width=100),
-                                "Quantity": st.column_config.TextColumn("Quantity", width=90),
-                            },
-                            key=item_key,
-                            on_change=_mark_pending_editor_dirty,
-                        )
-                edited_df = apply_pending_order_editor_values(
-                    df_pending,
-                    pd.DataFrame(edited_summary_rows),
-                    edited_items_by_position,
-                    usd_jpy_rate=rate,
-                )
-                selected_indices = _selected_source_indices_from_state(df_pending, editable_count)
-                if selected_indices:
-                    df_pending_for_run = expand_pending_orders_for_trans_types(
-                        edited_df.loc[selected_indices].copy(),
-                        _extra_trans_types_by_index_from_state(df_pending, editable_count),
-                    )
-                else:
-                    df_pending_for_run = edited_df.iloc[0:0].copy()
-                final_zero_warnings = _zero_value_warning_lines(df_pending_for_run)
-                final_required_warnings = _required_id_warning_lines(df_pending_for_run)
-                if final_zero_warnings:
-                    st.error("有品項 Value 為 0，請先修正：" + "；".join(final_zero_warnings[:5]))
-                if final_required_warnings:
-                    st.error("；".join(final_required_warnings[:5]))
-                if len(df_pending) > editable_count:
-                    st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
-        else:
-            st.info("目前沒有待製單資料。")
-
-        if job and job.get("orders"):
-            st.subheader("🧾 製單狀態")
-            status_label = {
-                "queued": "待機中",
-                "running": "製單中",
-                "success": "完成",
-                "completed": "完成",
-                "failed": "需排查",
-                "skipped": "略過",
-                "blocked": "未製單",
-            }
-            df_status = pd.DataFrame(job["orders"])
-            df_status["status"] = df_status["status"].map(status_label).fillna(df_status["status"])
-            df_status = df_status.rename(columns={
-                "position": "#",
-                "order_id": "注文番号",
-                "recipient": "收件人",
-                "country": "國家",
-                "trans_type": "TransType",
-                "status": "狀態",
-                "stage": "階段",
-                "tracking_no": "貨運單號",
-                "hs_codes": "HSCode",
-                "message": "訊息",
-            })
-            if "HSCode" not in df_status.columns:
-                df_status["HSCode"] = ""
-            show_cols = ["#", "注文番号", "收件人", "國家", "TransType", "狀態", "階段", "貨運單號", "HSCode", "訊息"]
-            st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
-
-        if job and job.get("logs") and batch_summary["failure_alerts"]:
-            with st.expander("🔧 詳細除錯日誌", expanded=True):
-                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                safe_job_logs = _safe_operational_log_lines(
-                    job["logs"][-200:],
-                    sensitive_values=_job_sensitive_values(job, email=email),
-                )
-                st.code("\n".join(safe_job_logs), language="text")
-    with postal_v2_tab:
+    with postal_tab:
         _render_postal_pending_v2(
             email=email,
             df_pending=df_pending,
             pending_logs=pending_logs,
             rate=rate,
             rate_date=rate_date,
-            rate_source=rate_source,
             job=job,
             is_running=is_running,
             is_launching=is_launching,
@@ -3324,7 +2762,7 @@ def _render_main_app():
 
 郵局製單基本操作流程如下：
 
-1. 進入系統後，打開「郵局待打單」頁籤
+1. 進入系統後，打開「待製郵便運單」頁籤
 2. 檢查目前待製單訂單
 3. 視需要調整 **Name、TransType、PRC ID、PCCC、HS Code、Value、Quantity** 等欄位
 4. 勾選本批要製單的訂單
@@ -3411,9 +2849,9 @@ PDF 檔名格式為：
 
 系統會在上傳前檢查 Google Drive 目標資料夾，依照當日既有檔名自動使用下一個序號，避免覆蓋既有檔案。
 
-## 六、郵局待打單
+## 六、待製郵便運單
 
-「郵局待打單」頁籤會顯示目前可製單的訂單。
+「待製郵便運單」頁籤會顯示目前可製單的訂單。
 
 每筆訂單會顯示以下資訊：
 

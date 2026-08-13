@@ -48,18 +48,23 @@ class PostalStartFlowTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(v2_body.count("on_change=_mark_pending_editor_dirty"), 6)
 
-    def test_legacy_editable_widgets_mark_pending_editor_dirty(self):
+    def test_v1_renderer_and_session_keys_are_removed(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
-        render_body = app_source[app_source.index("def _render_main_app():"):]
-        legacy_body = render_body[
-            render_body.index("with preview_tab:"):
-            render_body.index("with postal_v2_tab:")
-        ]
-        self.assertGreaterEqual(
-            legacy_body.count("on_change=_mark_pending_editor_dirty"),
-            6,
-        )
+        for marker in (
+            "pending_reset_",
+            "pending_name_",
+            "pending_selected_by_order",
+            "pending_extra_trans_single_",
+        ):
+            self.assertNotIn(marker, app_source)
+        for marker in (
+            "_start_job",
+            "_native_info",
+            "_apply_data_editor_state",
+            "pending_v2_selected_by_order",
+        ):
+            self.assertIn(marker, app_source)
 
     def test_job_and_pending_log_boundaries_redact_before_storage_or_ui(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -115,14 +120,20 @@ class PostalStartFlowTests(unittest.TestCase):
 
     def test_fx_rate_load_is_ready_before_pending_orders_exist(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        render_body = app_source[app_source.index("def _render_main_app():"):]
+        v2_body = app_source[
+            app_source.index("def _render_postal_pending_v2("):
+            app_source.index("def _render_running_progress(")
+        ]
 
-        self.assertIn(
-            'pending_count = len(df_pending)\n    rate, rate_date, rate_source = _load_usd_jpy_rate()\n    editable_count',
-            app_source,
+        self.assertLess(
+            render_body.index("rate, rate_date, _ = _load_usd_jpy_rate()"),
+            render_body.index("_render_postal_pending_v2("),
         )
+        self.assertIn("editable_count = min(len(df_pending), 20)", v2_body)
         self.assertNotIn(
-            "if not df_pending.empty:\n        rate, rate_date, rate_source = _load_usd_jpy_rate()",
-            app_source,
+            "if not df_pending.empty:\n        rate, rate_date, _ = _load_usd_jpy_rate()",
+            render_body,
         )
 
     def test_completed_pending_rows_are_filtered_before_editor_state_is_built(self):
@@ -146,20 +157,32 @@ class PostalStartFlowTests(unittest.TestCase):
             app_source,
         )
 
-    def test_toolbar_summary_uses_four_columns_without_spacer(self):
+    def test_v2_summary_uses_three_metrics_without_spacer(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        v2_body = app_source[
+            app_source.index("def _render_postal_pending_v2("):
+            app_source.index("def _render_running_progress(")
+        ]
+
+        self.assertIn(
+            'left_panel, right_panel = st.columns([3.05, 1.2], gap="medium", vertical_alignment="top")',
+            v2_body,
+        )
+        self.assertIn('metric_cols = st.columns(3, gap="small", vertical_alignment="center")', v2_body)
+        for label in ('("待製單", pending_count', '("已選取", selected_count', '("本次完成", done'):
+            self.assertIn(label, v2_body)
+
+    def test_postal_navigation_has_one_formal_entry_and_preserves_order_contract(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            'toolbar_info_cols = st.columns([1.75, 1, 1, 1], gap="medium", vertical_alignment="center")',
+            '["跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷"]',
             app_source,
         )
-
-    def test_v2_preview_tab_is_separate_from_v1_and_preserves_order_contract(self):
-        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-
-        self.assertIn("郵局待打單（新版測試）", app_source)
-        self.assertIn("with postal_v2_tab:", app_source)
-        self.assertIn('with preview_tab:', app_source)
+        self.assertNotIn("郵局待打單（新版測試）", app_source)
+        self.assertNotIn("with preview_tab:", app_source)
+        self.assertIn("with postal_tab:", app_source)
+        self.assertIn("_render_postal_pending_v2(", app_source)
         for marker in [
             "Name",
             "TransType",
@@ -174,6 +197,30 @@ class PostalStartFlowTests(unittest.TestCase):
             self.assertIn(marker, app_source)
         self.assertIn('"No."', app_source)
         self.assertNotIn("內容品名（僅顯示）", app_source)
+
+    def test_postal_operational_copy_is_concise_and_hides_cache_internals(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        renderer_body = app_source[
+            app_source.index("def _render_postal_pending_v2("):
+            app_source.index("def _render_running_progress(")
+        ]
+
+        for message in (
+            "資料更新於",
+            "暫時無法取得最新資料，目前顯示上次成功讀取的內容。",
+            "目前無法取得待製郵便運單資料，請稍後重新讀取。",
+        ):
+            self.assertIn(message, app_source)
+        for marker in (
+            "row_count",
+            "ttl",
+            "pending_refresh_error_code",
+            "_job_lock",
+            "{rate_source}",
+            "traceback",
+            "st.exception",
+        ):
+            self.assertNotIn(marker, renderer_body)
 
     def test_v2_rate_is_secondary_and_v2_operation_panel_keeps_original_controls(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -244,15 +291,20 @@ class PostalStartFlowTests(unittest.TestCase):
         ]:
             self.assertIn(marker, app_source)
 
-    def test_job_launching_state_locks_ui_until_running_job_is_visible(self):
+    def test_job_launching_state_locks_v2_controls_until_running_job_is_visible(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        v2_body = app_source[
+            app_source.index("def _render_postal_pending_v2("):
+            app_source.index("def _render_running_progress(")
+        ]
 
         self.assertIn('is_launching = bool(st.session_state.get("job_launching"))', app_source)
         self.assertIn('is_busy = is_running or is_launching', app_source)
         self.assertIn('if is_running and st.session_state.get("job_launching"):', app_source)
-        self.assertIn('disabled=is_busy,', app_source)
-        self.assertIn('if is_busy:', app_source)
-        self.assertIn('_render_blocking_running_guard(job, launching=is_launching)', app_source)
+        self.assertIn('disabled=is_busy,', v2_body)
+        self.assertIn('elif is_busy:', v2_body)
+        self.assertIn('st.info("製單任務啟動中，正在建立執行狀態。")', v2_body)
+        self.assertIn('_render_running_progress(job)', v2_body)
 
     def test_job_launching_state_clears_after_terminal_or_stale_launch(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

@@ -70,22 +70,22 @@ APP_TEST_SCRIPT = textwrap.dedent(
     app.session_state["user_email"] = "tester@tkrjm.co.jp"
     app.session_state["user_name"] = "Mock Tester"
     app.run(timeout=30)
+    assert [tab.label for tab in app.tabs] == [
+        "跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷",
+    ]
+    assert "郵局待打單（新版測試）" not in [tab.label for tab in app.tabs]
+    assert "郵局待打單" not in [tab.label for tab in app.tabs]
+    buttons = [item.label for item in app.button]
+    for label in ("選取全部", "清除全部", "開始製單", "重新讀取", "全部恢復預設資料"):
+        assert label in buttons, label
+    assert not app.exception, app.exception
     assert pending_loader.call_count >= 1, pending_loader.call_count
 
     assert not app.exception, app.exception
     assert not app.error, app.error
-    buttons = [item.label for item in app.button]
     markdown = [item.value for item in app.markdown]
     assert any("postal-v2" in value for value in markdown)
     assert any("USD/JPY 157.79" in value for value in markdown)
-    for label in [
-        "\u9078\u53d6\u5168\u90e8",
-        "\u6e05\u9664\u5168\u90e8",
-        "\u958b\u59cb\u88fd\u55ae",
-        "\u91cd\u65b0\u8b80\u53d6",
-        "\u5168\u90e8\u6062\u5fa9\u9810\u8a2d\u8cc7\u6599",
-    ]:
-        assert label in buttons, label
     assert len(
         [
             item.key
