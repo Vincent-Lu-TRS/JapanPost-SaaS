@@ -59,51 +59,75 @@ class SharedRefreshCoordinator:
         force: bool = False,
         copier: Callable[[Any], Any] = copy.deepcopy,
     ) -> RefreshResult[T]:
+        snapshot: tuple[bool, Any, RefreshStatus] | None = None
         with self._condition:
             state = self._sources.setdefault(source, _SourceState())
 
             if state.is_refreshing:
                 if state.has_data and not force:
                     state.served_stale = True
-                    return self._result_locked(source, state, copier, force_stale=True)
-
-                while state.is_refreshing:
-                    self._condition.wait()
-                return self._result_locked(source, state, copier)
-
-            if state.has_data and not force and not self._is_stale(state):
+                    snapshot = self._snapshot_locked(
+                        source, state, force_stale=True
+                    )
+                else:
+                    while state.is_refreshing:
+                        self._condition.wait()
+                    snapshot = self._snapshot_locked(source, state)
+            elif state.has_data and not force and not self._is_stale(state):
                 state.served_stale = False
-                return self._result_locked(source, state, copier)
+                snapshot = self._snapshot_locked(source, state)
+            else:
+                state.is_refreshing = True
+                state.last_attempt_at = self._now()
+                state.served_stale = False
 
-            state.is_refreshing = True
-            state.last_attempt_at = self._now()
-            state.served_stale = False
+        if snapshot is not None:
+            return self._copy_result(snapshot, copier)
 
         try:
             loaded = loader()
-            cached = copier(loaded)
         except Exception as exc:
             error_code = self._safe_error_code(exc)
             with self._condition:
-                state.is_refreshing = False
                 state.error_code = error_code
                 state.stale_after_error = state.has_data
                 state.served_stale = state.has_data
-                result = self._result_locked(source, state, copier)
-                self._condition.notify_all()
-                return result
+                try:
+                    state.is_refreshing = False
+                    snapshot = self._snapshot_locked(source, state)
+                finally:
+                    state.is_refreshing = False
+                    self._condition.notify_all()
+            return self._copy_result(snapshot, copier)
+
+        try:
+            cached = copier(loaded)
+        except Exception:
+            with self._condition:
+                state.error_code = "unexpected"
+                state.stale_after_error = state.has_data
+                state.served_stale = state.has_data
+                try:
+                    state.is_refreshing = False
+                finally:
+                    state.is_refreshing = False
+                    self._condition.notify_all()
+            raise
 
         with self._condition:
-            state.data = cached
-            state.has_data = True
-            state.loaded_at = self._now()
-            state.is_refreshing = False
-            state.stale_after_error = False
-            state.served_stale = False
-            state.error_code = None
-            result = self._result_locked(source, state, copier)
-            self._condition.notify_all()
-            return result
+            try:
+                state.data = cached
+                state.has_data = True
+                state.loaded_at = self._now()
+                state.is_refreshing = False
+                state.stale_after_error = False
+                state.served_stale = False
+                state.error_code = None
+                snapshot = self._snapshot_locked(source, state)
+            finally:
+                state.is_refreshing = False
+                self._condition.notify_all()
+        return self._copy_result(snapshot, copier)
 
     def status(self, source: str) -> RefreshStatus:
         with self._condition:
@@ -113,25 +137,35 @@ class SharedRefreshCoordinator:
                     source=source,
                     loaded_at=None,
                     last_attempt_at=None,
-                    is_stale=False,
+                    is_stale=True,
                     is_refreshing=False,
                     served_stale=False,
                     error_code=None,
                 )
             return self._status_locked(source, state)
 
-    def _result_locked(
+    def _snapshot_locked(
         self,
         source: str,
         state: _SourceState,
-        copier: Callable[[Any], Any],
         *,
         force_stale: bool = False,
+    ) -> tuple[bool, Any, RefreshStatus]:
+        return (
+            state.has_data,
+            state.data,
+            self._status_locked(source, state, force_stale=force_stale),
+        )
+
+    @staticmethod
+    def _copy_result(
+        snapshot: tuple[bool, Any, RefreshStatus],
+        copier: Callable[[Any], Any],
     ) -> RefreshResult[Any]:
-        data = copier(state.data) if state.has_data else None
+        has_data, data, status = snapshot
         return RefreshResult(
-            data=data,
-            status=self._status_locked(source, state, force_stale=force_stale),
+            data=copier(data) if has_data else None,
+            status=status,
         )
 
     def _status_locked(
@@ -153,7 +187,7 @@ class SharedRefreshCoordinator:
 
     def _is_stale(self, state: _SourceState) -> bool:
         if not state.has_data or state.loaded_at is None:
-            return False
+            return True
         return state.stale_after_error or self._now() - state.loaded_at >= self._ttl
 
     @staticmethod
