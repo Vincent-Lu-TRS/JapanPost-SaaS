@@ -1470,7 +1470,7 @@ if status_cb:
 # after a tracking-bearing result is appended
 if status_cb:
     status_cb({
-        "event": "order_completed",
+        "event": "label_created",
         **event_package,
         "tracking": tracking,
     })
@@ -1485,11 +1485,21 @@ if status_cb:
 
 In `job_control.py`, add `update_order_status_from_event(job, event)`. It normalizes
 the event's `(order_id, trans_type, shipment_role)` with the same package-key rules,
-locates that exact submitted package, updates running/completed/failed stage, and
-stores tracking only for `order_completed`. Reject unknown events and unmatched keys
+locates that exact submitted package, and applies these non-ambiguous transitions:
+
+- `order_started` → `status="running"`, stage `製單中`;
+- `label_created` → keep `status="running"`, stage `運單已產生・回填中`, store tracking;
+- `order_failed` → `status="failed"`, stage `未完成` with safe error type only.
+
+`label_created` is deliberately **not** terminal success: only
+`mark_results_completed()` after verified B/C/D/J readback may set a package to
+success/completed. Reject unknown events and unmatched keys
 without logging their payload. Add unit tests for all three events using a
 primary/additional two-row job whose DataFrame index is deliberately non-contiguous
 (`index=[10, 42]`); assert the additional event updates only the additional package.
+Add a regression sequence: send `label_created`, then apply a failed writeback
+outcome (and separately simulate the outer exception cleanup); assert the package is
+never `success` and ends at `backfill_failed`/`回填待確認` or failed.
 In `app.py`, expose it through the existing
 retry-protected binding:
 
