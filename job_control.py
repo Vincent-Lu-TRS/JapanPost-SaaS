@@ -3,6 +3,7 @@ import json
 import re
 import threading
 import time
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
@@ -14,6 +15,7 @@ COUNTRY_COLUMNS = ["收件人國家", "Country", "country"]
 TRANS_TYPE_COLUMNS = ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]
 TOTAL_USD_COLUMNS = ["郵局申告金額(USD)", "TotalValue(USD)", "total_usd"]
 TOTAL_JPY_COLUMNS = ["訂單合計申告金額(JPY)", "TotalValue(JPY)", "total_jpy"]
+SHIPMENT_ROLE_COLUMNS = ["_shipment_role", "shipment_role"]
 
 KEY_LOG_MARKERS = (
     "任務啟動",
@@ -29,13 +31,35 @@ KEY_LOG_MARKERS = (
 )
 
 
-def _row_value(row: pd.Series, columns: list[str], default: str = "") -> str:
+def _row_value(row: pd.Series | Mapping[str, Any], columns: list[str], default: str = "") -> str:
+    if not isinstance(row, (pd.Series, Mapping)):
+        return default
     for column in columns:
-        if column in row.index:
+        if column in row:
             value = row.get(column)
             if pd.notna(value) and str(value).strip():
                 return str(value).strip()
     return default
+
+
+def _shipment_role(row: pd.Series | Mapping[str, Any]) -> str:
+    role = _row_value(row, SHIPMENT_ROLE_COLUMNS, "primary").lower()
+    return "additional" if role == "additional" else "primary"
+
+
+def shipment_package_key(
+    row: pd.Series | Mapping[str, Any],
+) -> tuple[str, str, str]:
+    return (
+        _row_value(row, ORDER_ID_COLUMNS),
+        _row_value(row, TRANS_TYPE_COLUMNS),
+        _shipment_role(row),
+    )
+
+
+def _shipment_state_id(package_key: tuple[str, str, str]) -> str:
+    raw = json.dumps(package_key, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _selected_rows(df: pd.DataFrame, max_rows: int | None) -> pd.DataFrame:
@@ -48,13 +72,18 @@ def create_order_states(df: pd.DataFrame, max_rows: int | None) -> list[dict[str
     rows = _selected_rows(df, max_rows)
     states: list[dict[str, Any]] = []
     for position, (_, row) in enumerate(rows.iterrows(), start=1):
+        order_id, trans_type, shipment_role = shipment_package_key(row)
+        order_id = order_id or f"row-{position}"
+        package_key = (order_id, trans_type, shipment_role)
         states.append(
             {
                 "position": position,
-                "order_id": _row_value(row, ORDER_ID_COLUMNS, f"row-{position}"),
+                "state_id": _shipment_state_id(package_key),
+                "order_id": order_id,
                 "recipient": _row_value(row, RECIPIENT_COLUMNS),
                 "country": _row_value(row, COUNTRY_COLUMNS),
-                "trans_type": _row_value(row, TRANS_TYPE_COLUMNS),
+                "trans_type": trans_type,
+                "shipment_role": shipment_role,
                 "total_usd": _row_value(row, TOTAL_USD_COLUMNS),
                 "total_jpy": _row_value(row, TOTAL_JPY_COLUMNS),
                 "status": "queued",
@@ -74,6 +103,7 @@ def build_batch_fingerprint(df: pd.DataFrame, max_rows: int | None) -> str:
             "recipient": state["recipient"],
             "country": state["country"],
             "trans_type": state["trans_type"],
+            "shipment_role": state["shipment_role"],
         }
         for state in states
     ]
@@ -181,6 +211,7 @@ def mark_results_completed(job: dict[str, Any], results: list[dict[str, Any]]) -
         order_id = str(result.get("order_id") or "").strip()
         tracking = str(result.get("tracking") or "").strip()
         trans_type = str(result.get("trans_type") or result.get("TransType") or "").strip()
+        shipment_role = _shipment_role(result)
         if order_id:
             result["status"] = "completed"
             _mark_order(
@@ -193,6 +224,7 @@ def mark_results_completed(job: dict[str, Any], results: list[dict[str, Any]]) -
                     "message": "",
                 },
                 trans_type=trans_type,
+                shipment_role=shipment_role,
             )
 
 
@@ -215,6 +247,7 @@ def mark_results_failed(job: dict[str, Any], results: list[dict[str, Any]]) -> N
                 "message": reason_text,
             },
             trans_type=str(result.get("trans_type") or result.get("TransType") or "").strip(),
+            shipment_role=_shipment_role(result),
         )
 
 
@@ -334,10 +367,17 @@ def _mark_order(
     order_id: str,
     updates: dict[str, Any],
     trans_type: str = "",
+    shipment_role: str = "",
 ) -> None:
-    for order in orders:
-        if order.get("order_id") == order_id and (
-            not trans_type or str(order.get("trans_type") or "").strip() == trans_type
-        ):
-            order.update(updates)
-            return
+    candidates = [order for order in orders if order.get("order_id") == order_id]
+    if trans_type:
+        candidates = [
+            order
+            for order in candidates
+            if str(order.get("trans_type") or "").strip() == trans_type
+        ]
+    if shipment_role:
+        normalized_role = "additional" if shipment_role == "additional" else "primary"
+        candidates = [order for order in candidates if _shipment_role(order) == normalized_role]
+    if len(candidates) == 1:
+        candidates[0].update(updates)

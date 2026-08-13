@@ -6,6 +6,9 @@ from shipment_quantity import parse_shipment_quantity
 
 SHIPPING_COL = "郵局運送方式(複數商品請自行確認是否走小包)"
 SHIPPING_OPTIONS = ["EMS", "國際小包", "ePacket"]
+SHIPMENT_ROLE_COLUMN = "_shipment_role"
+PRIMARY_SHIPMENT_ROLE = "primary"
+ADDITIONAL_SHIPMENT_ROLE = "additional"
 MAX_EDITOR_ITEMS = 10
 
 PENDING_SUMMARY_COLUMNS = [
@@ -62,6 +65,13 @@ def _str_value(value) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
+
+
+def normalize_shipment_role(value) -> str:
+    role = _str_value(value).lower()
+    if role == ADDITIONAL_SHIPMENT_ROLE:
+        return ADDITIONAL_SHIPMENT_ROLE
+    return PRIMARY_SHIPMENT_ROLE
 
 
 def sanitize_hscode(value) -> str:
@@ -324,7 +334,11 @@ def expand_pending_orders_for_trans_types(
     rows: list[pd.Series] = []
     for source_index, row in df.iterrows():
         primary_trans_type = _str_value(row.get(SHIPPING_COL, ""))
-        rows.append(row.copy())
+        primary = row.copy()
+        primary[SHIPMENT_ROLE_COLUMN] = normalize_shipment_role(
+            row.get(SHIPMENT_ROLE_COLUMN, PRIMARY_SHIPMENT_ROLE)
+        )
+        rows.append(primary)
         seen = {primary_trans_type}
         for trans_type in extra_trans_types_by_index.get(source_index, []):
             trans_type = _str_value(trans_type)
@@ -332,11 +346,15 @@ def expand_pending_orders_for_trans_types(
                 continue
             duplicate = row.copy()
             duplicate[SHIPPING_COL] = trans_type
+            duplicate[SHIPMENT_ROLE_COLUMN] = ADDITIONAL_SHIPMENT_ROLE
             rows.append(duplicate)
             seen.add(trans_type)
     if not rows:
-        return df.copy()
-    return pd.DataFrame(rows, columns=df.columns).reset_index(drop=True)
+        empty = df.copy()
+        if SHIPMENT_ROLE_COLUMN not in empty.columns:
+            empty[SHIPMENT_ROLE_COLUMN] = pd.Series(dtype="object")
+        return empty
+    return pd.DataFrame(rows).reset_index(drop=True)
 
 
 def build_pending_editor_frame(df: pd.DataFrame) -> pd.DataFrame:

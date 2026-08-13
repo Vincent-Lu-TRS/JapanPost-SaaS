@@ -484,6 +484,11 @@ def _format_addr_to_bean_name(row, order_id: str) -> str:
     return f"{recipient_fields['name']} {_clean(order_id)}".strip()
 
 
+def _shipment_role(row) -> str:
+    role = _row_val(row, ["_shipment_role", "shipment_role"]).lower()
+    return "additional" if role == "additional" else "primary"
+
+
 def _build_result_record(row, order_id: str, tracking: str) -> dict:
     country_raw = _row_val(row, ["收件人國家", "Country"])
     trans_type = _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"])
@@ -497,6 +502,7 @@ def _build_result_record(row, order_id: str, tracking: str) -> dict:
         "country": country_raw,
         "country_raw": country_raw,
         "trans_type": trans_type,
+        "shipment_role": _shipment_role(row),
         "date": time.strftime("%Y-%m-%d"),
     }
 
@@ -518,6 +524,7 @@ def _build_failure_record(row, order_id: str, error: Exception, status: str = "f
         "country": _row_val(row, ["收件人國家", "Country"]),
         "country_raw": _row_val(row, ["收件人國家", "Country"]),
         "trans_type": _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]),
+        "shipment_role": _shipment_role(row),
         "date": time.strftime("%Y-%m-%d"),
     }
 

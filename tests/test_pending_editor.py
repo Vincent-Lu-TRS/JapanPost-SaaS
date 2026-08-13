@@ -5,6 +5,7 @@ import pandas as pd
 from pending_editor import (
     EDITABLE_PENDING_COLUMNS,
     PENDING_SUMMARY_COLUMNS,
+    SHIPMENT_ROLE_COLUMN,
     SHIPPING_COL,
     SHIPPING_OPTIONS,
     apply_pending_editor_values,
@@ -400,7 +401,20 @@ class PendingEditorTests(unittest.TestCase):
             list(expanded[SHIPPING_COL]),
             ["EMS", "ePacket", "國際小包"],
         )
+        self.assertEqual(
+            list(expanded[SHIPMENT_ROLE_COLUMN]),
+            ["primary", "additional", "additional"],
+        )
         self.assertEqual(list(expanded["瘜冽??芸(鞎潔???鞈?)"]), ["WhoWht-Test1"] * 3)
+
+    def test_expand_pending_orders_for_trans_types_retains_role_for_empty_frame(self):
+        expanded = expand_pending_orders_for_trans_types(
+            pd.DataFrame(columns=[SHIPPING_COL]),
+            {},
+        )
+
+        self.assertIn(SHIPMENT_ROLE_COLUMN, expanded.columns)
+        self.assertTrue(expanded.empty)
 
 
 if __name__ == "__main__":

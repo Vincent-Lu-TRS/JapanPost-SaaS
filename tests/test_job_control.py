@@ -12,6 +12,7 @@ from job_control import (
     mark_results_completed,
     mark_results_failed,
     preflight_batch_orders,
+    shipment_package_key,
     summarize_job_results,
     summarize_job_progress,
     update_order_status_from_log,
@@ -61,6 +62,52 @@ class JobControlTests(unittest.TestCase):
         self.assertNotEqual(
             build_batch_fingerprint(first, max_rows=None),
             build_batch_fingerprint(second, max_rows=None),
+        )
+
+    def test_batch_fingerprint_changes_when_shipment_role_changes(self):
+        primary = pd.DataFrame(
+            [{"order_id": "Synthetic-Order-1", "TransType": "EMS", "_shipment_role": "primary"}]
+        )
+        additional = primary.copy()
+        additional.loc[0, "_shipment_role"] = "additional"
+
+        self.assertNotEqual(
+            build_batch_fingerprint(primary, max_rows=None),
+            build_batch_fingerprint(additional, max_rows=None),
+        )
+
+    def test_shipment_package_key_reads_production_series_shape(self):
+        row = pd.Series(
+            {
+                "注文番号(貼上原始資料)": "Synthetic-Order-1",
+                "郵局運送方式(複數商品請自行確認是否走小包)": "EMS",
+                "_shipment_role": "additional",
+            }
+        )
+
+        self.assertEqual(
+            shipment_package_key(row),
+            ("Synthetic-Order-1", "EMS", "additional"),
+        )
+
+    def test_shipment_package_key_reads_dict_and_defaults_legacy_role(self):
+        row = {"order_id": "Synthetic-Order-2", "trans_type": "ePacket"}
+
+        self.assertEqual(
+            shipment_package_key(row),
+            ("Synthetic-Order-2", "ePacket", "primary"),
+        )
+
+    def test_shipment_package_key_invalid_role_fails_closed_to_primary(self):
+        row = {
+            "order_id": "Synthetic-Order-3",
+            "trans_type": "EMS",
+            "shipment_role": "unexpected",
+        }
+
+        self.assertEqual(
+            shipment_package_key(row),
+            ("Synthetic-Order-3", "EMS", "primary"),
         )
 
     def test_registry_rejects_second_start_for_same_running_user(self):
@@ -113,6 +160,20 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(states[0]["order_id"], "WhoWhy-Test5")
         self.assertEqual(states[0]["status"], "queued")
         self.assertEqual(states[0]["stage"], "待機中")
+        self.assertEqual(states[0]["shipment_role"], "primary")
+
+    def test_create_order_states_assigns_distinct_state_ids_by_shipment_role(self):
+        rows = pd.DataFrame(
+            [
+                {"order_id": "Synthetic-Order-1", "TransType": "EMS", "_shipment_role": "primary"},
+                {"order_id": "Synthetic-Order-1", "TransType": "EMS", "_shipment_role": "additional"},
+            ]
+        )
+
+        states = create_order_states(rows, max_rows=None)
+
+        self.assertEqual([state["shipment_role"] for state in states], ["primary", "additional"])
+        self.assertNotEqual(states[0]["state_id"], states[1]["state_id"])
 
     def test_mark_results_completed_matches_duplicate_order_by_trans_type(self):
         job = {

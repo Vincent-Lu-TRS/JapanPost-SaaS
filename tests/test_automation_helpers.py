@@ -1843,7 +1843,25 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["items_expected"], 1)
         self.assertEqual(result["items_submitted"], 1)
+        self.assertEqual(result["shipment_role"], "primary")
         self.assertRegex(result["date"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_result_records_preserve_explicit_additional_shipment_role(self):
+        row = {
+            "Shipping Name": "Synthetic Recipient",
+            "_shipment_role": "additional",
+        }
+
+        success = _build_result_record(row, "Synthetic-Order-1", "LX123456789JP")
+        failure = _build_failure_record(row, "Synthetic-Order-1", RuntimeError("synthetic failure"))
+
+        self.assertEqual(success["shipment_role"], "additional")
+        self.assertEqual(failure["shipment_role"], "additional")
+
+    def test_failure_record_defaults_legacy_shipment_role_to_primary(self):
+        failure = _build_failure_record({}, "Synthetic-Order-2", RuntimeError("synthetic failure"))
+
+        self.assertEqual(failure["shipment_role"], "primary")
 
     def test_playwright_success_path_uses_structured_result_record(self):
         from pathlib import Path
