@@ -18,10 +18,10 @@ from bot.automation import (
     _iter_content_items,
 )
 from bot.sheets import _filter_pending_orders_dataframe, backfill_results
-import bot.sheets as sheets_module
 from job_control import create_order_states, mark_results_completed
 from pending_editor import build_pending_item_frame
 from postal_ui_feedback import summarize_batch_results
+from tests.fake_gspread import FakeClient, FakeWorksheet
 
 
 class MockJapanPostGateway:
@@ -46,47 +46,17 @@ class MockJapanPostGateway:
         return {"tracking": self.tracking, "pdf": b"%PDF-mock"}
 
 
-class FakeTargetWorksheet:
-    id = int(sheets_module.TARGET_GID)
-
-    def __init__(self, readback: bool = True):
-        self.readback = readback
-        self.updated = []
-        self.columns = {2: ["receiver"], 3: ["order"], 4: ["tracking"]}
-
-    def col_values(self, column):
-        return list(self.columns.get(column, []))
-
-    def batch_update(self, batch, value_input_option=None):
-        self.updated = batch
-        self.value_input_option = value_input_option
-        if not self.readback:
-            return
-        for update in batch:
-            if not str(update.get("range", "")).startswith("B"):
-                continue
-            values = update["values"][0]
-            self.columns[3] = ["order", values[1]]
-            self.columns[4] = ["tracking", values[2]]
-
-
-class FakeTargetSpreadsheet:
-    def __init__(self, worksheet):
-        self.worksheet = worksheet
-
-    def worksheets(self):
-        return [self.worksheet]
-
-
-class FakeSheetsClient:
-    def __init__(self, worksheet):
-        self.worksheet = worksheet
-
-    def open_by_key(self, _key):
-        return FakeTargetSpreadsheet(self.worksheet)
-
-
 class PostalMockE2ETests(unittest.TestCase):
+    @staticmethod
+    def _target_client(*, readback=True):
+        worksheet = FakeWorksheet(
+            [["", "收件人", "注文番号", "追跡番号", "", "", "", "", "", "國家"]],
+            row_count=2,
+        )
+        if not readback:
+            worksheet.drop_rows.add(2)
+        return FakeClient(worksheet)
+
     @staticmethod
     def _source_rows() -> pd.DataFrame:
         status_col = "製單上傳狀態(請用[未打單]檢視模式)"
@@ -101,6 +71,7 @@ class PostalMockE2ETests(unittest.TestCase):
             check_col: "",
             shipping_col: "ePacket",
             "Shipping Name": "Ying Chan",
+            "Country": "US",
             "內容物1": "Water Bottle TRSN9767",
             "內容物2": "Water Bottle TRSN9765",
             "內容物3": "Water Bottle TRSN9763",
@@ -172,13 +143,12 @@ class PostalMockE2ETests(unittest.TestCase):
         self.assertEqual(result["items_expected"], 3)
         self.assertEqual(result["items_submitted"], 3)
 
-        worksheet = FakeTargetWorksheet(readback=True)
-        original_get_client = sheets_module._get_gspread_client
-        sheets_module._get_gspread_client = lambda: FakeSheetsClient(worksheet)
-        try:
-            outcome = backfill_results([result])
-        finally:
-            sheets_module._get_gspread_client = original_get_client
+        client = self._target_client(readback=True)
+        outcome = backfill_results(
+            [result],
+            client=client,
+            readback_delay_seconds=0,
+        )
 
         self.assertTrue(outcome["ok"])
         job = {"orders": create_order_states(pending, None)}
@@ -199,13 +169,12 @@ class PostalMockE2ETests(unittest.TestCase):
             AddressValidationError("地址過長：超過 mock 欄位容量", "address_too_long"),
         )
 
-        worksheet = FakeTargetWorksheet(readback=True)
-        original_get_client = sheets_module._get_gspread_client
-        sheets_module._get_gspread_client = lambda: FakeSheetsClient(worksheet)
-        try:
-            outcome = backfill_results([success])
-        finally:
-            sheets_module._get_gspread_client = original_get_client
+        client = self._target_client(readback=True)
+        outcome = backfill_results(
+            [success],
+            client=client,
+            readback_delay_seconds=0,
+        )
 
         self.assertTrue(outcome["ok"])
         mark_results_completed({"orders": create_order_states(pending, None)}, [success])
@@ -218,17 +187,20 @@ class PostalMockE2ETests(unittest.TestCase):
     def test_mock_target_readback_failure_is_not_reported_as_completed(self):
         pending = _filter_pending_orders_dataframe(self._source_rows(), completed_ids=set())
         result = _build_result_record(pending.iloc[0], "imy2038510", "LX000000001JP")
-        worksheet = FakeTargetWorksheet(readback=False)
-        original_get_client = sheets_module._get_gspread_client
-        sheets_module._get_gspread_client = lambda: FakeSheetsClient(worksheet)
-        try:
-            outcome = backfill_results([result])
-        finally:
-            sheets_module._get_gspread_client = original_get_client
+        client = self._target_client(readback=False)
+        outcome = backfill_results(
+            [result],
+            client=client,
+            readback_attempts=1,
+        )
 
         self.assertFalse(outcome["ok"])
-        self.assertIn("imy2038510", outcome["failed"])
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(outcome["items"][0]["status"], "write_failed")
+        self.assertEqual(
+            outcome["items"][0]["reason_code"],
+            "writeback_readback_failed",
+        )
+        self.assertNotEqual(result["status"], "completed")
 
 
 if __name__ == "__main__":

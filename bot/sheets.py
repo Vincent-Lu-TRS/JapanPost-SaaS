@@ -30,6 +30,12 @@ class CompletionAuthority:
     legacy_order_ids: frozenset[str]
     exact_pairs: frozenset[tuple[str, str]]
 
+
+@dataclass(frozen=True)
+class WritebackGrid:
+    columns: dict[str, list[str]]
+    occupied_formula_rows: frozenset[int]
+
 SCOPES = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
@@ -340,6 +346,234 @@ def _get_worksheet_by_gid(spreadsheet, gid: str):
         return None
 
 
+def _get_target_worksheet(client=None):
+    client = client or _get_gspread_client()
+    spreadsheet = client.open_by_key(TARGET_SHEET_ID)
+    worksheet = spreadsheet.get_worksheet_by_id(int(TARGET_GID))
+    if worksheet is None:
+        raise RuntimeError("target worksheet unavailable")
+    return worksheet
+
+
+def _read_writeback_grid(worksheet) -> WritebackGrid:
+    columns = {
+        column: worksheet.col_values(index)
+        for column, index in {"B": 2, "C": 3, "D": 4, "J": 10}.items()
+    }
+    formula_grid = worksheet.get("B:J", value_render_option="FORMULA")
+    for values in columns.values():
+        values.extend([""] * (len(formula_grid) - len(values)))
+    relevant_offsets = {0, 1, 2, 8}
+    occupied = frozenset(
+        row_number
+        for row_number, row in enumerate(formula_grid, start=1)
+        if any(
+            offset < len(row) and str(row[offset]).startswith("=")
+            for offset in relevant_offsets
+        )
+    )
+    return WritebackGrid(columns=columns, occupied_formula_rows=occupied)
+
+
+def _last_used_writeback_row(columns, *, occupied_formula_rows) -> int:
+    value_rows = {
+        index
+        for values in columns.values()
+        for index, value in enumerate(values, start=1)
+        if str(value).strip()
+    }
+    return max(value_rows | set(occupied_formula_rows) | {1})
+
+
+def _ensure_row_capacity(worksheet, required_last_row: int) -> None:
+    missing = required_last_row - int(worksheet.row_count)
+    if missing > 0:
+        worksheet.add_rows(missing)
+
+
+def _safe_sheet_error_code(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "writeback_permission_denied"
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "writeback_network_error"
+    return "writeback_api_error"
+
+
+def _outcome_item(index, result, *, status, reason_code, row=None):
+    return {
+        "input_index": index,
+        "order_id": str(result.get("order_id") or "").strip(),
+        "tracking": str(result.get("tracking") or "").strip(),
+        "trans_type": str(result.get("trans_type") or "").strip(),
+        "shipment_role": str(result.get("shipment_role") or "primary").strip().lower(),
+        "status": status,
+        "reason_code": reason_code,
+        "row": row,
+    }
+
+
+def _column_rows(columns: dict[str, list[str]]):
+    row_count = max((len(values) for values in columns.values()), default=0)
+    for row_number in range(2, row_count + 1):
+        yield row_number, {
+            column: (
+                str(values[row_number - 1]).strip()
+                if row_number <= len(values)
+                else ""
+            )
+            for column, values in columns.items()
+        }
+
+
+def _classify_writeback_records(results, columns):
+    existing_rows = list(_column_rows(columns))
+    exact_pairs = {
+        (values["C"], values["D"]): row_number
+        for row_number, values in existing_rows
+        if values["C"] and values["D"]
+    }
+    tracking_owners = {
+        values["D"]: values["C"]
+        for _, values in existing_rows
+        if values["C"] and values["D"]
+    }
+    tracking_by_order: dict[str, set[str]] = {}
+    partial_orders = set()
+    partial_tracking = set()
+    for _, values in existing_rows:
+        if values["C"] and values["D"]:
+            tracking_by_order.setdefault(values["C"], set()).add(values["D"])
+        elif values["C"]:
+            partial_orders.add(values["C"])
+        elif values["D"]:
+            partial_tracking.add(values["D"])
+
+    candidates = []
+    immediate = []
+    planned_pairs = set()
+    planned_tracking_owners = dict(tracking_owners)
+    for position, raw in enumerate(results):
+        result = dict(raw)
+        index = int(result.pop("_input_index", position))
+        order_id = str(result.get("order_id") or "").strip()
+        tracking = str(result.get("tracking") or "").strip()
+        role = str(result.get("shipment_role") or "primary").strip().lower()
+        result["order_id"] = order_id
+        result["tracking"] = tracking
+        result["shipment_role"] = role
+        pair = (order_id, tracking)
+        if not order_id or not tracking or role not in {"primary", "additional"}:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="invalid_writeback_identity",
+                )
+            )
+        elif pair in exact_pairs:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="already_present",
+                    reason_code="exact_pair_exists",
+                    row=exact_pairs[pair],
+                )
+            )
+        elif tracking in planned_tracking_owners and planned_tracking_owners[tracking] != order_id:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="conflict",
+                    reason_code="tracking_owned_by_other_order",
+                )
+            )
+        elif pair in planned_pairs:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="duplicate_batch_pair",
+                )
+            )
+        elif order_id in partial_orders or tracking in partial_tracking:
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="incomplete_existing_row",
+                )
+            )
+        elif tracking_by_order.get(order_id) and role != "additional":
+            immediate.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="unexpected_second_tracking",
+                )
+            )
+        else:
+            result["input_index"] = index
+            candidates.append(result)
+            planned_pairs.add(pair)
+            planned_tracking_owners[tracking] = order_id
+            tracking_by_order.setdefault(order_id, set()).add(tracking)
+    return candidates, immediate
+
+
+def _verify_writeback_rows(
+    worksheet,
+    expected_by_row,
+    *,
+    attempts,
+    delay_seconds,
+    sleep_fn,
+):
+    attempts = max(int(attempts), 1)
+    final = {
+        row_number: "writeback_readback_failed"
+        for row_number in expected_by_row
+    }
+    for attempt in range(attempts):
+        columns = _read_writeback_grid(worksheet).columns
+        for row_number, expected in expected_by_row.items():
+            actual = tuple(
+                str(columns[column][row_number - 1]).strip()
+                if row_number <= len(columns[column])
+                else ""
+                for column in ("B", "C", "D", "J")
+            )
+            matches = sum(
+                bool(actual_value)
+                and actual_value == expected_value
+                for actual_value, expected_value in zip(actual, expected)
+            )
+            exact_identity = (
+                bool(actual[1])
+                and bool(actual[2])
+                and actual[1] == expected[1]
+                and actual[2] == expected[2]
+            )
+            all_required = all(actual)
+            final[row_number] = (
+                "verified"
+                if exact_identity and all_required and actual == expected
+                else "partial_write"
+                if matches
+                else "writeback_readback_failed"
+            )
+        if all(reason == "verified" for reason in final.values()):
+            break
+        if attempt + 1 < attempts:
+            sleep_fn(delay_seconds)
+    return final
+
+
 def read_completion_authority(
     client: gspread.Client | None = None,
 ) -> CompletionAuthority:
@@ -492,143 +726,197 @@ def get_pending_orders(
         return _pending_read_failure(exc, log_cb, strict=strict)
 
 
-def backfill_results(results: list[dict], log_cb=None):
-    """
-    將成功打單結果批量回填至目標表單 GID 465870894。
-    每筆結果格式：{"name", "order_id", "tracking", "country_raw", "date"}
-    """
-    sensitive_values = tuple(
-        value
-        for result in results or []
-        for value in (
-            result.get("order_id"),
-            result.get("tracking"),
-            result.get("name"),
-            result.get("country_raw"),
-        )
-        if _clean_cell(value)
-    )
+def backfill_results(
+    results: list[dict],
+    log_cb=None,
+    *,
+    client=None,
+    sleep_fn=time.sleep,
+    readback_attempts: int = 3,
+    readback_delay_seconds: float = 0.5,
+) -> dict:
+    """Append postal results and report a verified outcome for every input."""
 
-    def _log(msg):
-        safe_message = redact_operational_log(msg, sensitive_values=sensitive_values)
-        if log_cb:
-            log_cb(safe_message)
-        else:
-            logging.info("%s", safe_message)
+    def summarize(items, *, preferred_error=""):
+        items = sorted(items, key=lambda item: item["input_index"])
+        written = sum(item["status"] == "written" for item in items)
+        existing = sum(item["status"] == "already_present" for item in items)
+        failed = [
+            item["reason_code"]
+            for item in items
+            if item["status"] not in {"written", "already_present"}
+        ]
+        return {
+            "ok": not failed,
+            "written": written,
+            "existing": existing,
+            "failed": failed,
+            "error": (
+                ""
+                if not failed
+                else preferred_error or (
+                    failed[0] if len(items) == 1 else "writeback_not_fully_verified"
+                )
+            ),
+            "items": items,
+        }
+
+    def failed_items(records, reason_code):
+        return [
+            _outcome_item(
+                index,
+                result,
+                status="write_failed",
+                reason_code=reason_code,
+            )
+            for index, result in records
+        ]
 
     if not results:
-        _log("ℹ️ 無需回填（results 為空）")
-        return {"ok": True, "written": 0, "failed": [], "error": ""}
+        return {
+            "ok": True,
+            "written": 0,
+            "existing": 0,
+            "failed": [],
+            "error": "",
+            "items": [],
+        }
 
-    invalid_results = [
-        result
-        for result in results
-        if not _clean_cell(result.get("order_id"))
-        or not _clean_cell(result.get("tracking"))
-    ]
-    if invalid_results:
+    valid_inputs = []
+    immediate_items = []
+    for index, raw in enumerate(results):
+        result = dict(raw)
+        order_id = _clean_cell(result.get("order_id"))
+        tracking = _clean_cell(result.get("tracking"))
+        role = _clean_cell(result.get("shipment_role") or "primary").lower()
+        result.update(
+            order_id=order_id,
+            tracking=tracking,
+            shipment_role=role,
+            _input_index=index,
+        )
+        if not order_id or not tracking or role not in {"primary", "additional"}:
+            immediate_items.append(
+                _outcome_item(
+                    index,
+                    result,
+                    status="manual_review",
+                    reason_code="invalid_writeback_identity",
+                )
+            )
+        else:
+            valid_inputs.append(result)
+
+    if not valid_inputs:
+        return summarize(immediate_items, preferred_error="invalid_writeback_identity")
+
+    try:
+        worksheet = _get_target_worksheet(client=client)
+        grid = _read_writeback_grid(worksheet)
+        classified, classified_items = _classify_writeback_records(
+            valid_inputs,
+            grid.columns,
+        )
+        immediate_items.extend(classified_items)
+    except Exception as exc:
+        reason_code = _safe_sheet_error_code(exc)
         safe_log_event(
             log_cb or (lambda message: logging.error("%s", message)),
             "writeback_initialization_failed",
-            reason="invalid_writeback_identity",
-            count=len(invalid_results),
+            count=len(results),
+            reason=reason_code,
         )
-        return {
-            "ok": False,
-            "written": 0,
-            "failed": [str(result.get("order_id") or "") for result in invalid_results],
-            "error": "invalid_writeback_identity",
-        }
-
-    try:
-        client = _get_gspread_client()
-        sh = client.open_by_key(TARGET_SHEET_ID)
-        ws = next(
-            (w for w in sh.worksheets() if str(w.id) == TARGET_GID), None
-        )
-        if not ws:
-            safe_log_event(
-                log_cb or (lambda message: logging.error("%s", message)),
-                "writeback_initialization_failed",
-                reason="writeback_api_error",
+        immediate_items.extend(
+            failed_items(
+                [
+                    (int(result["_input_index"]), result)
+                    for result in valid_inputs
+                ],
+                reason_code,
             )
-            return {
-                "ok": False,
-                "written": 0,
-                "failed": [str(r.get("order_id") or "") for r in results],
-                "error": "writeback_api_error",
-            }
+        )
+        return summarize(immediate_items, preferred_error=reason_code)
 
-        # 找最後一列
-        col_b = ws.col_values(2)
-        last_row = len(col_b)
-        while last_row > 0 and not str(col_b[last_row - 1]).strip():
-            last_row -= 1
-        start_row = last_row + 1
-        _log(f"📍 從第 {start_row} 列開始回填 {len(results)} 筆")
+    next_row = _last_used_writeback_row(
+        grid.columns,
+        occupied_formula_rows=grid.occupied_formula_rows,
+    ) + 1
+    expected_by_row = {}
+    for offset, candidate in enumerate(classified):
+        row_number = next_row + offset
+        candidate["row"] = row_number
+        country_raw = candidate.get("country_raw", "")
+        country_code = (
+            resolve_country_code(country_raw, COUNTRY_CODE_MAP)
+            or _clean_cell(country_raw)
+        )
+        expected_by_row[row_number] = (
+            _clean_cell(candidate.get("name")),
+            candidate["order_id"],
+            candidate["tracking"],
+            country_code,
+        )
 
-        batch = []
-        for i, r in enumerate(results):
-            row_n = start_row + i
-            country_raw = r.get("country_raw", "")
-            country_code = resolve_country_code(country_raw, COUNTRY_CODE_MAP) or country_raw
-            batch.append({
-                "range": f"B{row_n}:D{row_n}",
-                "values": [[r.get("name", ""), r.get("order_id", ""), r.get("tracking", "")]],
-            })
-            batch.append({
-                "range": f"J{row_n}:J{row_n}",
-                "values": [[country_code]],
-            })
-
-        ws.batch_update(batch, value_input_option="USER_ENTERED")
-        written_order_ids = ws.col_values(3)
-        written_tracking = ws.col_values(4)
-        written_pairs = {
-            (_clean_cell(order_id), _clean_cell(tracking))
-            for order_id, tracking in zip(written_order_ids[1:], written_tracking[1:])
-            if _clean_cell(order_id) and _clean_cell(tracking)
-        }
-        missing = [
-            str(result.get("order_id") or "")
-            for result in results
-            if (_clean_cell(result.get("order_id")), _clean_cell(result.get("tracking"))) not in written_pairs
-        ]
-        if missing:
+    verified = {}
+    if expected_by_row:
+        try:
+            _ensure_row_capacity(worksheet, max(expected_by_row))
+            updates = []
+            for row_number, values in expected_by_row.items():
+                name, order_id, tracking, country_code = values
+                updates.extend(
+                    [
+                        {
+                            "range": f"B{row_number}:D{row_number}",
+                            "values": [[name, order_id, tracking]],
+                        },
+                        {
+                            "range": f"J{row_number}:J{row_number}",
+                            "values": [[country_code]],
+                        },
+                    ]
+                )
+            worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+            verified = _verify_writeback_rows(
+                worksheet,
+                expected_by_row,
+                attempts=readback_attempts,
+                delay_seconds=readback_delay_seconds,
+                sleep_fn=sleep_fn,
+            )
+        except Exception as exc:
+            safe_code = _safe_sheet_error_code(exc)
             safe_log_event(
                 log_cb or (lambda message: logging.error("%s", message)),
                 "writeback_batch_finished",
-                count=len(results),
-                reason="partial_write",
+                count=len(expected_by_row),
+                reason=safe_code,
             )
-            return {
-                "ok": False,
-                "written": len(results),
-                "failed": missing,
-                "error": "writeback_readback_failed",
+            verified = {
+                row_number: safe_code
+                for row_number in expected_by_row
             }
-        _log(f"🚀 回填完成並驗證：{len(results)} 筆")
-        return {"ok": True, "written": len(results), "failed": [], "error": ""}
 
-    except Exception as exc:
-        if isinstance(exc, PermissionError):
-            reason = "writeback_permission_denied"
-        elif isinstance(exc, (TimeoutError, ConnectionError)):
-            reason = "writeback_network_error"
-        else:
-            reason = "writeback_api_error"
-        safe_log_event(
-            log_cb or (lambda message: logging.error("%s", message)),
-            "writeback_initialization_failed",
-            reason=reason,
-            error_type=type(exc).__name__,
+    items = list(immediate_items)
+    for candidate in classified:
+        reason_code = verified[candidate["row"]]
+        status = (
+            "written"
+            if reason_code == "verified"
+            else "partial_write"
+            if reason_code == "partial_write"
+            else "write_failed"
         )
-        return {
-            "ok": False,
-            "written": 0,
-            "failed": [str(r.get("order_id") or "") for r in results],
-            "error": reason,
-        }
+        items.append(
+            _outcome_item(
+                candidate["input_index"],
+                candidate,
+                status=status,
+                reason_code=reason_code,
+                row=candidate["row"],
+            )
+        )
+    return summarize(items)
 
 
 def load_sheet_values(spreadsheet_id: str, sheet_name: str) -> list[list[str]]:
