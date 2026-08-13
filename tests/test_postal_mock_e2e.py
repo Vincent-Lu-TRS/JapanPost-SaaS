@@ -228,6 +228,21 @@ class PostalMockE2ETests(unittest.TestCase):
         self.assertIn("missing_tracking_failures = [", render_block)
         self.assertIn("if missing_tracking_failures:", render_block)
 
+    def test_retry_result_notice_is_rendered_after_streamlit_rerun(self):
+        source = APP_PATH.read_text(encoding="utf-8")
+        render_block = source[
+            source.index("def _render_postal_pending_v2") : source.index(
+                "def _render_running_progress"
+            )
+        ]
+
+        self.assertIn(
+            'st.session_state.pop("pending_v2_writeback_retry_notice", None)',
+            render_block,
+        )
+        self.assertIn("st.success(retry_notice)", render_block)
+        self.assertIn("st.warning(retry_notice)", render_block)
+
 
 if __name__ == "__main__":
     unittest.main()

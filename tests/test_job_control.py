@@ -698,6 +698,29 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(terminal, "completed")
         self.assertEqual(job["status"], "completed")
 
+    def test_missing_submitted_package_prevents_refresh_after_primary_writeback(self):
+        job = _mixed_writeback_job()
+        primary = job["results"][0]
+        job["results"] = [primary]
+
+        terminal = apply_writeback_outcome(
+            job,
+            [primary],
+            {
+                "ok": True,
+                "items": [
+                    {"input_index": 0, "status": "written", "reason_code": "", "row": 2},
+                ],
+            },
+        )
+
+        self.assertEqual(primary["status"], "completed")
+        self.assertEqual(job["orders"][0]["status"], "success")
+        self.assertNotEqual(job["orders"][1]["status"], "success")
+        self.assertEqual(terminal, "partial_failure")
+        self.assertEqual(job["status"], "partial_failure")
+        self.assertFalse(job["pending_refresh_needed"])
+
 
 if __name__ == "__main__":
     unittest.main()

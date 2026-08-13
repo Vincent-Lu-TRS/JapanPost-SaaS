@@ -1370,6 +1370,12 @@ def _render_postal_pending_v2(
                     st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
 
         if job and job.get("results") and not is_busy:
+            retry_notice = st.session_state.pop("pending_v2_writeback_retry_notice", None)
+            if retry_notice == "回填已完成":
+                st.success(retry_notice)
+            elif retry_notice:
+                st.warning(retry_notice)
+
             if batch_summary["failure_alerts"]:
                 st.warning(
                     f"本批完成 {batch_summary['completed_count']} 筆，"

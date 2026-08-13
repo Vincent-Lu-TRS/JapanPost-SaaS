@@ -455,9 +455,18 @@ def apply_writeback_outcome(
     mark_results_failed(job, failed)
     job["backfill_outcome"] = outcome
     summary = summarize_job_results(job.get("results"))
+    submitted_orders = list(job.get("orders") or [])
+    all_submitted_packages_completed = bool(submitted_orders) and all(
+        str(order.get("status") or "").strip().lower() in {"success", "completed"}
+        for order in submitted_orders
+    )
     terminal_status = (
         "completed"
-        if summary["total"] > 0 and summary["completed"] == summary["total"]
+        if (
+            summary["total"] > 0
+            and summary["completed"] == summary["total"]
+            and all_submitted_packages_completed
+        )
         else "partial_failure"
     )
     job["status"] = terminal_status
