@@ -225,6 +225,21 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn("filter_pending_orders_after_batch", app_source)
         self.assertIn('st.session_state["last_pending_df"] = df_pending', app_source)
 
+    def test_fresh_pending_snapshot_bypasses_stale_batch_hide_filter(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("authoritative_snapshot: bool = False", app_source)
+        self.assertIn('st.session_state["pending_snapshot_authoritative"]', app_source)
+        self.assertIn("snapshot_authoritative=", app_source)
+        self.assertIn(
+            'not st.session_state.get("pending_snapshot_authoritative")',
+            app_source,
+        )
+        self.assertIn(
+            'st.session_state.pop("pending_snapshot_authoritative", None)',
+            app_source,
+        )
+
     def test_successful_batch_hides_redundant_result_and_execution_log_sections(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 

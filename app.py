@@ -393,6 +393,7 @@ def _apply_pending_result(
     *,
     is_busy: bool,
     allow_dirty_reset: bool = False,
+    authoritative_snapshot: bool = False,
     job=None,
 ) -> bool:
     error_code = str(result.status.error_code or "").strip()
@@ -412,6 +413,16 @@ def _apply_pending_result(
     ):
         return False
 
+    previous_loaded_at = st.session_state.get("last_pending_loaded_at")
+    snapshot_authoritative = bool(
+        authoritative_snapshot
+        or st.session_state.get("pending_snapshot_authoritative")
+        or previous_loaded_at is None
+        or (
+            result.status.loaded_at is not None
+            and result.status.loaded_at != previous_loaded_at
+        )
+    )
     payload = copy_pending_payload(result.data)
     dataframe = payload.dataframe.copy(deep=True)
     if job:
@@ -421,7 +432,7 @@ def _apply_pending_result(
             submitted_orders=job.get("orders") or [],
             results=job.get("results") or [],
         )
-        if job.get("results"):
+        if job.get("results") and not snapshot_authoritative:
             dataframe = filter_pending_orders_after_batch(
                 dataframe,
                 job["results"],
@@ -436,6 +447,8 @@ def _apply_pending_result(
     st.session_state["last_pending_loaded_at"] = result.status.loaded_at
     st.session_state["last_pending_read_summary"] = summarize_pending_read_logs(logs)
     st.session_state["last_pending_error"] = error_code
+    if snapshot_authoritative:
+        st.session_state["pending_snapshot_authoritative"] = True
     return True
 
 
@@ -933,6 +946,7 @@ def _render_postal_pending_v2(
                         pending_result,
                         is_busy=is_busy,
                         allow_dirty_reset=False,
+                        authoritative_snapshot=True,
                         job=job,
                     ):
                         _reset_preflight_job_view(job)
@@ -949,6 +963,7 @@ def _render_postal_pending_v2(
                         pending_result,
                         is_busy=is_busy,
                         allow_dirty_reset=True,
+                        authoritative_snapshot=True,
                         job=job,
                     ):
                         _reset_preflight_job_view(job)
@@ -966,6 +981,7 @@ def _render_postal_pending_v2(
                     else:
                         ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
                         if ok:
+                            st.session_state.pop("pending_snapshot_authoritative", None)
                             st.session_state["postal_batch_view_active"] = True
                             st.session_state["job_launching"] = True
                             st.session_state["job_launching_started_at"] = time.time()
@@ -2762,6 +2778,7 @@ def _render_main_app():
             completed_refresh,
             is_busy=is_busy,
             allow_dirty_reset=True,
+            authoritative_snapshot=True,
             job=job,
         ):
             st.session_state["pending_editor_dirty"] = False
@@ -2777,11 +2794,17 @@ def _render_main_app():
         pending_logs = []
     pending_count = len(df_pending)
 
-    if not is_busy and job and job.get("results"):
+    if (
+        not is_busy
+        and job
+        and job.get("results")
+        and not st.session_state.get("pending_snapshot_authoritative")
+    ):
         filtered_pending = filter_pending_orders_after_batch(
             df_pending,
             job["results"],
             submitted_packages=job.get("orders") or [],
+            snapshot_authoritative=False,
         )
         if len(filtered_pending) != len(df_pending):
             df_pending = filtered_pending

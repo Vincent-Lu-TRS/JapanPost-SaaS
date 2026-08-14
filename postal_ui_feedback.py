@@ -128,14 +128,21 @@ def filter_pending_orders_after_batch(
     results: list[dict] | None,
     *,
     submitted_packages: list[dict] | None = None,
+    snapshot_authoritative: bool = False,
 ) -> pd.DataFrame:
     """Hide successfully completed rows from the cached pending-order view.
 
     This is a presentation-layer filter only.  The input frame is not mutated,
     and failed/skipped rows remain visible so they can be reviewed or retried.
+    A freshly loaded source snapshot is authoritative because the loader has
+    already applied the live completion-authority filter.  In that case an old
+    in-memory job result must not hide a row that the source/target read says is
+    pending again.
     """
     if not isinstance(pending, pd.DataFrame) or pending.empty:
         return pending
+    if snapshot_authoritative:
+        return pending.copy()
 
     completed_ids = fully_completed_order_ids(results, submitted_packages)
     if not completed_ids:

@@ -113,6 +113,33 @@ class PostalUiFeedbackTests(unittest.TestCase):
         self.assertEqual(visible["order_id"].tolist(), ["failed-1", "untouched-1"])
         self.assertEqual(pending["order_id"].tolist(), ["ok-1", "failed-1", "untouched-1"])
 
+    def test_fresh_source_snapshot_is_not_hidden_by_stale_job_results(self):
+        pending = pd.DataFrame(
+            {
+                "注文番号(貼上原始資料)": ["imy2039120", "imy2039190"],
+                "Shipping Name": ["Austin Reynolds", "Aden Steinke"],
+            }
+        )
+        stale_results = [
+            {
+                "order_id": "imy2039120",
+                "trans_type": "國際小包",
+                "shipment_role": "primary",
+                "status": "completed",
+            }
+        ]
+
+        visible = filter_pending_orders_after_batch(
+            pending,
+            stale_results,
+            snapshot_authoritative=True,
+        )
+
+        self.assertEqual(
+            visible["注文番号(貼上原始資料)"].tolist(),
+            ["imy2039120", "imy2039190"],
+        )
+
     def test_non_completed_results_do_not_change_pending_view(self):
         pending = pd.DataFrame({"注文番号(貼上原始資料)": ["blocked-1", "retry-1"]})
 
