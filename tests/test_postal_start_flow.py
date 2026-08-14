@@ -110,7 +110,8 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn("def _active_refresh_tick(*, is_busy: bool, job)", app_source)
         self.assertIn("allow_dirty_reset=False", app_source)
         self.assertIn("preserve_selection=True", app_source)
-        self.assertIn("SharedRefreshCoordinator(ttl=timedelta(minutes=20))", app_source)
+        self.assertIn("ttl=timedelta(minutes=20)", app_source)
+        self.assertIn("now=lambda: datetime.now(JST)", app_source)
 
     def test_manual_reload_forces_shared_snapshot_without_clearing_last_good_data(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -440,6 +441,30 @@ class PostalStartFlowTests(unittest.TestCase):
         blocker_body = start_body[blocker_gate:ready_assignment]
         self.assertIn('_JOB_REGISTRY.finish(job, "error")', blocker_body)
         self.assertIn("return", blocker_body)
+
+    def test_preflight_abort_does_not_duplicate_ready_rows_as_failure_results(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        start_body = app_source[
+            app_source.index("def _start_job(") : app_source.index(
+                "# ══════════════════════════════════════════════════════\n# 頁面渲染函數"
+            )
+        ]
+
+        self.assertIn('job["batch_preflight_blocked_count"]', start_body)
+        self.assertNotIn('job["results"].extend(aborted_results)', start_body)
+        self.assertIn("mark_results_failed(job, aborted_results)", start_body)
+
+    def test_terminal_batch_view_hides_editor_cards_until_refresh(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        v2_body = app_source[
+            app_source.index("def _render_postal_pending_v2(") : app_source.index(
+                "def _render_running_progress("
+            )
+        ]
+
+        self.assertIn("show_editor_cards", v2_body)
+        self.assertIn("elif show_editor_cards:", v2_body)
+        self.assertIn('st.session_state["postal_batch_view_active"]', app_source)
 
     def test_pending_refresh_applies_mixed_package_preservation_with_job_authority(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

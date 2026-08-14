@@ -75,6 +75,7 @@ from refresh_payloads import (
 )
 from safe_logging import redact_operational_log, safe_log_event
 from features.picking_labels import apply_picking_payload, load_picking_payload
+from local_time import JST, format_jst
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -138,7 +139,10 @@ _JOB_REGISTRY = _get_job_registry(_JOB_REGISTRY_CACHE_VERSION)
 def _get_refresh_coordinator(
     cache_version="2026-08-13-v1",
 ) -> SharedRefreshCoordinator:
-    return SharedRefreshCoordinator(ttl=timedelta(minutes=20))
+    return SharedRefreshCoordinator(
+        ttl=timedelta(minutes=20),
+        now=lambda: datetime.now(JST),
+    )
 
 
 def _job_lock_path(email: str) -> Path:
@@ -175,6 +179,22 @@ def _job_lock_is_active(email: str, max_age_seconds: int = 1800) -> bool:
 
 def _get_job(email: str) -> dict | None:
     return _JOB_REGISTRY.get(email)
+
+
+def _reset_preflight_job_view(job: dict | None) -> None:
+    """Clear a terminal preflight stop after the user explicitly reloads."""
+    if not isinstance(job, dict) or not job.get("preflight_reload_required"):
+        return
+    if job.get("status") == "running":
+        return
+    job["status"] = "idle"
+    job["orders"] = []
+    job["results"] = []
+    job["logs"] = []
+    job["preflight_checks"] = []
+    job.pop("batch_preflight_blocked_count", None)
+    job.pop("preflight_reload_required", None)
+    job.pop("preflight_reload_message", None)
 
 
 def _dataframe_sensitive_values(dataframe: pd.DataFrame | None) -> tuple[str, ...]:
@@ -886,6 +906,7 @@ def _render_postal_pending_v2(
                     key="postal_v2_start_job",
                     disabled=(
                         is_busy
+                        or bool(st.session_state.get("postal_batch_view_active"))
                         or pending_count == 0
                         or selected_count == 0
                         or bool(zero_value_warnings)
@@ -914,6 +935,8 @@ def _render_postal_pending_v2(
                         allow_dirty_reset=False,
                         job=job,
                     ):
+                        _reset_preflight_job_view(job)
+                        st.session_state.pop("postal_batch_view_active", None)
                         st.session_state.pop("pending_refresh_warning", None)
                     else:
                         st.session_state["pending_refresh_warning"] = (
@@ -928,6 +951,8 @@ def _render_postal_pending_v2(
                         allow_dirty_reset=True,
                         job=job,
                     ):
+                        _reset_preflight_job_view(job)
+                        st.session_state.pop("postal_batch_view_active", None)
                         st.session_state["pending_editor_dirty"] = False
                         st.session_state.pop("pending_v2_selected_by_order", None)
                         _clear_pending_editor_keys()
@@ -941,6 +966,7 @@ def _render_postal_pending_v2(
                     else:
                         ok, reason = _start_job(email, df_pending_for_run, max_rows_val)
                         if ok:
+                            st.session_state["postal_batch_view_active"] = True
                             st.session_state["job_launching"] = True
                             st.session_state["job_launching_started_at"] = time.time()
                             if hasattr(st, "toast"):
@@ -953,7 +979,7 @@ def _render_postal_pending_v2(
 
                 pending_loaded_at = st.session_state.get("last_pending_loaded_at")
                 if isinstance(pending_loaded_at, datetime):
-                    st.caption(f"資料更新於 {pending_loaded_at.astimezone().strftime('%H:%M')}")
+                    st.caption(f"資料更新於 {format_jst(pending_loaded_at, '%H:%M')}")
                 refresh_error_message = _pending_refresh_warning_message()
                 if refresh_error_message:
                     st.warning(refresh_error_message)
@@ -984,6 +1010,8 @@ def _render_postal_pending_v2(
                 )
 
         with left_panel:
+            batch_view_active = bool(st.session_state.get("postal_batch_view_active"))
+            show_editor_cards = not is_busy and not batch_view_active
             if df_pending.empty:
                 st.info("目前沒有待製單資料。")
             elif is_busy:
@@ -1016,7 +1044,35 @@ def _render_postal_pending_v2(
                     st.info("製單任務啟動中，正在建立執行狀態。")
                 if job:
                     _render_running_progress(job)
-            else:
+            elif batch_view_active:
+                submitted_orders = pd.DataFrame((job or {}).get("orders") or [])
+                if not submitted_orders.empty:
+                    run_cols = [
+                        "position",
+                        "order_id",
+                        "recipient",
+                        "country",
+                        "trans_type",
+                        "total_usd",
+                        "total_jpy",
+                    ]
+                    run_cols = [column for column in run_cols if column in submitted_orders.columns]
+                    submitted_preview = submitted_orders[run_cols].rename(
+                        columns={
+                            "position": "#",
+                            "order_id": "注文番号",
+                            "recipient": "收件人",
+                            "country": "國家",
+                            "trans_type": "TransType",
+                            "total_usd": "USD",
+                            "total_jpy": "JPY",
+                        }
+                    )
+                    st.caption("本次送出製單")
+                    st.dataframe(submitted_preview, hide_index=True, width="stretch")
+                else:
+                    st.info("本次製單列表正在整理。")
+            elif show_editor_cards:
                 edited_summary_rows: list[dict[str, str]] = []
                 edited_items_by_position: dict[int, pd.DataFrame] = {}
                 for position in range(editable_count):
@@ -1205,13 +1261,29 @@ def _render_postal_pending_v2(
             elif retry_notice:
                 st.warning(retry_notice)
 
-            if batch_summary["failure_alerts"]:
-                st.warning(
-                    f"本批完成 {batch_summary['completed_count']} 筆，"
-                    f"未完成 {batch_summary['failed_count'] + batch_summary['skipped_count']} 筆。"
+            if batch_summary["failure_groups"]:
+                batch_abort_count = int((job or {}).get("batch_preflight_blocked_count") or 0)
+                uncompleted_count = (
+                    batch_summary["failed_count"]
+                    + batch_summary["skipped_count"]
+                    + batch_abort_count
                 )
-                for alert in batch_summary["failure_alerts"]:
-                    st.error(alert)
+                if (job or {}).get("preflight_reload_required"):
+                    st.warning(
+                        (job or {}).get("preflight_reload_message")
+                        or "本批未開始製單，請按「重新讀取」後重新選取。"
+                    )
+                else:
+                    st.warning(
+                        f"本批完成 {batch_summary['completed_count']} 筆，"
+                        f"未完成 {uncompleted_count} 筆。"
+                    )
+                with st.expander(
+                    f"查看未完成原因（{len(batch_summary['failure_alerts'])} 筆）",
+                    expanded=False,
+                ):
+                    for alert in batch_summary["failure_groups"]:
+                        st.error(alert)
             elif st.session_state.get("pending_refresh_notice"):
                 st.success(
                     f"製單完成：本次完成 {batch_summary['completed_count']} 筆。"
@@ -1277,7 +1349,7 @@ def _render_postal_pending_v2(
             st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
 
         if job and job.get("logs") and batch_summary["failure_alerts"]:
-            with st.expander("詳細除錯日誌", expanded=True):
+            with st.expander("詳細除錯日誌", expanded=False):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
                 safe_job_logs = _safe_operational_log_lines(
                     job["logs"][-200:],
@@ -1404,6 +1476,10 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     for order in job.get("orders") or []
                 ]
                 job["results"] = preflight_results
+                job["preflight_reload_required"] = True
+                job["preflight_reload_message"] = (
+                    "本批未開始製單，無法確認完成狀態；請按「重新讀取」後再試。"
+                )
                 mark_results_failed(job, preflight_results)
                 safe_log_event(
                     _log,
@@ -1453,6 +1529,11 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 mark_results_completed(job, preflight_completed_results)
             if preflight_blocked_results:
                 mark_results_failed(job, preflight_blocked_results)
+                job["preflight_reload_required"] = True
+                job["preflight_reload_message"] = (
+                    "本批未開始製單：選取後資料已更新或檢查未通過，"
+                    "請按「重新讀取」後重新選取。"
+                )
                 safe_log_event(
                     _log,
                     "preflight_blocked",
@@ -1470,7 +1551,10 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     }
                     for _, row in ready_rows.iterrows()
                 ]
-                job["results"].extend(aborted_results)
+                # Keep the executable rows out of structured results. They were
+                # never submitted; recording one synthetic result per row only
+                # duplicates the same batch-level stop reason in the UI.
+                job["batch_preflight_blocked_count"] = len(aborted_results)
                 mark_results_failed(job, aborted_results)
                 _JOB_REGISTRY.finish(job, "error")
                 _clear_job_lock(email)
@@ -2681,6 +2765,7 @@ def _render_main_app():
             job=job,
         ):
             st.session_state["pending_editor_dirty"] = False
+            st.session_state.pop("postal_batch_view_active", None)
             _clear_pending_editor_keys()
 
     cached_pending = st.session_state.get("last_pending_df")

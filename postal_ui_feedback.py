@@ -164,6 +164,8 @@ def summarize_batch_results(results: list[dict] | None) -> dict[str, object]:
         result for result in rows if str(result.get("status") or "").strip() in failed_statuses
     ]
     alerts = []
+    group_counts: dict[tuple[str, str], int] = {}
+    group_labels: dict[tuple[str, str], str] = {}
     for result in failed_rows:
         order_id = str(result.get("order_id") or "未指定").strip()
         status = str(result.get("status") or "").strip().lower()
@@ -175,8 +177,23 @@ def summarize_batch_results(results: list[dict] | None) -> dict[str, object]:
         ).strip()
         if status == "backfill_failed":
             alerts.append(f"訂單編號 {order_id}：運單已產生，但資料回填未完成（{reason}）")
+            group_label = "運單已產生，但資料回填未完成"
+        elif str(result.get("reason_code") or "").strip() == "source_changed":
+            alerts.append(f"訂單編號 {order_id}：未製單（{reason}）")
+            group_label = "來源資料在選取後已變更，請按「重新讀取」後重新選取"
+        elif str(result.get("reason_code") or "").strip() == "source_indicates_done_target_missing":
+            alerts.append(f"訂單編號 {order_id}：未製單（{reason}）")
+            group_label = "來源已有運單狀態但目標表缺少完成紀錄，請先確認資料"
         else:
             alerts.append(f"訂單編號 {order_id}：未製單（{reason}）")
+            group_label = reason
+        group_key = ("backfill" if status == "backfill_failed" else status, group_label)
+        group_counts[group_key] = group_counts.get(group_key, 0) + 1
+        group_labels[group_key] = group_label
+    failure_groups = [
+        f"{group_labels[key]}（{group_counts[key]} 筆）"
+        for key in group_counts
+    ]
     return {
         "total_count": len(rows),
         "completed_count": completed_count,
@@ -189,6 +206,7 @@ def summarize_batch_results(results: list[dict] | None) -> dict[str, object]:
             if str(result.get("status") or "").strip() in {"skipped", "blocked"}
         ),
         "failure_alerts": alerts,
+        "failure_groups": failure_groups,
     }
 
 

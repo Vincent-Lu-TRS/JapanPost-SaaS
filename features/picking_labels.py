@@ -28,6 +28,7 @@ from bot.picking_labels import (
 from bot.picking_pdf import get_registered_cjk_font_info, render_picking_labels_pdf
 from bot.sheets import batch_mark_picking_done, load_sheet_values
 from refresh_payloads import PickingPayload, copy_picking_payload
+from local_time import JST, format_jst
 
 
 def _config_value(name: str, default: str) -> str:
@@ -94,7 +95,7 @@ def apply_picking_payload(
     st.session_state["picking_diagnostics"] = copied.diagnostics
     st.session_state["picking_selected_rows"] = selected_rows
     if loaded_at is not None:
-        st.session_state["picking_loaded_at"] = loaded_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state["picking_loaded_at"] = format_jst(loaded_at)
 
 
 def _load_orders() -> None:
@@ -102,7 +103,7 @@ def _load_orders() -> None:
     apply_picking_payload(
         payload,
         preserve_selection=False,
-        loaded_at=datetime.now().astimezone(),
+        loaded_at=datetime.now(JST),
     )
 
 
@@ -189,7 +190,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
             list_files=lambda prefix: list_drive_files(_picking_output_drive_folder_id(), prefix),
             upload_file=lambda path: upload_file_to_drive(path, _picking_output_drive_folder_id(), "application/pdf"),
             mark_done=_mark_done_after_revalidation,
-            now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            now=datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
         )
     except Exception as exc:
         st.error("正式產生前檢查 Google Drive 檔名失敗，已中止。")

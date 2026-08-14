@@ -77,6 +77,24 @@ class PostalUiFeedbackTests(unittest.TestCase):
         self.assertIn("運單已產生，但資料回填未完成", message)
         self.assertNotIn("未製單", message)
 
+    def test_repeated_preflight_failures_are_grouped_for_compact_feedback(self):
+        summary = summarize_batch_results(
+            [
+                {
+                    "order_id": f"order-{index}",
+                    "status": "blocked",
+                    "reason_code": "source_changed",
+                    "reason_text": "來源資料在選取後已變更，停止以避免使用過期內容",
+                }
+                for index in range(3)
+            ]
+        )
+
+        self.assertEqual(len(summary["failure_alerts"]), 3)
+        self.assertEqual(len(summary["failure_groups"]), 1)
+        self.assertIn("3 筆", summary["failure_groups"][0])
+        self.assertIn("重新讀取", summary["failure_groups"][0])
+
     def test_completed_orders_are_removed_from_cached_pending_view(self):
         pending = pd.DataFrame(
             {
