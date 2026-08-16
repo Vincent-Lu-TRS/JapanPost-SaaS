@@ -15,6 +15,7 @@ APP_TEST_SCRIPT = textwrap.dedent(
 
     import pandas as pd
     from streamlit.testing.v1 import AppTest
+    import bot.sheets
     from refresh_payloads import PickingPayload
 
     mock_pending = pd.DataFrame(
@@ -124,6 +125,7 @@ class PostalUiV2AppTest(unittest.TestCase):
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         if probe.returncode != 0:
@@ -135,6 +137,7 @@ class PostalUiV2AppTest(unittest.TestCase):
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=120,
         )
         if result.returncode != 0:
