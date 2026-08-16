@@ -113,6 +113,13 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn("ttl=timedelta(minutes=20)", app_source)
         self.assertIn("now=lambda: datetime.now(JST)", app_source)
 
+    def test_active_job_progress_refreshes_the_page_from_live_registry_state(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        live_refresh_block = app_source[app_source.rindex("    if is_busy:"):]
+        self.assertIn("time.sleep(2)", live_refresh_block)
+        self.assertIn("st.rerun()", live_refresh_block)
+
     def test_manual_reload_forces_shared_snapshot_without_clearing_last_good_data(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         picking_source = (ROOT / "features" / "picking_labels.py").read_text(encoding="utf-8")
@@ -320,6 +327,31 @@ class PostalStartFlowTests(unittest.TestCase):
         ):
             self.assertNotIn(marker, renderer_body)
 
+    def test_running_progress_is_single_live_indicator_without_backend_log_text(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        progress_body = app_source[
+            app_source.index("def _render_running_progress("):
+            app_source.index("def _render_blocking_running_guard(")
+        ]
+
+        self.assertEqual(progress_body.count("st.progress("), 1)
+        self.assertIn('text=f"製單執行中｜{done}/{total}"', progress_body)
+        self.assertNotIn("製單進度", progress_body)
+        self.assertNotIn("最新狀態", progress_body)
+        self.assertNotIn("目前處理", progress_body)
+
+    def test_running_view_hides_order_status_table_and_uses_actual_field_copy(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        v2_body = app_source[
+            app_source.index("def _render_postal_pending_v2("):
+            app_source.index("def _render_running_progress(")
+        ]
+
+        self.assertIn('if not is_busy and job and job.get("orders"):', v2_body)
+        self.assertNotIn("藍框：可編輯", v2_body)
+        self.assertNotIn("灰字：僅顯示／系統計算", v2_body)
+        self.assertIn("可直接修改姓名、寄送方式、追加製作、PRC ID／PCCC 與品項資料", v2_body)
+
     def test_v2_rate_is_secondary_and_v2_operation_panel_keeps_original_controls(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
@@ -328,7 +360,7 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn("postal-v2-operation-panel", app_source)
         for marker in ["最大處理", "開始製單", "重新讀取", "全部恢復預設資料"]:
             self.assertIn(marker, app_source)
-        self.assertIn("藍框：可編輯", app_source)
+        self.assertIn("可直接修改姓名、寄送方式、追加製作、PRC ID／PCCC 與品項資料", app_source)
 
     def test_v2_labels_and_order_card_layout_match_latest_ui_contract(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

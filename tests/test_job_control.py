@@ -248,6 +248,39 @@ class JobControlTests(unittest.TestCase):
         self.assertEqual(progress["active_stage"], "填寫收件人")
         self.assertAlmostEqual(progress["ratio"], 1 / 3)
 
+    def test_summarize_job_progress_counts_label_created_as_processed(self):
+        job = {
+            "orders": [
+                {
+                    "order_id": "WhoWht-Test-processed",
+                    "status": "running",
+                    "stage": "標籤已建立，等待回填確認",
+                    "tracking_no": "LX123456789JP",
+                },
+                {"order_id": "WhoWht-Test-queued", "status": "queued", "stage": "待機中"},
+            ]
+        }
+
+        progress = summarize_job_progress(job)
+
+        self.assertEqual(progress["done"], 1)
+        self.assertAlmostEqual(progress["ratio"], 0.5)
+
+    def test_summarize_job_progress_stays_processed_during_writeback(self):
+        job = {
+            "orders": [
+                {
+                    "order_id": "WhoWht-Test-writeback",
+                    "status": "running",
+                    "stage": "正在回填確認",
+                    "tracking_no": "LX123456789JP",
+                },
+                {"order_id": "WhoWht-Test-queued", "status": "queued", "stage": "待機中"},
+            ]
+        }
+
+        self.assertEqual(summarize_job_progress(job)["done"], 1)
+
     def test_preflight_batch_orders_blocks_completed_and_changed_orders(self):
         selected = pd.DataFrame(
             [
@@ -448,7 +481,7 @@ class JobControlTests(unittest.TestCase):
 
         self.assertEqual(job["orders"][0]["status"], "running")
         self.assertEqual(job["orders"][0]["tracking_no"], "CN123456789JP")
-        self.assertEqual(summarize_job_progress(job)["done"], 0)
+        self.assertEqual(summarize_job_progress(job)["done"], 1)
 
     def test_update_order_status_from_event_targets_package_without_false_success(self):
         job = {
@@ -513,7 +546,7 @@ class JobControlTests(unittest.TestCase):
         )
         self.assertEqual(job["orders"][1]["status"], "running")
         self.assertIn("回填", job["orders"][1]["stage"])
-        self.assertEqual(summarize_job_progress(job)["done"], 0)
+        self.assertEqual(summarize_job_progress(job)["done"], 1)
 
         update_order_status_from_event(
             job,
@@ -588,7 +621,7 @@ class JobControlTests(unittest.TestCase):
             ["queued", "running"],
         )
         self.assertEqual(qualified_job["orders"][1]["tracking_no"], "LX123456789JP")
-        self.assertEqual(summarize_job_progress(qualified_job)["done"], 0)
+        self.assertEqual(summarize_job_progress(qualified_job)["done"], 1)
 
     def test_qualified_failure_log_targets_only_matching_package(self):
         rows = pd.DataFrame(
