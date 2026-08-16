@@ -656,7 +656,16 @@ def summarize_job_progress(job: dict[str, Any] | None) -> dict[str, Any]:
     orders = (job or {}).get("orders") or []
     total = len(orders)
     done_statuses = {"success", "completed", "failed", "skipped", "blocked"}
-    done = sum(1 for order in orders if order.get("status") in done_statuses)
+    # A label is operationally processed as soon as the carrier has created it.
+    # Keep the order state non-terminal until Sheets writeback is verified, but
+    # count its tracking number so progress stays monotonic while writeback is
+    # being checked.
+    done = sum(
+        1
+        for order in orders
+        if order.get("status") in done_statuses
+        or bool(str(order.get("tracking_no") or "").strip())
+    )
     active = next((order for order in orders if order.get("status") == "running"), None)
     if active is None:
         active = next((order for order in orders if order.get("status") == "queued"), None)
