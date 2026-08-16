@@ -2,6 +2,10 @@
 headless = true
 enableCORS = false
 enableXsrfProtection = false
+# Streamlit Community Cloud does not need hot-reload file watching in production.
+# Disable watchdog/inotify so the app does not exhaust the container's inotify
+# instance quota and repeatedly log "inotify instance limit reached".
+fileWatcherType = "none"
 
 [theme]
 primaryColor = "#5275A8"
