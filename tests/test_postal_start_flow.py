@@ -352,6 +352,17 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertNotIn("灰字：僅顯示／系統計算", v2_body)
         self.assertIn("可直接修改姓名、寄送方式、追加製作、PRC ID／PCCC 與品項資料", v2_body)
 
+    def test_v2_help_copy_wraps_on_narrow_layout_and_start_button_is_accented(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        css_start = app_source.index(".postal-v2-legend {")
+        css_body = app_source[css_start : app_source.index("</style>", css_start)]
+
+        self.assertIn(".postal-v2-legend-editable", css_body)
+        self.assertIn("white-space: normal;", css_body)
+        self.assertIn("overflow-wrap: anywhere;", css_body)
+        self.assertIn("postal-v2-start-button-marker", app_source)
+        self.assertIn("#D97706", app_source)
+
     def test_v2_rate_is_secondary_and_v2_operation_panel_keeps_original_controls(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
