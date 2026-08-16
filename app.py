@@ -912,6 +912,10 @@ def _render_postal_pending_v2(
                     key="postal_v2_max_rows",
                 )
                 max_rows_val: int | None = None if max_rows_input == 0 else int(max_rows_input)
+                st.markdown(
+                    '<span class="postal-v2-start-button-marker"></span>',
+                    unsafe_allow_html=True,
+                )
                 start_requested = st.button(
                     "開始製單",
                     type="primary",
@@ -2623,10 +2627,18 @@ def _render_main_app():
             margin-top: .7rem;
             padding-top: .62rem;
             font-size: .76rem;
+            width: 100%;
+            min-width: 0;
         }
         .postal-v2-legend-editable,
         .postal-v2-legend-readonly {
-            white-space: nowrap;
+            flex: 1 1 100%;
+            min-width: 0;
+            max-width: 100%;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            line-height: 1.45;
         }
         .postal-v2-legend-editable { color: #5275A8; }
         .postal-v2-legend-readonly { color: #8b93a7; }
@@ -2666,6 +2678,24 @@ def _render_main_app():
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) .stButton > button:hover {
             border-color: #6f91c2 !important;
             background: #456A9F !important;
+        }
+        div[data-testid="stElementContainer"]:has(.postal-v2-start-button-marker) + div[data-testid="stElementContainer"] .stButton > button[kind="primary"] {
+            background: #D97706 !important;
+            border-color: #D97706 !important;
+            color: #0A0D13 !important;
+            font-weight: 750 !important;
+            box-shadow: 0 4px 12px rgba(217, 119, 6, .22) !important;
+        }
+        div[data-testid="stElementContainer"]:has(.postal-v2-start-button-marker) + div[data-testid="stElementContainer"] .stButton > button[kind="primary"]:hover {
+            background: #F59E0B !important;
+            border-color: #F59E0B !important;
+            color: #0A0D13 !important;
+        }
+        div[data-testid="stElementContainer"]:has(.postal-v2-start-button-marker) + div[data-testid="stElementContainer"] .stButton > button[kind="primary"]:disabled {
+            background: #7c541f !important;
+            border-color: #7c541f !important;
+            color: #d9c6a5 !important;
+            box-shadow: none !important;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-operation-panel) div[data-testid="stNumberInput"] input,
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.postal-v2-card-marker) div[data-testid="stTextInput"] input,
