@@ -1015,8 +1015,7 @@ def _render_postal_pending_v2(
 
                 st.markdown(
                     '<div class="postal-v2-legend">'
-                    '<span class="postal-v2-legend-editable">藍框：可編輯</span>'
-                    '<span class="postal-v2-legend-readonly">灰字：僅顯示／系統計算</span>'
+                    '<span class="postal-v2-legend-editable">可直接修改姓名、寄送方式、追加製作、PRC ID／PCCC 與品項資料；訂單編號、國家與合計金額由系統帶入。</span>'
                     '</div>',
                     unsafe_allow_html=True,
                 )
@@ -1321,7 +1320,7 @@ def _render_postal_pending_v2(
             if missing_tracking_failures:
                 st.warning("運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。")
 
-        if job and job.get("orders"):
+        if not is_busy and job and job.get("orders"):
             st.markdown('<div class="postal-v2-status-heading">製單狀態</div>', unsafe_allow_html=True)
             status_label = {
                 "queued": "待機中",
@@ -1378,19 +1377,7 @@ def _render_running_progress(job: dict) -> None:
     progress = summarize_job_progress(job)
     total = progress["total"]
     done = progress["done"]
-    active_order = progress["active_order_id"] or "準備中"
-    active_stage = progress["active_stage"] or "等待下一步"
-    st.markdown(
-        '<div class="running-panel">'
-        f'<div class="running-title">製單執行中｜{done}/{total}</div>'
-        f'<div class="running-detail">目前處理：{html.escape(active_order)}｜{html.escape(active_stage)}</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    st.progress(float(progress["ratio"]), text=f"製單進度 {done}/{total}")
-    latest_logs = (job.get("logs") or [])[-3:]
-    if latest_logs:
-        st.caption("最新狀態：" + "　".join(html.escape(line) for line in latest_logs))
+    st.progress(float(progress["ratio"]), text=f"製單執行中｜{done}/{total}")
 
 
 def _render_blocking_running_guard(job: dict | None, launching: bool = False) -> None:
@@ -2820,7 +2807,11 @@ def _render_main_app():
     pending_count = len(df_pending)
     rate, rate_date, _ = _load_usd_jpy_rate()
     batch_summary = summarize_batch_results((job or {}).get("results") or [])
-    done = int(batch_summary["completed_count"])
+    done = (
+        int(summarize_job_progress(job)["done"])
+        if is_busy and job
+        else int(batch_summary["completed_count"])
+    )
 
     _active_refresh_tick(is_busy=is_busy, job=job)
 
