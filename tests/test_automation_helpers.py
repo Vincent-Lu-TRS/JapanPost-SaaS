@@ -1622,14 +1622,14 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertTrue(_has_m060800_item_book_warning(html))
         self.assertFalse(_has_m060800_item_book_warning("<html><body>M060800</body></html>"))
 
-    def test_build_m060900_weight_payload_leaves_total_weight_blank_and_uses_regist(self):
+    def test_build_m060900_weight_payload_clears_prefilled_total_weight_and_uses_regist(self):
         html = """
         <form action="/mypage/M060900.do" method="post">
           <input type="hidden" name="command" value="">
           <input type="hidden" name="csrfToken" value="token">
           <input name="emsNo.value" value="">
           <input name="shippingBean.sendDate.YMD" value="2026/06/18">
-          <input name="shippingBean.totalWeight.value" value="">
+          <input name="shippingBean.totalWeight.value" value="100">
           <input name="shippingBean.cost.value" value="23.41">
           <select name="shippingBean.sendDate.YMD">
             <option value="2026/06/18" selected>2026/06/18</option>
@@ -1655,7 +1655,7 @@ class AutomationHtmlTests(unittest.TestCase):
         <form action="/mypage/M060900.do" method="post">
           <input type="hidden" name="command" value="">
           <input type="hidden" name="csrfToken" value="token">
-          <input name="shippingBean.totalWeight.value" value="">
+          <input name="shippingBean.totalWeight.value" value="100">
           <select name="shippingBean.invPrintNum.value">
             <option value=""></option>
             <option value="1">1</option>
@@ -1674,14 +1674,14 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertNotIn("command", payload)
         self.assertEqual(payload["method:regist"], "")
 
-    def test_build_m060900_weight_payload_preserves_blank_postal_parcel_counts_and_weight(self):
+    def test_build_m060900_weight_payload_clears_prefilled_postal_parcel_weight(self):
         html = """
         <form action="/mypage/M060900.do" method="post">
           <input type="hidden" name="command" value="">
           <input type="hidden" name="csrfToken" value="token">
           <input name="shippingBean.num.value" value="">
           <input name="shippingBean.totalNum.value" value="">
-          <input name="shippingBean.totalWeight.value" value="">
+          <input name="shippingBean.totalWeight.value" value="100">
           <input name="shippingBean.cost.value" value="">
         </form>
         """

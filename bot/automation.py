@@ -1503,6 +1503,10 @@ def _build_m060900_weight_payload(
     payload = dict(form["fields"])
     payload.pop("command", None)
     payload.pop("shippingBean.withInsurance", None)
+    # Japan Post may prefill this field (currently often with 100g).  Keep the
+    # field present for the Struts form, but always submit it blank so no
+    # shipment type inherits a server-provided/default weight.
+    payload["shippingBean.totalWeight.value"] = ""
     is_postal_parcel_info = (
         "shippingBean.num.value" in payload
         and "shippingBean.totalNum.value" in payload
@@ -3010,6 +3014,7 @@ def run_automation(
                             page.locator("#M060900_ShippingBean_danger").check()
                     except Exception:
                         pass
+                    safe_fill(weight_sel, "", label="weight_clear")
                     safe_click("input[type='button'][value='Next']", label="weight_next", critical=True)
                     page.wait_for_timeout(1500)
 
