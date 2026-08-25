@@ -1494,7 +1494,6 @@ def _build_m060800_next_payload(
 def _build_m060900_weight_payload(
     html: str,
     page_url: str,
-    weight_grams: str = "100",
 ) -> tuple[str, dict[str, str]]:
     form = _pick_form(
         html,
@@ -1508,9 +1507,7 @@ def _build_m060900_weight_payload(
         "shippingBean.num.value" in payload
         and "shippingBean.totalNum.value" in payload
     )
-    if not is_postal_parcel_info:
-        payload["shippingBean.totalWeight.value"] = _clean(weight_grams) or "100"
-    elif "shippingBean.fwTransType" in payload:
+    if is_postal_parcel_info and "shippingBean.fwTransType" in payload:
         payload["shippingBean.fwTransType"] = "4"
     if "shippingBean.invPrintNum.value" in form.get("selects", {}):
         payload["shippingBean.invPrintNum.value"] = (
@@ -2575,7 +2572,6 @@ def run_automation(
             action, payload = _build_m060900_weight_payload(
                 html,
                 page_url,
-                weight_grams="100",
             )
             _log(
                 "🌐 requests 提交 M060900 重量 payload："
@@ -3014,7 +3010,6 @@ def run_automation(
                             page.locator("#M060900_ShippingBean_danger").check()
                     except Exception:
                         pass
-                    safe_fill(weight_sel, "100", label="weight")
                     safe_click("input[type='button'][value='Next']", label="weight_next", critical=True)
                     page.wait_for_timeout(1500)
 

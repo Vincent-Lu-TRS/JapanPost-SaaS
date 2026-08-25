@@ -1622,7 +1622,7 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertTrue(_has_m060800_item_book_warning(html))
         self.assertFalse(_has_m060800_item_book_warning("<html><body>M060800</body></html>"))
 
-    def test_build_m060900_weight_payload_sets_total_weight_and_uses_regist(self):
+    def test_build_m060900_weight_payload_leaves_total_weight_blank_and_uses_regist(self):
         html = """
         <form action="/mypage/M060900.do" method="post">
           <input type="hidden" name="command" value="">
@@ -1640,13 +1640,12 @@ class AutomationHtmlTests(unittest.TestCase):
         action, payload = _build_m060900_weight_payload(
             html,
             "https://www.int-mypage.post.japanpost.jp/mypage/M060800.do",
-            weight_grams="100",
         )
 
         self.assertEqual(action, "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do")
         self.assertEqual(payload["csrfToken"], "token")
         self.assertEqual(payload["shippingBean.sendDate.YMD"], "2026/06/18")
-        self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
+        self.assertEqual(payload["shippingBean.totalWeight.value"], "")
         self.assertEqual(payload["shippingBean.cost.value"], "23.41")
         self.assertNotIn("command", payload)
         self.assertEqual(payload["method:regist"], "")
@@ -1668,10 +1667,9 @@ class AutomationHtmlTests(unittest.TestCase):
         _, payload = _build_m060900_weight_payload(
             html,
             "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do",
-            weight_grams="100",
         )
 
-        self.assertEqual(payload["shippingBean.totalWeight.value"], "100")
+        self.assertEqual(payload["shippingBean.totalWeight.value"], "")
         self.assertEqual(payload["shippingBean.invPrintNum.value"], "1")
         self.assertNotIn("command", payload)
         self.assertEqual(payload["method:regist"], "")
@@ -1691,7 +1689,6 @@ class AutomationHtmlTests(unittest.TestCase):
         _, payload = _build_m060900_weight_payload(
             html,
             "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do",
-            weight_grams="100",
         )
 
         self.assertEqual(payload["shippingBean.num.value"], "")
@@ -1719,7 +1716,6 @@ class AutomationHtmlTests(unittest.TestCase):
         _, payload = _build_m060900_weight_payload(
             html,
             "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do",
-            weight_grams="100",
         )
 
         self.assertEqual(payload["shippingBean.senderInstruction"], "1")
@@ -1747,7 +1743,6 @@ class AutomationHtmlTests(unittest.TestCase):
         _, payload = _build_m060900_weight_payload(
             html,
             "https://www.int-mypage.post.japanpost.jp/mypage/M060900.do",
-            weight_grams="100",
         )
 
         self.assertNotIn("shippingBean.withInsurance", payload)
