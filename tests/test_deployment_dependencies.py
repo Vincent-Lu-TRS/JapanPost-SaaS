@@ -20,6 +20,13 @@ class DeploymentDependencyTests(unittest.TestCase):
         self.assertIn("Python 3.12", guide)
         self.assertIn("刪除並重新部署", guide)
 
+    def test_streamlit_cloud_apt_manifest_is_disabled_during_upstream_index_outage(self):
+        """A stale Cloud apt index must not prevent the Python app from booting."""
+        self.assertFalse(
+            (ROOT / "packages.txt").exists(),
+            "packages.txt re-enables the failing Cloud apt stage; restore it only after the upstream index is fixed",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

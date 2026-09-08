@@ -105,7 +105,7 @@ _cm = get_cookie_manager()
 # ── Playwright 環境初始化（僅在第一次啟動時執行）────────
 @st.cache_resource(show_spinner="正在安裝 Playwright Chromium 環境...")
 def _install_playwright():
-    """不加 --with-deps：系統相依套件已由 packages.txt 在建置時安裝。"""
+    """Install the bundled browser at runtime without invoking a second apt stage."""
     _env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/tmp/ms-playwright"}
     try:
         result = subprocess.run(

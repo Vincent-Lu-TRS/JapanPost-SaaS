@@ -1004,11 +1004,6 @@ class PickingLabelPdfTests(unittest.TestCase):
         self.assertFalse(selected["embedded"])
         self.assertIn("No preferred CJK TrueType/OpenType font", selected["fallback_reason"])
 
-    def test_streamlit_cloud_packages_include_noto_cjk_fonts(self):
-        packages = (ROOT / "packages.txt").read_text(encoding="utf-8")
-
-        self.assertIn("fonts-noto-cjk", packages)
-
     def test_rendered_pdf_cjk_font_resource_is_not_thin(self):
         output_path = ROOT / "tmp" / "test-picking-font-resource.pdf"
         output_path.parent.mkdir(exist_ok=True)
