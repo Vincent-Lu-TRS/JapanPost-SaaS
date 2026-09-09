@@ -27,6 +27,17 @@ class DeploymentDependencyTests(unittest.TestCase):
             "packages.txt re-enables the failing Cloud apt stage; restore it only after the upstream index is fixed",
         )
 
+    def test_playwright_runtime_is_prepared_without_requiring_packages_txt(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        automation_source = (ROOT / "bot" / "automation.py").read_text(encoding="utf-8")
+
+        self.assertIn("from bot.playwright_runtime import prepare_playwright_runtime", app_source)
+        self.assertIn("runtime = prepare_playwright_runtime()", app_source)
+        self.assertIn("if not _install_playwright():", app_source)
+        self.assertIn("from .playwright_runtime import prepare_playwright_runtime", automation_source)
+        self.assertIn("env=runtime.env", automation_source)
+
+
 
 if __name__ == "__main__":
     unittest.main()

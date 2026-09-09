@@ -76,6 +76,7 @@ from refresh_payloads import (
 from safe_logging import redact_operational_log, safe_log_event
 from features.picking_labels import apply_picking_payload, load_picking_payload
 from local_time import JST, format_jst
+from bot.playwright_runtime import prepare_playwright_runtime
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -105,8 +106,21 @@ _cm = get_cookie_manager()
 # ── Playwright 環境初始化（僅在第一次啟動時執行）────────
 @st.cache_resource(show_spinner="正在安裝 Playwright Chromium 環境...")
 def _install_playwright():
-    """Install the bundled browser at runtime without invoking a second apt stage."""
-    _env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/tmp/ms-playwright"}
+    """Install Chromium and prepare its libraries without a second apt stage."""
+    runtime = prepare_playwright_runtime()
+    if not runtime.ok:
+        print(
+            f"[PLAYWRIGHT_RUNTIME] {runtime.message}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    print(
+        f"[PLAYWRIGHT_RUNTIME] {runtime.message}",
+        file=sys.stderr,
+        flush=True,
+    )
+    _env = {**runtime.env, "PLAYWRIGHT_BROWSERS_PATH": "/tmp/ms-playwright"}
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -1581,7 +1595,8 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
 
             _log("🚀 任務啟動，正在載入模組...")
             _log("🧰 正在準備 Playwright Chromium 環境...")
-            _install_playwright()
+            if not _install_playwright():
+                raise RuntimeError("Playwright runtime unavailable")
             from bot.automation import AUTOMATION_BUILD_ID, _prepare_batch_hs_codes, run_automation
             _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
 

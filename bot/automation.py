@@ -23,6 +23,7 @@ import pandas as pd
 
 from shipment_quantity import parse_shipment_quantity
 from safe_logging import build_safe_automation_logger
+from .playwright_runtime import prepare_playwright_runtime
 
 AUTOMATION_BUILD_ID = "2026-08-05-m060505-address1-width-fix"
 
@@ -1662,6 +1663,11 @@ def run_automation(
         _log("❌ 未設定 JP_POST_USER / JP_POST_PASS，無法登入日本郵政")
         return results
 
+    runtime = prepare_playwright_runtime()
+    if not runtime.ok:
+        _log("❌ Chromium 執行環境準備失敗，已停止本批製單")
+        raise RuntimeError("Playwright runtime unavailable")
+
     with sync_playwright() as p:
         chromium_args = [
                 "--no-sandbox",
@@ -1682,7 +1688,11 @@ def run_automation(
             ]
 
         def launch_browser():
-            return p.chromium.launch(headless=headless, args=chromium_args)
+            return p.chromium.launch(
+                headless=headless,
+                args=chromium_args,
+                env=runtime.env,
+            )
 
         def new_context_with_cookies():
             new_context = browser.new_context(accept_downloads=True, ignore_https_errors=True)
