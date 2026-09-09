@@ -93,7 +93,7 @@ https://jppost.streamlit.app/oauth2callback
 - `requirements.txt` 目前固定 `streamlit[auth]==1.56.0`，避免原生登入 30 天 cookie 行為在新版本發生回歸。升級 Streamlit 前需重新測試登入持久化。
 - 既有 App 若已使用其他 Python 版本，單純更新 GitHub 程式碼不會切換 Python。請記下 URL、Secrets 與部署設定後，刪除並重新部署 App，並在 Advanced settings 選擇 Python 3.12。
 - 資料處理套件固定在已驗證的 Python 3.12 wheel 版本，避免 Community Cloud 重新解析依賴時自動跨入不相容的大版本。
-- 2026-09-09：因 Streamlit Community Cloud 的 Debian `bullseye-security` 索引曾暫時過期，`packages.txt` 維持停用，避免整個 App 在 Python 依賴安裝前即啟動失敗。`bot/playwright_runtime.py` 會在第一次製單前，以 HTTPS 下載並驗證固定版本的 Chromium 必要共享元件到暫存目錄，不使用 apt、不需要 root 權限；安裝器與實際自動化共用同一套執行環境。若下載源暫時不可用，該批會安全停止且不送出運單，待稍後重試即可。
+- 2026-09-09：因 Streamlit Community Cloud 的 Debian `bullseye-security` 索引曾暫時過期，`packages.txt` 維持停用，避免整個 App 在 Python 依賴安裝前即啟動失敗。`bot/playwright_runtime.py` 會在第一次製單前，以 HTTPS 下載並驗證固定版本的 Chromium 完整共享元件鏈（含 GLib、NSS、ALSA、X11、Mesa 等），解出到暫存目錄並傳給 Playwright；不使用 apt、不需要 root 權限，且安裝器與實際自動化共用同一套執行環境。若下載源暫時不可用，該批會安全停止且不送出運單，待稍後重試即可。
 
 ---
 

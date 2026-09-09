@@ -287,9 +287,9 @@ mailS          = "on" (checkbox, 可忽略)
 - `libasound2` 需加入；`libglib2.0-0` 需移除（Trixie 改名 `libglib2.0-0t64`）
 
 ### 3.1 Playwright 執行環境回歸（2026-09-09，已修）
-- Streamlit Cloud 暫停 `packages.txt` 後，Chromium 啟動所需的 `libasound.so.2`、`libnspr4.so`、`libnss3.so` 不再由 apt 提供，製單會在瀏覽器啟動前得到 `TargetClosedError`。
-- `bot/playwright_runtime.py` 現在會在製單前下載 SHA-256 固定的 Debian Trixie 套件、只解出 x86_64 共享函式庫到 `/tmp/jppost-playwright-runtime`，並把相同 `LD_LIBRARY_PATH` 傳給 Playwright；不依賴 apt 或 root。
-- 已加入 mock、重複使用、非 Linux 跳過，以及 Cloud 無 `packages.txt` 的回歸測試；未觸發真實運單。
+- Streamlit Cloud 暫停 `packages.txt` 後，Chromium 啟動所需的共享元件不再由 apt 提供；最先暴露的是 `libasound.so.2`，因此製單在瀏覽器啟動前得到 `TargetClosedError`。
+- `bot/playwright_runtime.py` 現在會在製單前下載 SHA-256 固定的 Debian Trixie 完整共享函式庫鏈（含 GLib、NSS、ALSA、X11、Mesa 及其必要依賴）、只解出 x86_64 函式庫到 `/tmp/jppost-playwright-runtime`，並把相同 `LD_LIBRARY_PATH` 傳給 Playwright；不依賴 apt 或 root。
+- 已以實際 Playwright 1.62 的 Chrome Headless Shell 完成全鏈結解包與 `about:blank` 啟動驗證，並加入 mock、重複使用、非 Linux 跳過，以及 Cloud 無 `packages.txt` 的回歸測試；未觸發真實運單。
 
 ### 2. Google OAuth 登入按鈕（Session 2，commit `bbe788c`）
 - 最終方案：`st.link_button()`（已棄用 st.components.v1.html）
