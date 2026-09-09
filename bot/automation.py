@@ -25,7 +25,7 @@ from shipment_quantity import parse_shipment_quantity
 from safe_logging import build_safe_automation_logger
 from .playwright_runtime import prepare_playwright_runtime
 
-AUTOMATION_BUILD_ID = "2026-08-05-m060505-address1-width-fix"
+AUTOMATION_BUILD_ID = "2026-09-09-browser-launch-fallback"
 
 from .drive import DRIVE_FOLDER_ID, upload_file_to_drive, upload_pdf
 from .gemini_helper import predict_hs_code
@@ -1781,6 +1781,7 @@ def run_automation(
             return new_context
 
         browser = launch_browser()
+        _log("✅ Chromium 執行環境啟動完成。")
         context = new_context_with_cookies()
         page = context.new_page()
         # 以 resource_type 攔截非必要資源（比副檔名更全面），大幅降低 Chromium 記憶體
