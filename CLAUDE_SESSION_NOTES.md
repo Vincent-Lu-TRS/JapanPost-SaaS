@@ -410,7 +410,7 @@ Authorized redirect URIs:
 - Production URL: `https://jppost.streamlit.app/`
 - Branch: `main`
 - Latest deployed code commit: `b27c114` (`fix: reload updated automation module before jobs`)
-- Latest repository record commit: `a9dc2c0` (`docs: record production reliability verification`)
+- The repository also contains documentation-only follow-ups recording this verification; they do not alter the deployed code path.
 - Related reliability commits: `f30a42b` (complete Chromium runtime libraries), `5df3f77` (low-resource browser retry), `bda621c` (automation build marker).
 
 ### Incident and confirmed cause
