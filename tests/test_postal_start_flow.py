@@ -470,6 +470,19 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn("source_changed", app_source)
         self.assertIn("latest_pending_df", app_source)
 
+    def test_start_job_reloads_changed_automation_module_before_running(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        start_body = app_source[
+            app_source.index("def _start_job("):
+            app_source.index("# ══════════════════════════════════════════════════════\n# 頁面渲染函數")
+        ]
+
+        self.assertIn("def _load_current_automation_module():", app_source)
+        self.assertIn("hashlib.sha256(source_path.read_bytes()).hexdigest()", app_source)
+        self.assertIn("automation_module = _load_current_automation_module()", start_body)
+        self.assertIn("AUTOMATION_BUILD_ID = automation_module.AUTOMATION_BUILD_ID", start_body)
+        self.assertIn("run_automation = automation_module.run_automation", start_body)
+
     def test_start_job_wires_package_status_events_and_executes_only_ready_rows(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         start_body = app_source[

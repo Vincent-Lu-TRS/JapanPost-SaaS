@@ -8,6 +8,7 @@ os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
 
 import hashlib
 import html
+import importlib
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -77,6 +78,32 @@ from safe_logging import redact_operational_log, safe_log_event
 from features.picking_labels import apply_picking_payload, load_picking_payload
 from local_time import JST, format_jst
 from bot.playwright_runtime import prepare_playwright_runtime
+
+
+# Streamlit can rerun app.py in an existing Python process after a Cloud
+# deployment.  Python keeps imported submodules in sys.modules, so a background
+# job could otherwise continue using the previous bot/automation.py code.  Keep
+# a content fingerprint and reload the module exactly once when its source has
+# changed; a lock prevents two concurrent job starts from reloading it together.
+_AUTOMATION_MODULE_LOCK = threading.Lock()
+_AUTOMATION_SOURCE_DIGEST: str | None = None
+
+
+def _load_current_automation_module():
+    global _AUTOMATION_SOURCE_DIGEST
+    with _AUTOMATION_MODULE_LOCK:
+        module = importlib.import_module("bot.automation")
+        source_path = Path(getattr(module, "__file__", ""))
+        try:
+            source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            source_digest = None
+        if source_digest and source_digest != _AUTOMATION_SOURCE_DIGEST:
+            module = importlib.reload(module)
+            _AUTOMATION_SOURCE_DIGEST = source_digest
+        elif _AUTOMATION_SOURCE_DIGEST is None:
+            _AUTOMATION_SOURCE_DIGEST = source_digest
+        return module
 
 # ══════════════════════════════════════════════════════
 # ★ set_page_config 必須在所有 st.* 呼叫之前
@@ -1592,12 +1619,17 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 return
 
             rows_for_run = ready_rows
+            _log(f"✅ 本批 {len(rows_for_run)} 筆通過製單前檢查，準備執行。")
 
             _log("🚀 任務啟動，正在載入模組...")
             _log("🧰 正在準備 Playwright Chromium 環境...")
             if not _install_playwright():
                 raise RuntimeError("Playwright runtime unavailable")
             from bot.automation import AUTOMATION_BUILD_ID, _prepare_batch_hs_codes, run_automation
+            automation_module = _load_current_automation_module()
+            AUTOMATION_BUILD_ID = automation_module.AUTOMATION_BUILD_ID
+            _prepare_batch_hs_codes = automation_module._prepare_batch_hs_codes
+            run_automation = automation_module.run_automation
             _log(f"🧭 automation build: {AUTOMATION_BUILD_ID}")
 
             _log("🔎 正在預查本批 HS Code...")

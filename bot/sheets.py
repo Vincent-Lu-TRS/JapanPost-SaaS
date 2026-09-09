@@ -251,8 +251,9 @@ def _filter_pending_orders_dataframe(
     if stale_source_status_mask.any():
         stale_rows = df[stale_source_status_mask]
         _log(
-            "🛑 來源狀態疑似快取過期，目標表缺少完成證據，"
-            f"阻擋自動製單 {len(stale_rows)} 筆"
+            "⚠️ 來源狀態疑似快取過期：另有 "
+            f"{len(stale_rows)} 筆已帶 tracking、但目標表缺少完成證據；"
+            "這些資料不會列入待製單。"
         )
 
     status_pending_mask = (df[status_col] == "未打單")
@@ -285,7 +286,7 @@ def _filter_pending_orders_dataframe(
         )
         reason_masks = [
             ("狀態不是未打單排除", ~status_pending_mask),
-            ("來源 tracking 但目標缺少完成證據，阻擋", stale_source_status_mask),
+            ("來源 tracking 且目標缺少完成證據（不列入待製單）", stale_source_status_mask),
             ("申告金額空白排除", ~amount_present_mask),
             ("製單檢核 TRUE 排除", df[check_col].str.upper() == "TRUE"),
             ("Shipping Name 空白排除", df[shipname_col] == ""),
