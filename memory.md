@@ -178,3 +178,11 @@ If UI was changed, inspect the deployed Streamlit page or local `localhost:8502`
 - 失敗證據：來源 `imy2038902` 仍為 `未打單`、追蹤號空白；目標表 `郵局運費` 查不到該訂單，因此沒有產生真實標籤。
 - 本地目前版已以同一份地址資料驗證：先選取可信英文重複段 `Supalai Verada Condo ... Petchkasem Road`，再把城市只加入一次，輸出 `add1=79`、`add2=68`、`add3=0` Japan Post width；姓名輸出為 `Teerapan Kaewkong imy2038902`。直接把原始雙語地址送入舊切分器仍可穩定重現 `address_too_long`。
 - 正式服務仍執行 `main` 舊版；本地修正版尚未部署，因此要取得真實成功標籤，下一個必要步驟是先部署已驗證的本地修正版，再以同一測試列重試一次，並以 source/target/PDF 三方回查判定成功。
+
+## 2026-09-09 正式站目前穩定版本
+
+- 目前正式 `main` 為 `b27c114`。部署後必須使用 Streamlit Cloud 的 **Reboot app**，因為只看到「Updated app」不代表既有 Python 程序已釋放舊的 `bot.automation` 模組。
+- `TargetClosedError` 的目前防線是：完整 Chromium 私有共享函式庫鏈、一次低資源啟動備援，以及製單前依來源 fingerprint 重新載入變更後的 automation 模組。
+- 正式端到端驗收已完成：一次授權批次 4/4 成功、進度數字有逐步變化、結果表全為完成、Drive 有四份 PDF、目標表完成收件人／注文番号／tracking 回寫。不得因 Cloud 累積的舊錯誤紀錄重複提交相同訂單。
+- 「來源已有 tracking、目標缺少完成證據」是非阻擋性歷史資料提醒；它只排除該些來源列，不代表目前合格批次無法製單。若要處理歷史差異，必須另行唯讀盤點與核准資料清理。
+- 未來正式驗收固定採四方證據：新版 build／進度、結果表、Drive PDF、目標 Google Sheets；只有四者一致才可判定成功。

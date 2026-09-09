@@ -399,3 +399,44 @@ Authorized redirect URIs:
 - `http://localhost:8501/`
 - `https://japanpost-sa-8nsrgyfnfdzjkdgdteaagp.streamlit.app/`
 - `https://jppost.streamlit.app/`
+
+---
+
+## 2026-09-09 Session Consolidation｜正式站製單故障修復與驗收
+
+### Current release
+
+- Repository: `Vincent-Lu-TRS/JapanPost-SaaS`
+- Production URL: `https://jppost.streamlit.app/`
+- Branch: `main`
+- Latest deployed commit: `b27c114` (`fix: reload updated automation module before jobs`)
+- Related reliability commits: `f30a42b` (complete Chromium runtime libraries), `5df3f77` (low-resource browser retry), `bda621c` (automation build marker).
+
+### Incident and confirmed cause
+
+- Production repeatedly returned `TargetClosedError` immediately after the Playwright environment was prepared.
+- The Cloud log continued to show the old automation build after GitHub reported “Updated app”. The existing Streamlit process had retained the previous Python module; code pull and dependency installation alone had not restarted the running process.
+- The full-table source/target message about tracking rows missing completion evidence was a non-blocking historical data-integrity notice. It did not block the four rows that passed the pending-order filter.
+
+### Fixes retained in the release
+
+- Chromium runtime libraries are downloaded and verified without apt/root, then shared by the installer and real automation process.
+- Browser startup closes/low-resource failures get one controlled retry with redacted diagnostic categories; non-retryable failures are not looped.
+- `app.py` fingerprints `bot.automation` and reloads a changed module under a lock before a job starts.
+- The source/target mismatch message now states that affected historical rows are excluded from the pending list, rather than implying the current batch is blocked.
+
+### Production verification evidence
+
+- The Streamlit Cloud app was fully rebooted through **Manage app → Reboot app** after deployment.
+- One explicitly authorised live batch completed 4/4. The UI progress changed `0/4 → 1/4 → 3/4 → 4/4`; all four result rows showed `完成／已完成` and the pending count became 0.
+- Four postal PDFs were visible in the configured Google Drive folder.
+- The target Google Sheet showed the four corresponding recipient/order/tracking writebacks. Exact customer/order values are intentionally not copied into this repository record.
+- Local verification before deployment: 388 tests passed; `compileall` and `git diff --check` passed. The post-deployment end-to-end smoke test also passed.
+
+### Prevention rules for future sessions
+
+1. After any production code change, wait for dependency processing and explicitly reboot the Streamlit app; “Updated app” is not sufficient evidence of a fresh Python process.
+2. Do not retry a real order only to inspect old logs. Validate with a new safe test order or a read-only health check, then use progress, result table, Drive PDF, and target-sheet evidence together.
+3. Treat old Cloud log entries as history. A current result table with matching Drive and target-sheet evidence is the authoritative outcome.
+4. Keep `.streamlit/config.toml` watcher configuration unchanged; re-enabling recursive file watching can recreate the inotify-limit failure observed on Streamlit Cloud.
+5. Preserve the no-duplicate invariant: a completed order must never be submitted again merely because a previous log is still visible.

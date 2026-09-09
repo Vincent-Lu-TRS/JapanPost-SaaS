@@ -95,6 +95,17 @@ https://jppost.streamlit.app/oauth2callback
 - 資料處理套件固定在已驗證的 Python 3.12 wheel 版本，避免 Community Cloud 重新解析依賴時自動跨入不相容的大版本。
 - 2026-09-09：因 Streamlit Community Cloud 的 Debian `bullseye-security` 索引曾暫時過期，`packages.txt` 維持停用，避免整個 App 在 Python 依賴安裝前即啟動失敗。`bot/playwright_runtime.py` 會在第一次製單前，以 HTTPS 下載並驗證固定版本的 Chromium 完整共享元件鏈（含 GLib、NSS、ALSA、X11、Mesa 等），解出到暫存目錄並傳給 Playwright；不使用 apt、不需要 root 權限，且安裝器與實際自動化共用同一套執行環境。若下載源暫時不可用，該批會安全停止且不送出運單，待稍後重試即可。
 
+### 2026-09-09 之後的正式更新驗收（必要）
+
+Streamlit 顯示「Updated app」只代表程式已拉取，不保證既有 Python 執行程序已丟棄舊模組。正式站更新後必須：
+
+1. 在 Manage app 執行 **Reboot app**，等待頁面重新載入並完成登入狀態恢復。
+2. 開啟「待製郵便運單」，確認頁面可正常讀取；不要直接重複點擊已經送出的實際訂單。
+3. 以新版執行日誌、進度數字（例如 `1/4`、`3/4`）、結果表的「完成／已完成」、Drive PDF 及目標 Google Sheets 回寫做端到端驗收。
+4. 若看到歷史 `TargetClosedError`，先確認它的時間是否早於本次 Reboot；Cloud 累積日誌不會自動清除，不能用舊紀錄判定目前批次失敗。
+
+來源表中「已有 tracking 但目標表缺少完成證據」的全量提醒是非阻擋性資料完整性提示。它只會排除那些歷史列，不等於目前待製批次被阻擋；要修復歷史資料時另行進行唯讀盤點與核准後的資料清理。
+
 ---
 
 ## 部署選項 B：Hugging Face Spaces（Docker・免費）

@@ -1,6 +1,6 @@
 # JapanPost-SaaS Session Handoff
 
-Last updated: 2026-08-04 JST
+Last updated: 2026-09-09 JST
 
 ## Purpose
 
@@ -12,12 +12,41 @@ This is the canonical continuation entry for JapanPost-SaaS. Read `memory.md` fo
 - Local repo: `C:\Users\shaku\個人\Claude Cowork\jppost\tmp\streamlit-deploy-JapanPost-SaaS`
 - Production: `https://jppost.streamlit.app/`
 - Branch/entrypoint: `main` / `app.py`
-- `main` and `origin/main`: `8d9c2ae7953e912a2a221f67e7bbc166ebe08d84`
+- `main` and `origin/main`: `b27c114` (`fix: reload updated automation module before jobs`)
 - PR #1: merged recipient address-width fix (`3bb0c64`, merge `c2c6d81`).
 - PR #2: merged legacy postal item and HS precheck fix (`f26332d`, merge `8d9c2ae`).
-- Post-merge unit verification on 2026-08-02: 209 tests passed.
-- Authenticated production UI rendered successfully after deployment, including the four main tabs.
-- No affected order was automatically retried after deployment, preventing accidental duplicate labels.
+- Latest local verification before deployment: 388 tests passed; `compileall` and `git diff --check` passed.
+- The production app was fully rebooted from the Streamlit Cloud management panel after the GitHub update; this is required because an “Updated app” message alone can leave an existing Python process holding old modules.
+- A single explicitly authorised production smoke run completed 4/4 orders. The UI showed real progress `0/4 → 1/4 → 3/4 → 4/4`, the result table showed all rows as completed, four PDFs were present in the configured Drive folder, and the target sheet contained the corresponding recipient/order/tracking writebacks.
+- The historical source/target consistency notice about rows with tracking but missing completion evidence is non-blocking. Those rows are excluded from the pending list and must not be interpreted as the cause of a current batch failure.
+
+## 2026-09-09 Production Reliability Record
+
+This section supersedes the older deployment observations below for the current `main` version.
+
+### Root cause of the repeated production failure
+
+1. The browser process could close immediately in the 1 GB Streamlit container (`TargetClosedError`), even though Playwright installation returned success.
+2. The repository had been updated, but the already-running Streamlit process still held the old `bot.automation` module. This is why production logs continued to show the old automation build after “Updated app”.
+3. The whole-table source/target consistency message was worded too strongly. It was a data-integrity reminder, not a blocker for the four eligible rows.
+
+### Durable fixes now in `main`
+
+- `bot/playwright_runtime.py` provides the verified Chromium shared-library chain without apt/root.
+- `bot/automation.py` retries one startup-only browser failure with low-resource flags and records a redacted failure category.
+- `app.py` fingerprints and reloads a changed automation module before starting a job, with a lock to avoid concurrent reloads.
+- `bot/sheets.py` labels the source/target mismatch as non-blocking and excludes those historical rows from pending orders.
+
+### Required deployment/release check
+
+After every production code update:
+
+1. Wait for dependency processing to finish.
+2. Use Streamlit Cloud **Manage app → Reboot app**; do not rely on “Updated app” alone.
+3. Confirm a fresh session can load the four tabs and the pending page.
+4. For a safe batch, verify the new automation build, changing progress counters, final completed statuses, Drive PDF creation, and target-sheet writeback. Never retry a real order solely to inspect an old log.
+
+The cumulative Cloud log may retain previous `TargetClosedError` entries. The current result table plus Drive and target-sheet evidence are the authoritative smoke-test result.
 
 ## Completed In The Closed Session
 
