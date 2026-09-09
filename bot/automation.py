@@ -1162,6 +1162,84 @@ def _summarize_field_context(html: str, field_names: list[str], window: int = 32
     return " | ".join(summaries)
 
 
+# Chromium normally starts a browser process plus separate renderer/utility
+# processes.  Streamlit Community Cloud can terminate that short-lived process
+# before Playwright receives a connection when the shared container is under
+# memory or process pressure.  Keep the normal launch unchanged, but provide a
+# deterministic, low-resource retry for that specific failure mode.
+_LOW_RESOURCE_BROWSER_FLAGS = (
+    "--single-process",
+    "--renderer-process-limit=1",
+)
+
+
+def _classify_browser_launch_error(error: BaseException) -> str:
+    """Return a PII-free category for a browser startup failure."""
+
+    text = " ".join(str(error or "").split()).lower()
+    if "shared librar" in text or "cannot open shared object file" in text:
+        return "missing_runtime_library"
+    if "executable doesn't exist" in text or "browser executable" in text:
+        return "browser_executable_missing"
+    if "targetclosederror" in text or "target page, context or browser has been closed" in text:
+        return "browser_process_closed"
+    return "browser_launch_failed"
+
+
+def _is_retryable_browser_launch_error(error: BaseException) -> bool:
+    """Retry only failures that indicate the browser process closed at launch."""
+
+    category = _classify_browser_launch_error(error)
+    return category in {"browser_process_closed", "browser_launch_failed"}
+
+
+def _launch_browser_with_fallback(
+    chromium,
+    *,
+    headless: bool,
+    args: list[str],
+    env: dict[str, str],
+    log_cb=None,
+):
+    """Launch Chromium once normally, then once in a low-resource mode.
+
+    Playwright surfaces an immediately terminated browser as ``TargetClosedError``
+    and normally provides no actionable browser stderr to the caller.  A second
+    launch with fewer child processes is safe because the failed launch has
+    already exited, and it addresses the resource limit used by Streamlit's
+    shared free-tier container.  The helper is intentionally dependency-light
+    so it can be covered with a mock Chromium object in unit tests.
+    """
+
+    launch_args = list(args)
+    try:
+        return chromium.launch(headless=headless, args=launch_args, env=env)
+    except Exception as first_error:
+        if not _is_retryable_browser_launch_error(first_error):
+            raise
+
+        category = _classify_browser_launch_error(first_error)
+        if log_cb is not None:
+            log_cb(
+                "⚠️ Chromium 首次啟動未完成，正在使用精簡模式重試。"
+                f" reason={category}"
+            )
+
+        fallback_args = list(launch_args)
+        for flag in _LOW_RESOURCE_BROWSER_FLAGS:
+            if flag not in fallback_args:
+                fallback_args.append(flag)
+        try:
+            return chromium.launch(headless=headless, args=fallback_args, env=env)
+        except Exception as retry_error:
+            if log_cb is not None:
+                log_cb(
+                    "❌ Chromium 精簡模式仍未啟動。"
+                    f" reason={_classify_browser_launch_error(retry_error)}"
+                )
+            raise
+
+
 def _has_m060800_item_book_warning(html: str) -> bool:
     text = html or ""
     warning_markers = (
@@ -1688,10 +1766,12 @@ def run_automation(
             ]
 
         def launch_browser():
-            return p.chromium.launch(
+            return _launch_browser_with_fallback(
+                p.chromium,
                 headless=headless,
                 args=chromium_args,
                 env=runtime.env,
+                log_cb=_log,
             )
 
         def new_context_with_cookies():

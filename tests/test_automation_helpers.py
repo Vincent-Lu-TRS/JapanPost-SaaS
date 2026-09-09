@@ -42,6 +42,8 @@ from bot.automation import (
     _html_for_playwright_form,
     _has_m060800_item_book_warning,
     _iter_content_items,
+    _classify_browser_launch_error,
+    _launch_browser_with_fallback,
     _format_addr_to_bean_name,
     _prepare_batch_hs_codes,
     _prepare_addr_to_bean_recipient_fields,
@@ -66,6 +68,79 @@ from bot.automation import (
 
 
 class AutomationHtmlTests(unittest.TestCase):
+    def test_browser_launch_error_is_classified_without_exposing_details(self):
+        target_closed = type("TargetClosedError", (Exception,), {})
+
+        self.assertEqual(
+            _classify_browser_launch_error(target_closed("Target page, context or browser has been closed")),
+            "browser_process_closed",
+        )
+        self.assertEqual(
+            _classify_browser_launch_error(
+                RuntimeError("libasound.so.2: cannot open shared object file")
+            ),
+            "missing_runtime_library",
+        )
+        self.assertEqual(
+            _classify_browser_launch_error(RuntimeError("unexpected startup failure")),
+            "browser_launch_failed",
+        )
+
+    def test_browser_launch_retries_in_low_resource_mode_after_target_closed(self):
+        target_closed = type("TargetClosedError", (Exception,), {})
+
+        class FakeChromium:
+            def __init__(self):
+                self.calls = []
+
+            def launch(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    raise target_closed("Target page, context or browser has been closed")
+                return "browser"
+
+        chromium = FakeChromium()
+        logs = []
+        args = ["--no-sandbox"]
+        env = {"LD_LIBRARY_PATH": "/tmp/runtime"}
+
+        result = _launch_browser_with_fallback(
+            chromium,
+            headless=True,
+            args=args,
+            env=env,
+            log_cb=logs.append,
+        )
+
+        self.assertEqual(result, "browser")
+        self.assertEqual(args, ["--no-sandbox"])
+        self.assertEqual(len(chromium.calls), 2)
+        self.assertEqual(chromium.calls[0]["args"], ["--no-sandbox"])
+        self.assertIn("--single-process", chromium.calls[1]["args"])
+        self.assertIn("--renderer-process-limit=1", chromium.calls[1]["args"])
+        self.assertEqual(chromium.calls[0]["env"], env)
+        self.assertEqual(chromium.calls[1]["env"], env)
+        self.assertTrue(any("reason=browser_process_closed" in message for message in logs))
+
+    def test_browser_launch_does_not_retry_non_closed_executable_error(self):
+        class FakeChromium:
+            def __init__(self):
+                self.calls = 0
+
+            def launch(self, **kwargs):
+                self.calls += 1
+                raise RuntimeError("Executable doesn't exist")
+
+        chromium = FakeChromium()
+        with self.assertRaisesRegex(RuntimeError, "Executable doesn't exist"):
+            _launch_browser_with_fallback(
+                chromium,
+                headless=True,
+                args=[],
+                env={},
+            )
+        self.assertEqual(chromium.calls, 1)
+
     def test_prepare_recipient_fields_moves_pccc_from_name_to_address(self):
         row = {
             "Shipping Name": "kim sang woo (PCCC:P210006411542)",
