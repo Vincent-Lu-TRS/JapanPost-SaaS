@@ -181,7 +181,7 @@ If UI was changed, inspect the deployed Streamlit page or local `localhost:8502`
 
 ## 2026-09-09 正式站目前穩定版本
 
-- 目前正式 `main` 為 `b27c114`。部署後必須使用 Streamlit Cloud 的 **Reboot app**，因為只看到「Updated app」不代表既有 Python 程序已釋放舊的 `bot.automation` 模組。
+- 目前正式程式碼基線為 `b27c114`，最新紀錄提交為 `a9dc2c0`。部署後必須使用 Streamlit Cloud 的 **Reboot app**，因為只看到「Updated app」不代表既有 Python 程序已釋放舊的 `bot.automation` 模組。
 - `TargetClosedError` 的目前防線是：完整 Chromium 私有共享函式庫鏈、一次低資源啟動備援，以及製單前依來源 fingerprint 重新載入變更後的 automation 模組。
 - 正式端到端驗收已完成：一次授權批次 4/4 成功、進度數字有逐步變化、結果表全為完成、Drive 有四份 PDF、目標表完成收件人／注文番号／tracking 回寫。不得因 Cloud 累積的舊錯誤紀錄重複提交相同訂單。
 - 「來源已有 tracking、目標缺少完成證據」是非阻擋性歷史資料提醒；它只排除該些來源列，不代表目前合格批次無法製單。若要處理歷史差異，必須另行唯讀盤點與核准資料清理。

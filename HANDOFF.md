@@ -12,7 +12,7 @@ This is the canonical continuation entry for JapanPost-SaaS. Read `memory.md` fo
 - Local repo: `C:\Users\shaku\個人\Claude Cowork\jppost\tmp\streamlit-deploy-JapanPost-SaaS`
 - Production: `https://jppost.streamlit.app/`
 - Branch/entrypoint: `main` / `app.py`
-- `main` and `origin/main`: `b27c114` (`fix: reload updated automation module before jobs`)
+- `main` and `origin/main`: `a9dc2c0` (documentation record; deployed code baseline remains `b27c114`)
 - PR #1: merged recipient address-width fix (`3bb0c64`, merge `c2c6d81`).
 - PR #2: merged legacy postal item and HS precheck fix (`f26332d`, merge `8d9c2ae`).
 - Latest local verification before deployment: 388 tests passed; `compileall` and `git diff --check` passed.

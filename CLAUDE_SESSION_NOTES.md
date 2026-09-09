@@ -409,7 +409,8 @@ Authorized redirect URIs:
 - Repository: `Vincent-Lu-TRS/JapanPost-SaaS`
 - Production URL: `https://jppost.streamlit.app/`
 - Branch: `main`
-- Latest deployed commit: `b27c114` (`fix: reload updated automation module before jobs`)
+- Latest deployed code commit: `b27c114` (`fix: reload updated automation module before jobs`)
+- Latest repository record commit: `a9dc2c0` (`docs: record production reliability verification`)
 - Related reliability commits: `f30a42b` (complete Chromium runtime libraries), `5df3f77` (low-resource browser retry), `bda621c` (automation build marker).
 
 ### Incident and confirmed cause
