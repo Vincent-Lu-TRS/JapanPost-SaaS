@@ -81,9 +81,9 @@
 
 ## 最新發布候選紀錄（2026-09-15）
 
-- Worktree：`C:\Users\shaku\個人\Claude Cowork\jppost\tmp\JapanPost-SaaS-worktrees\codex-jppost-runtime-reliability-20260915`；branch `codex/jppost-runtime-reliability-20260915`；HEAD `a2f9fa1746b2d012453527fadc33156e329968df`。遠端 `main` 仍為基線 `5be34cd6f7372178be8f579447b3cc83a4f3a5e8`。
+- Worktree：`C:\Users\shaku\個人\Claude Cowork\jppost\tmp\JapanPost-SaaS-worktrees\codex-jppost-runtime-reliability-20260915`；branch `codex/jppost-runtime-reliability-20260915`；runtime/product code commit `a2f9fa1746b2d012453527fadc33156e329968df`，其後文件同步提交 `0779fcdf78d65f85a1c13ba8494cdb7bdc7f50a1`。遠端 `main` 仍為基線 `5be34cd6f7372178be8f579447b3cc83a4f3a5e8`。
 - PR [#7 修復 Streamlit Cloud 製單瀏覽器啟動](https://github.com/Vincent-Lu-TRS/JapanPost-SaaS/pull/7) 已建立；狀態 OPEN、mergeable，尚無 review decision。不要將GitHub帳號管理權等同於登記域主覆核；不得自行合併或改正式App分支設定繞過此閘門。
-- Linux CI run `34941076703`（push）及 `34941299377`（PR）均成功；Bookworm runtime bundle builder `34941076696` 成功。PR CI輸出 `469 tests`、獨立 cold-start suite `3 tests`，且真 Chromium readiness輸出 `status=ready / stage=complete / error_code=none`，冷啟與warm probe均完成。
+- Linux CI run `34941076703`（push）及 `34941299377`（PR）均成功；Bookworm runtime bundle builder `34941076696` 成功。文件同步後最新HEAD的push run `34941882604` 與PR run `34941888002` 也都成功；PR CI輸出 `469 tests`、獨立 cold-start suite `3 tests`，真Chromium readiness輸出 `status=ready / stage=complete / error_code=none`，冷啟與warm probe均完成。
 - 本機 Windows Python 3.14：`python -X utf8 -m unittest discover -s tests` → 469 tests，OK，6 skipped（需Linux）。
 - 發布包為 147 個 SHA-256 驗證的 Debian 12 `.deb`，manifest SHA-256 `1d7dd656cfbe09d6f33424b3c1413a6a33b52b52fdb3224ffd60d0f8b2f3fdce`；執行期不再網路下載這批Linux系統套件。真實失敗點已定位並修正：套件包建置時需以apt列出的落盤檔名配對URI；執行期亦須同時收集 `/lib` 與 `/usr/lib` 下的Chromium元件。
 - `backups/`、`tmp/`、`docs/.../backups/`均為本次工作既有／新增之本機未追蹤資料，勿stage或刪除；舊受保護目錄 `vendor/playwright-runtime/` 未列舉、未修改、未stage。

@@ -139,9 +139,9 @@
 
 ### 已完成的驗證
 
-- 候選HEAD：`a2f9fa1746b2d012453527fadc33156e329968df`；branch：`codex/jppost-runtime-reliability-20260915`；base及目前遠端`main`：`5be34cd6f7372178be8f579447b3cc83a4f3a5e8`。
+- 候選產品程式碼commit：`a2f9fa1746b2d012453527fadc33156e329968df`；文件同步commit：`0779fcdf78d65f85a1c13ba8494cdb7bdc7f50a1`；branch：`codex/jppost-runtime-reliability-20260915`；base及目前遠端`main`：`5be34cd6f7372178be8f579447b3cc83a4f3a5e8`。
 - Linux runtime builder run `34941076696`：SUCCESS。產出147個Debian 12 `.deb`，壓縮artifact為89,158,588 bytes；逐檔SHA256／大小／路徑均核驗相符，manifest SHA256=`1d7dd656cfbe09d6f33424b3c1413a6a33b52b52fdb3224ffd60d0f8b2f3fdce`。最大單檔低於25 MiB。
-- Candidate push CI run `34941076703`：SUCCESS。PR CI run `34941299377`：SUCCESS，完整suite `469 tests` 通過，另外重跑`test_runtime_cold_start.py`的3項測試；真Chromium readiness輸出`status=ready`、`stage=complete`、`error_code=none`，同次run亦完成cold與warm檢查。
+- Candidate push CI run `34941076703`：SUCCESS。PR CI run `34941299377`：SUCCESS；文件同步後最新HEAD的push run `34941882604` 與PR run `34941888002` 也均SUCCESS。最新PR run完整suite `469 tests` 通過，另外重跑`test_runtime_cold_start.py`的3項測試；真Chromium readiness輸出`status=ready`、`stage=complete`、`error_code=none`，同次run亦完成cold與warm檢查。
 - 本機Windows Python 3.14：`python -X utf8 -m unittest discover -s tests` → 469 tests、OK、6 skipped（6項需Linux runtime/process能力）。新解包範圍在Python 3.12實際package資料上驗證147包後，所有`REQUIRED_RUNTIME_LIBRARY_NAMES`均存在。
 - `git diff --check`通過。以上未登入Japan Post、未建立標籤、未呼叫Google Sheets／Drive寫入。
 
