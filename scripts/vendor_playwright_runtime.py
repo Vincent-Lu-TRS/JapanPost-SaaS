@@ -169,8 +169,15 @@ def parse_apt_download_urls(uri_list: str | Path) -> dict[str, str]:
             raise ValueError("apt package URI uses an unapproved repository host")
         if parsed.username or parsed.password or parsed.fragment:
             raise ValueError("apt package URI contains unsupported components")
-        filename = unquote(Path(parsed.path).name)
-        if not filename.endswith(".deb") or Path(filename).name != filename:
+        filename = Path(parsed.path).name
+        decoded_filename = unquote(filename)
+        if (
+            not filename.endswith(".deb")
+            or not decoded_filename.endswith(".deb")
+            or "/" in decoded_filename
+            or "\\" in decoded_filename
+            or "\x00" in decoded_filename
+        ):
             raise ValueError("apt package URI has an invalid filename")
         canonical_url = urlunsplit(("https", parsed.netloc.lower(), parsed.path, "", ""))
         previous = urls.get(filename)

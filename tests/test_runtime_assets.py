@@ -63,6 +63,23 @@ class RuntimeAssetBuilderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "repository host"):
                 parse_apt_download_urls(source)
 
+    def test_apt_uri_filename_preserves_percent_escaped_version_separator(self):
+        from scripts.vendor_playwright_runtime import parse_apt_download_urls
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "apt-uris.txt"
+            escaped_name = "dmsetup_2%3a1.02.185-2_amd64.deb"
+            source.write_text(
+                f"'http://deb.debian.org/debian/pool/main/l/lvm2/{escaped_name}' {escaped_name} 123 SHA256:abc\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                parse_apt_download_urls(source),
+                {
+                    escaped_name: f"https://deb.debian.org/debian/pool/main/l/lvm2/{escaped_name}",
+                },
+            )
+
     def test_dpkg_control_fields_are_parsed_with_labels(self):
         from scripts.vendor_playwright_runtime import _parse_deb_package_metadata
 
