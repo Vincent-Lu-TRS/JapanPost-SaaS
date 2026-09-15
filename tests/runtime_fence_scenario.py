@@ -70,7 +70,7 @@ def _install_late_descendant_race(marker: Path) -> None:
         if signal_number == signal.SIGKILL and not state["spawned"]:
             state["spawned"] = True
             script = (
-                "import os,time; os.setsid(); "
+                "import os,time; "
                 f"open({json.dumps(str(marker))}, 'w', encoding='ascii').write(str(os.getpid())); "
                 "time.sleep(120)"
             )

@@ -24,7 +24,17 @@ class PlaywrightRuntimeTests(unittest.TestCase):
         package_names = {package.name for package in REQUIRED_RUNTIME_PACKAGES}
 
         self.assertTrue(required_libraries.issubset(set(REQUIRED_RUNTIME_LIBRARY_NAMES)))
-        self.assertTrue({"libglib2.0-0t64", "libgbm1", "libudev1", "libllvm19", "libz3-4"}.issubset(package_names))
+        self.assertTrue(
+            {
+                "libcairo.so.2",
+                "libcups.so.2",
+                "libpango-1.0.so.0",
+            }.issubset(set(REQUIRED_RUNTIME_LIBRARY_NAMES))
+        )
+        self.assertTrue(
+            {"libcairo2", "libcups2", "libpango-1.0-0", "libglib2.0-0", "libllvm15"}.issubset(package_names)
+        )
+        self.assertFalse(any(name.endswith("t64") for name in package_names))
 
     def _asset_fixture(self, parent: Path):
         from bot import playwright_runtime as runtime
@@ -326,7 +336,6 @@ class PlaywrightRuntimeTests(unittest.TestCase):
 
             self.assertTrue(result.ok)
             self.assertFalse(result.downloaded)
-
 
 if __name__ == "__main__":
     unittest.main()

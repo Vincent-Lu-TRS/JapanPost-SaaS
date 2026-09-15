@@ -9,10 +9,14 @@ import hashlib
 import json
 import os
 import shutil
+import shlex
 import sys
+import subprocess
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterable
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 MAX_PACKAGE_BYTES = 25 * 1024 * 1024
@@ -148,10 +152,74 @@ def build_asset_bundle(
                 shutil.rmtree(resolved_stage, ignore_errors=True)
 
 
+def parse_apt_download_urls(uri_list: str | Path) -> dict[str, str]:
+    """Map Debian apt --print-uris entries to canonical HTTPS package URLs."""
+
+    approved_hosts = {"deb.debian.org", "security.debian.org"}
+    urls: dict[str, str] = {}
+    for line in Path(uri_list).read_text(encoding="utf-8").splitlines():
+        try:
+            fields = shlex.split(line)
+        except ValueError as exc:
+            raise ValueError("apt URI list is malformed") from exc
+        if not fields or ".deb" not in fields[0]:
+            continue
+        parsed = urlsplit(fields[0])
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in approved_hosts:
+            raise ValueError("apt package URI uses an unapproved repository host")
+        if parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("apt package URI contains unsupported components")
+        filename = unquote(Path(parsed.path).name)
+        if not filename.endswith(".deb") or Path(filename).name != filename:
+            raise ValueError("apt package URI has an invalid filename")
+        canonical_url = urlunsplit(("https", parsed.netloc.lower(), parsed.path, "", ""))
+        previous = urls.get(filename)
+        if previous is not None and previous != canonical_url:
+            raise ValueError("apt URI list contains conflicting package sources")
+        urls[filename] = canonical_url
+    return urls
+
+
+def packages_from_deb_directory(source_dir: str | Path, uri_list: str | Path) -> tuple[object, ...]:
+    """Discover package identity and checksums for an apt-downloaded .deb set."""
+
+    source = Path(source_dir)
+    urls = parse_apt_download_urls(uri_list)
+    packages = []
+    for package_path in sorted(source.glob("*.deb")):
+        if package_path.is_symlink() or not package_path.is_file():
+            raise ValueError("runtime package input is not a regular file")
+        url = urls.get(package_path.name)
+        if url is None:
+            raise ValueError(f"missing apt source URL: {package_path.name}")
+        metadata = subprocess.run(
+            ["dpkg-deb", "--field", str(package_path), "Package", "Architecture"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        if len(metadata) != 2 or metadata[1] not in {"amd64", "all"}:
+            raise ValueError(f"runtime package architecture is unsupported: {package_path.name}")
+        with package_path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        packages.append(
+            SimpleNamespace(
+                name=metadata[0],
+                filename=package_path.name,
+                url=url,
+                sha256=digest,
+            )
+        )
+    if not packages:
+        raise ValueError("runtime package source is empty")
+    return tuple(packages)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="directory containing the pre-verified .deb inputs")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--apt-uri-list", type=Path, help="apt --print-uris output used to build a new pinned asset bundle")
     args = parser.parse_args()
 
     import sys
@@ -160,8 +228,13 @@ def main() -> int:
     sys.path.insert(0, str(repository))
     from bot.playwright_runtime import REQUIRED_RUNTIME_PACKAGES
 
-    digest = build_asset_bundle(args.source, args.output, packages=REQUIRED_RUNTIME_PACKAGES)
-    print(f"published {len(REQUIRED_RUNTIME_PACKAGES)} verified packages; manifest sha256={digest}")
+    packages = (
+        packages_from_deb_directory(args.source, args.apt_uri_list)
+        if args.apt_uri_list is not None
+        else REQUIRED_RUNTIME_PACKAGES
+    )
+    digest = build_asset_bundle(args.source, args.output, packages=packages)
+    print(f"published {len(packages)} verified packages; manifest sha256={digest}")
     return 0
 
 

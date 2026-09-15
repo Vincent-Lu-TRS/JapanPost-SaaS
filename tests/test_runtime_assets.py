@@ -31,6 +31,38 @@ class RuntimeAssetBuilderTests(unittest.TestCase):
             for index, payload in enumerate(payloads)
         ]
 
+    def test_bookworm_package_seed_has_missing_chromium_libraries_and_no_t64_names(self):
+        seed_path = Path(__file__).resolve().parents[1] / "scripts" / "runtime-debian12-packages.txt"
+        names = {
+            line.strip()
+            for line in seed_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertTrue({"libcairo2", "libcups2", "libpango-1.0-0", "libllvm15", "libgl1-mesa-dri"}.issubset(names))
+        self.assertFalse(any(name.endswith("t64") for name in names))
+
+    def test_apt_print_uri_parser_canonicalizes_debian_urls_and_rejects_unknown_hosts(self):
+        from scripts.vendor_playwright_runtime import parse_apt_download_urls
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "apt-uris.txt"
+            source.write_text(
+                "'http://deb.debian.org/debian/pool/main/l/libfoo/libfoo_1_amd64.deb' "
+                "libfoo_1_amd64.deb 123 SHA256:abc\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                parse_apt_download_urls(source),
+                {"libfoo_1_amd64.deb": "https://deb.debian.org/debian/pool/main/l/libfoo/libfoo_1_amd64.deb"},
+            )
+
+            source.write_text(
+                "'https://packages.example.invalid/pool/libfoo.deb' libfoo.deb 123 SHA256:abc\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "repository host"):
+                parse_apt_download_urls(source)
+
     def test_builds_manifest_and_verified_asset_files(self):
         from scripts.vendor_playwright_runtime import build_asset_bundle
 

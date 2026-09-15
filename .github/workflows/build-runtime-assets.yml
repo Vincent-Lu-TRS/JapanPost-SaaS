@@ -1,0 +1,65 @@
+name: Build Debian 12 Runtime Assets
+
+on:
+  push:
+    branches:
+      - codex/jppost-runtime-reliability-20260915
+    paths:
+      - .github/workflows/build-runtime-assets.yml
+      - scripts/runtime-debian12-packages.txt
+      - scripts/vendor_playwright_runtime.py
+      - bot/playwright_runtime.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-assets:
+    name: Build checksum-pinned Bookworm runtime bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      # Same immutable Bookworm image used by runtime-validation.yml.
+      JPPOST_RUNTIME_TEST_IMAGE: python:3.12.14-slim-bookworm@sha256:9c47360a2a0355e2da18516d0b1c2126ec22c195d2185e97347c9d98398c5bef
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2, resolved from the official repository API.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Resolve official Debian packages and build verified bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="${RUNNER_TEMP}/jppost-runtime-assets"
+          mkdir -p "${output_dir}"
+          docker pull --platform linux/amd64 "${JPPOST_RUNTIME_TEST_IMAGE}"
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --volume "${output_dir}:/output" \
+            --workdir /workspace \
+            --env DEBIAN_FRONTEND=noninteractive \
+            "${JPPOST_RUNTIME_TEST_IMAGE}" \
+            sh -euc '
+              apt-get update
+              packages="$(sed -e "/^[[:space:]]*#/d" -e "/^[[:space:]]*$/d" scripts/runtime-debian12-packages.txt | tr "\n" " ")"
+              set -- ${packages}
+              apt-get --print-uris --yes --reinstall --download-only --no-install-recommends install "$@" > /output/apt-uris.txt
+              apt-get --yes --reinstall --download-only --no-install-recommends install "$@"
+              mkdir -p /output/debs
+              cp /var/cache/apt/archives/*.deb /output/debs/
+              python scripts/vendor_playwright_runtime.py /output/debs --apt-uri-list /output/apt-uris.txt --output /output/bundle
+              tar -C /output -czf /output/jppost-runtime-assets.tar.gz bundle
+              sha256sum /output/jppost-runtime-assets.tar.gz
+            '
+
+      - name: Upload verified bundle for the release candidate
+        # actions/upload-artifact v4.6.2.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jppost-runtime-assets-bookworm
+          path: ${{ runner.temp }}/jppost-runtime-assets/jppost-runtime-assets.tar.gz
+          if-no-files-found: error
+          retention-days: 3
