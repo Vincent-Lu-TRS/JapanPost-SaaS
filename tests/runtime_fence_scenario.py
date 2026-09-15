@@ -11,6 +11,10 @@ import tempfile
 import time
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from bot.browser_bootstrap import RuntimeHandle
 from bot.runtime_fence import execute_request
 
@@ -89,11 +93,14 @@ def main() -> int:
     class ScenarioBootstrap:
         def prepare_in_process(self, key: str, deadline: float) -> RuntimeHandle:
             if scenario == "late-descendant":
+                term_resistant_marker = marker.with_name(f"{marker.name}.term-resistant")
                 subprocess.Popen(
                     [
                         sys.executable,
                         "-c",
-                        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)",
+                        "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                        f"open({json.dumps(str(term_resistant_marker))}, 'w', encoding='ascii').write(str(os.getpid())); "
+                        "time.sleep(120)",
                     ],
                     close_fds=True,
                 )

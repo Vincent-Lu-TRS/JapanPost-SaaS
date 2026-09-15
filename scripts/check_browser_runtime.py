@@ -24,6 +24,7 @@ from bot.browser_runtime import (
     _release_digest,
     load_runtime_profile,
 )
+from bot.runtime_fence import _SAFE_ERROR_CODES
 from bot.playwright_runtime import _load_verified_assets
 
 
@@ -34,6 +35,7 @@ _SAFE_FIELDS = (
     "browser_revision",
     "platform",
     "stage",
+    "error_code",
     "status",
     "elapsed_ms",
 )
@@ -131,6 +133,7 @@ def check_runtime(
         "browser_revision": "unavailable",
         "platform": _safe_platform(),
         "stage": "metadata",
+        "error_code": "none",
         "status": "error",
         "elapsed_ms": 0,
     }
@@ -178,10 +181,16 @@ def check_runtime(
         payload["stage"] = "complete"
         payload["status"] = "ready"
         return payload, 0
-    except Exception:
+    except Exception as exc:
         # Runtime exceptions can contain paths, URLs, or process output. Keep
         # the diagnostic useful without reflecting any of that data.
         payload["stage"] = stage if stage in _STAGES else "metadata"
+        error_code = getattr(exc, "code", None)
+        payload["error_code"] = (
+            error_code
+            if isinstance(error_code, str) and error_code in _SAFE_ERROR_CODES
+            else "bootstrap_unknown"
+        )
         payload["status"] = "error"
         return payload, 1
     finally:

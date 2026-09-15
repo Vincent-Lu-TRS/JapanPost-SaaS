@@ -20,6 +20,7 @@ SAFE_FIELDS = {
     "browser_revision",
     "platform",
     "stage",
+    "error_code",
     "status",
     "elapsed_ms",
 }
@@ -100,7 +101,16 @@ def _json_payload(stdout: str) -> dict[str, object]:
 
 def _assert_safe_payload(test: unittest.TestCase, payload: dict[str, object]) -> None:
     test.assertEqual(set(payload), SAFE_FIELDS)
-    for field in ("release_digest", "asset_digest", "playwright_version", "browser_revision", "platform", "stage", "status"):
+    for field in (
+        "release_digest",
+        "asset_digest",
+        "playwright_version",
+        "browser_revision",
+        "platform",
+        "stage",
+        "error_code",
+        "status",
+    ):
         test.assertIsInstance(payload[field], str)
     test.assertIsInstance(payload["elapsed_ms"], int)
     test.assertGreaterEqual(payload["elapsed_ms"], 0)
@@ -137,11 +147,17 @@ class RuntimeColdStartTests(unittest.TestCase):
     @unittest.skipUnless(_linux_x86_64(), "real Chromium bootstrap is supported only on Linux x86_64")
     def test_checker_contract_includes_only_safe_fields_after_real_blank_page_launch(self):
         result = _run_checker(PROJECT_ROOT)
-        self.assertEqual(result.returncode, 0, "runtime checker must return success only after a real browser launch")
+        self.assertEqual(
+            result.returncode,
+            0,
+            "runtime checker must return success only after a real browser launch; "
+            f"safe result={result.stdout.strip()[:1000]}",
+        )
 
         payload = _json_payload(result.stdout)
         _assert_safe_payload(self, payload)
         self.assertEqual(payload["stage"], "complete")
+        self.assertEqual(payload["error_code"], "none")
         self.assertEqual(payload["status"], "ready")
 
     def test_asset_verification_failure_emits_safe_json_and_returns_nonzero(self):
@@ -156,6 +172,7 @@ class RuntimeColdStartTests(unittest.TestCase):
         payload = _json_payload(result.stdout)
         _assert_safe_payload(self, payload)
         self.assertEqual(payload["stage"], "asset_verification")
+        self.assertEqual(payload["error_code"], "asset_missing")
         self.assertEqual(payload["status"], "error")
 
     @unittest.skipUnless(_linux_x86_64(), "fresh Chromium bootstrap is supported only on Linux x86_64")
@@ -180,10 +197,16 @@ class RuntimeColdStartTests(unittest.TestCase):
             environment["TMPDIR"] = str(isolated_tmp)
             result = _run_checker(project_root, env=environment, timeout=300)
 
-            self.assertEqual(result.returncode, 0, "cold-start checker must succeed with a real Chromium launch")
+            self.assertEqual(
+                result.returncode,
+                0,
+                "cold-start checker must succeed with a real Chromium launch; "
+                f"safe result={result.stdout.strip()[:1000]}",
+            )
             payload = _json_payload(result.stdout)
             _assert_safe_payload(self, payload)
             self.assertEqual(payload["stage"], "complete")
+            self.assertEqual(payload["error_code"], "none")
             self.assertEqual(payload["status"], "ready")
             self.assertTrue(browser_root.is_dir(), "cold-start must populate its isolated browser cache")
             self.assertTrue(any(browser_root.iterdir()), "cold-start must install the pinned Chromium runtime")

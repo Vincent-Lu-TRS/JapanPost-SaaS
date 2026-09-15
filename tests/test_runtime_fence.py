@@ -306,11 +306,15 @@ class RuntimeFenceLinuxIntegrationTests(unittest.TestCase):
             finally:
                 # Keep a broken implementation from leaking a fixture process
                 # if the assertion above is what fails on Linux CI.
-                if marker.exists():
-                    try:
-                        os.kill(int(marker.read_text(encoding="ascii")), signal.SIGKILL)
-                    except (OSError, ValueError):
-                        pass
+                for process_marker in (
+                    marker,
+                    marker.with_name(f"{marker.name}.term-resistant"),
+                ):
+                    if process_marker.exists():
+                        try:
+                            os.kill(int(process_marker.read_text(encoding="ascii")), signal.SIGKILL)
+                        except (OSError, ValueError):
+                            pass
 
     def test_timed_out_synchronous_extract_kills_setsid_grandchild_within_cleanup_reserve(self):
         with tempfile.TemporaryDirectory() as temporary:

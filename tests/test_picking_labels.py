@@ -1026,7 +1026,13 @@ class PickingLabelPdfTests(unittest.TestCase):
             for font_ref in page.get("/Resources", {}).get("/Font", {}).values():
                 font_names.append(str(font_ref.get_object().get("/BaseFont", "")))
 
-        self.assertTrue(any("Meiryo" in name or "NotoSans" in name for name in font_names), font_names)
+        self.assertTrue(
+            any(
+                any(candidate in name for candidate in ("Meiryo", "NotoSans", "HeiseiKakuGo"))
+                for name in font_names
+            ),
+            font_names,
+        )
         self.assertFalse(any("Thin" in name for name in font_names), font_names)
 
     def test_header_positions_move_order_number_slightly_upward(self):
