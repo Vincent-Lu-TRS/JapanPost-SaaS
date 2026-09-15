@@ -21,9 +21,9 @@ Read next:
 2. `HANDOFF_CLAUDE.md` for older auth / automation context
 3. `SaaS_Requirements.md` if working in the original project folder
 
-## Current Source Of Truth
+## Historical Snapshot (2026-06-20; not the current production source of truth)
 
-The current active working tree used for the latest Streamlit Cloud updates is:
+At the time of this 2026-06-20 handoff, the active working tree used for Streamlit Cloud updates was:
 
 ```text
 C:\Users\shaku\AppData\Local\Temp\jppost-remote-fix
