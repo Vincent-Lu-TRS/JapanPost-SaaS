@@ -42,6 +42,15 @@ jobs:
             sh -euc '
               python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r requirements.txt
               python -m pip check
+              # Emit the sanitized runtime status, then expose only missing
+              # shared-library names to make clean-container failures actionable.
+              python scripts/check_browser_runtime.py || true
+              runtime_library_dir="$(find /tmp/jppost-playwright-runtime -type d -path "*/usr/lib/x86_64-linux-gnu" -print -quit 2>/dev/null || true)"
+              if [ -n "$runtime_library_dir" ]; then
+                for browser_binary in $(find /tmp/ms-playwright -type f \( -name chrome -o -name chrome-headless-shell \) -print 2>/dev/null || true); do
+                  LD_LIBRARY_PATH="$runtime_library_dir" ldd "$browser_binary" 2>/dev/null | grep "not found" || true
+                done
+              fi
               python -m unittest discover -s tests -v
               python -m unittest discover -s tests -p "test_runtime_cold_start.py" -v
               python scripts/check_browser_runtime.py

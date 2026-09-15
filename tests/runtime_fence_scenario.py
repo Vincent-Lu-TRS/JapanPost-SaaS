@@ -74,7 +74,13 @@ def _install_late_descendant_race(marker: Path) -> None:
                 f"open({json.dumps(str(marker))}, 'w', encoding='ascii').write(str(os.getpid())); "
                 "time.sleep(120)"
             )
-            subprocess.Popen([sys.executable, "-c", script], start_new_session=True, close_fds=True)
+            subprocess.Popen(
+                [sys.executable, "-c", script],
+                start_new_session=True,
+                close_fds=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             ready_deadline = time.monotonic() + 1.0
             while not marker.exists() and time.monotonic() < ready_deadline:
                 time.sleep(0.005)
