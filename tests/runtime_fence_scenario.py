@@ -103,6 +103,8 @@ def main() -> int:
                         "time.sleep(120)",
                     ],
                     close_fds=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
                 _install_late_descendant_race(marker)
             else:

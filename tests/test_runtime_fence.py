@@ -281,7 +281,7 @@ class RuntimeFenceLinuxIntegrationTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 payload = json.loads(result.stdout.decode("utf-8"))
                 self.assertFalse(payload["ok"])
-                self.assertEqual(payload["error"]["code"], "bootstrap_unknown")
+                self.assertEqual(payload["error"]["code"], "operation_children_leaked")
                 self.assertNotIn("secret", result.stdout.decode("utf-8").lower())
                 self.assertNotIn("Traceback", result.stderr.decode("utf-8", errors="replace"))
                 self._assert_not_running(marker)

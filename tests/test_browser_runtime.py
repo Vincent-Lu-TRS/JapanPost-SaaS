@@ -1,8 +1,10 @@
 import hashlib
 import io
 import json
+import os
 import threading
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -31,6 +33,100 @@ class BrowserRuntimeTests(unittest.TestCase):
     def test_disposable_probe_retries_only_explicit_target_closed_errors(self):
         self.assertIn('type(exc).__name__ == "TargetClosedError"', _PROBE_SCRIPT)
         self.assertNotIn('"targetclosederror",', _PROBE_SCRIPT.lower())
+
+    def test_probe_emits_safe_browser_failure_category_without_raw_error_text(self):
+        class FakeChromium:
+            @property
+            def executable_path(self):
+                return os.environ["FAKE_CHROMIUM_EXECUTABLE"]
+
+            def launch(self, **_kwargs):
+                raise RuntimeError(
+                    "error while loading shared libraries: secret-private-library-path.so"
+                )
+
+        class FakePlaywright:
+            chromium = FakeChromium()
+
+        class FakeManager:
+            def __enter__(self):
+                return FakePlaywright()
+
+            def __exit__(self, *_args):
+                return False
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "browser-cache"
+            executable = root / "chromium-1234" / "chrome-linux" / "chrome"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"mock executable")
+            playwright_package = types.ModuleType("playwright")
+            playwright_package.__path__ = []
+            sync_api = types.ModuleType("playwright.sync_api")
+            sync_api.sync_playwright = FakeManager
+            output = io.StringIO()
+            environment = {
+                "PLAYWRIGHT_BROWSERS_PATH": str(root),
+                "FAKE_CHROMIUM_EXECUTABLE": str(executable),
+                "JPPOST_PROBE_LAUNCH_ARGS": "[]",
+                "JPPOST_PROBE_FALLBACK_ARGS": "[]",
+                "JPPOST_PROBE_EXPECTED_VERSION": "1234.0.0.0",
+                "JPPOST_PROBE_TITLE": "JPPOST runtime probe",
+            }
+            with patch.dict(
+                "sys.modules",
+                {"playwright": playwright_package, "playwright.sync_api": sync_api},
+            ), patch.dict(os.environ, environment, clear=True), patch("sys.stdout", output):
+                with self.assertRaises(SystemExit) as caught:
+                    exec(compile(_PROBE_SCRIPT, "<runtime-probe-test>", "exec"), {"__name__": "__main__"})
+
+        self.assertEqual(caught.exception.code, 41)
+        self.assertIn("JPPOST_BROWSER_PROBE_ERROR=browser_missing_library", output.getvalue())
+        self.assertNotIn("secret-private-library-path", output.getvalue())
+
+    def test_probe_parent_uses_only_allowlisted_child_failure_category(self):
+        runner = Mock(
+            return_value=ProcessResult(
+                41,
+                stdout="JPPOST_BROWSER_PROBE_ERROR=browser_abi_mismatch\n",
+                stderr="secret-runtime-path",
+            )
+        )
+        bootstrap = BrowserRuntimeBootstrap(process_runner=runner)
+
+        with self.assertRaises(RuntimeSetupError) as caught:
+            bootstrap._probe_browser(
+                {"launch_args": [], "fallback_args": [], "probe_timeout_seconds": 30, "probe_title": "JPPOST runtime probe"},
+                {},
+                time.monotonic() + 60,
+                revision="1234",
+                browser_version="1234.0.0.0",
+            )
+
+        self.assertEqual(caught.exception.code, "browser_abi_mismatch")
+        self.assertNotIn("secret-runtime-path", str(caught.exception))
+
+    def test_probe_parent_discards_unknown_child_failure_category(self):
+        runner = Mock(
+            return_value=ProcessResult(
+                41,
+                stdout="JPPOST_BROWSER_PROBE_ERROR=/home/private/path\n",
+                stderr="secret-runtime-path",
+            )
+        )
+        bootstrap = BrowserRuntimeBootstrap(process_runner=runner)
+
+        with self.assertRaises(RuntimeSetupError) as caught:
+            bootstrap._probe_browser(
+                {"launch_args": [], "fallback_args": [], "probe_timeout_seconds": 30, "probe_title": "JPPOST runtime probe"},
+                {},
+                time.monotonic() + 60,
+                revision="1234",
+                browser_version="1234.0.0.0",
+            )
+
+        self.assertEqual(caught.exception.code, "browser_launch")
+        self.assertNotIn("private", str(caught.exception))
 
     def _supported_environment(self):
         return {

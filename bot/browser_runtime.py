@@ -45,6 +45,16 @@ from safe_logging import log_runtime_environment
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROFILE_PATH = Path(__file__).with_name("runtime_profile.json")
 PROBE_PREFIX = "JPPOST_BROWSER_PROBE="
+PROBE_ERROR_PREFIX = "JPPOST_BROWSER_PROBE_ERROR="
+_PROBE_ERROR_CODES = frozenset(
+    {
+        "browser_missing_library",
+        "browser_abi_mismatch",
+        "browser_target_closed",
+        "browser_executable_missing",
+        "browser_launch",
+    }
+)
 OUTPUT_CAPTURE_MAX_BYTES = 256 * 1024
 _OUTPUT_CAPTURE_HEAD_BYTES = 32 * 1024
 _OUTPUT_CAPTURE_MARKER = b"\n...[output truncated]...\n"
@@ -61,6 +71,10 @@ _ALLOWED_RUNTIME_CODES = {
     "browser_install_timeout",
     "browser_probe_timeout",
     "browser_launch",
+    "browser_missing_library",
+    "browser_abi_mismatch",
+    "browser_target_closed",
+    "browser_executable_missing",
     "bootstrap_timeout",
     "bootstrap_unknown",
     "bootstrap_protocol_error",
@@ -88,6 +102,23 @@ def close_quietly(resource):
             resource.close()
         except Exception:
             pass
+
+def safe_failure_code(error):
+    text = str(error).lower()
+    if "error while loading shared libraries" in text or "cannot open shared object file" in text:
+        return "browser_missing_library"
+    if "undefined symbol" in text or "symbol lookup error" in text or (
+        "glibc_" in text and "not found" in text
+    ):
+        return "browser_abi_mismatch"
+    if "executable doesn't exist" in text or "executable not found" in text:
+        return "browser_executable_missing"
+    if type(error).__name__ == "TargetClosedError" or any(marker in text for marker in (
+        "target page, context or browser has been closed",
+        "browser has been closed", "browser process closed",
+    )):
+        return "browser_target_closed"
+    return "browser_launch"
 
 try:
     browser = context = page = None
@@ -134,6 +165,7 @@ try:
                 if not retryable or args is not launch_args:
                     break
         if last_error is not None:
+            print("JPPOST_BROWSER_PROBE_ERROR=" + safe_failure_code(last_error))
             raise SystemExit(41)
         raise SystemExit(42)
 except SystemExit:
@@ -1204,9 +1236,18 @@ class BrowserRuntimeBootstrap:
             timeout=timeout,
         )
         if result.timed_out or result.returncode != 0:
+            error_code = "browser_probe_timeout" if result.timed_out else "browser_launch"
+            if not result.timed_out:
+                diagnostic = next(
+                    (line[len(PROBE_ERROR_PREFIX):] for line in result.stdout.splitlines()
+                     if line.startswith(PROBE_ERROR_PREFIX)),
+                    "",
+                )
+                if diagnostic in _PROBE_ERROR_CODES:
+                    error_code = diagnostic
             raise RuntimeSetupError(
                 "browser_probe",
-                "browser_probe_timeout" if result.timed_out else "browser_launch",
+                error_code,
                 retryable=result.timed_out,
             )
         line = next((line for line in result.stdout.splitlines() if line.startswith(PROBE_PREFIX)), None)
