@@ -29,7 +29,7 @@ At the time of this 2026-06-20 handoff, the active working tree used for Streaml
 C:\Users\shaku\AppData\Local\Temp\jppost-remote-fix
 ```
 
-Latest confirmed commit at this handoff:
+Commit confirmed at the time of this handoff:
 
 ```text
 a849f1c feat: split command rows and recipient IDs
@@ -45,7 +45,7 @@ Important files:
 - `bot/` - Japan Post, Sheets, Gemini, Drive automation logic.
 - `tests/` - unit tests.
 
-## Latest UI Direction
+## Historical UI Direction Snapshot (2026-06-20; not revalidated)
 
 Do not continue trying to force custom text blocks and Streamlit native widgets into one perfectly aligned single row. Streamlit inputs/selectboxes/buttons have different box models and rerun-generated wrappers, so repeated CSS alignment patches caused visual drift, clipping, and fragile selectors.
 
@@ -55,11 +55,11 @@ Use type-homogeneous rows instead:
 - Operation rows: Streamlit widgets only.
 - Tables: compact dark table style, with minimal CSS assistance.
 
-Current intended page structure:
+Page structure recorded in this snapshot:
 
 - Compact header:
   - Left: `JP Post 製單系統`
-  - Right: current user and `登出`
+  - Right: signed-in user and `登出`
   - Keep the divider, but keep top/bottom spacing tight. This is an operations tool, not a hero page.
 - Pending toolbar, split into two rows:
   - Info row: `待打單預覽`, `USD/JPY 161.20｜26/06/20`, `待製單 7`, `本次完成 0`
@@ -69,7 +69,7 @@ Current intended page structure:
   - Operation row: `Name [Fabian Kohlhaas]`, `TransType [國際小包]`, optional `PRC ID` / `PCCC`, `恢復預設`
   - Item table: `Content`, `Description`, `HSCode`, `Value`, `Quantity`
 
-Current copy:
+Copy recorded in this snapshot:
 
 - App title: `JP Post 製單系統`
 - Section title: `待打單預覽`
@@ -97,7 +97,7 @@ The user explicitly accepted the short reset wording.
 
 Do not change backend APIs, GAS logic, request payload field names, or core automation flow unless the user explicitly asks.
 
-Current editable pending-order requirements:
+Editable pending-order requirements recorded in this snapshot:
 
 - `Name` is editable and stored in `st.session_state`.
 - Streamlit rerun must not overwrite edited `Name`, `PRC ID`, or `PCCC`.
