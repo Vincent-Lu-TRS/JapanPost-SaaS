@@ -4,7 +4,7 @@ Streamlit Web UI + Google OAuth（限 @tkrjm.co.jp）
 支援：30 天 Cookie Session
 """
 import os
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/ms-playwright")
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/tmp/ms-playwright"
 
 import hashlib
 import html
@@ -12,7 +12,6 @@ import importlib
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-import subprocess
 import sys
 import time
 import threading
@@ -74,10 +73,11 @@ from refresh_payloads import (
     copy_pending_payload,
     copy_picking_payload,
 )
-from safe_logging import redact_operational_log, safe_log_event
+from safe_logging import log_runtime_failure, redact_operational_log, safe_log_event
 from features.picking_labels import apply_picking_payload, load_picking_payload
 from local_time import JST, format_jst
-from bot.playwright_runtime import prepare_playwright_runtime
+from bot.browser_bootstrap import RuntimeSetupError
+from bot.browser_runtime import ensure_browser_runtime, probe_browser_runtime_fresh
 
 
 # Streamlit can rerun app.py in an existing Python process after a Cloud
@@ -128,40 +128,6 @@ from auth import (
 
 # ── Cookie Manager（必須在其他 UI 之前初始化）──────────
 _cm = get_cookie_manager()
-
-
-# ── Playwright 環境初始化（僅在第一次啟動時執行）────────
-@st.cache_resource(show_spinner="正在安裝 Playwright Chromium 環境...")
-def _install_playwright():
-    """Install Chromium and prepare its libraries without a second apt stage."""
-    runtime = prepare_playwright_runtime()
-    if not runtime.ok:
-        print(
-            f"[PLAYWRIGHT_RUNTIME] {runtime.message}",
-            file=sys.stderr,
-            flush=True,
-        )
-        return False
-    print(
-        f"[PLAYWRIGHT_RUNTIME] {runtime.message}",
-        file=sys.stderr,
-        flush=True,
-    )
-    _env = {**runtime.env, "PLAYWRIGHT_BROWSERS_PATH": "/tmp/ms-playwright"}
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True, text=True, timeout=300, env=_env,
-        )
-        print(f"[PLAYWRIGHT_INSTALL] returncode={result.returncode}", file=sys.stderr)
-        if result.stdout:
-            print(f"[PLAYWRIGHT_INSTALL stdout] {result.stdout[:500]}", file=sys.stderr)
-        if result.stderr:
-            print(f"[PLAYWRIGHT_INSTALL stderr] {result.stderr[:500]}", file=sys.stderr)
-        return result.returncode == 0
-    except Exception as e:
-        print(f"[PLAYWRIGHT_INSTALL ERROR] {e}", file=sys.stderr)
-        return False
 
 
 # ── 全域任務追蹤器（跨 Streamlit 重繪保留同一份結果）──────
@@ -236,6 +202,19 @@ def _reset_preflight_job_view(job: dict | None) -> None:
     job.pop("batch_preflight_blocked_count", None)
     job.pop("preflight_reload_required", None)
     job.pop("preflight_reload_message", None)
+
+
+def _should_show_safe_diagnostic(job: dict | None, batch_summary: dict) -> bool:
+    """Keep safe runtime-startup diagnostics available even without results."""
+
+    return bool(
+        job
+        and job.get("logs")
+        and (
+            job.get("runtime_setup_message")
+            or batch_summary.get("failure_alerts")
+        )
+    )
 
 
 def _dataframe_sensitive_values(dataframe: pd.DataFrame | None) -> tuple[str, ...]:
@@ -1314,6 +1293,9 @@ def _render_postal_pending_v2(
                 if len(df_pending) > editable_count:
                     st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
 
+        if job and job.get("runtime_setup_message") and not is_busy:
+            st.error(job["runtime_setup_message"])
+
         if job and job.get("results") and not is_busy:
             retry_notice = st.session_state.pop("pending_v2_writeback_retry_notice", None)
             if retry_notice == "回填已完成":
@@ -1408,7 +1390,7 @@ def _render_postal_pending_v2(
             ]
             st.dataframe(df_status[show_cols], hide_index=True, width="stretch")
 
-        if job and job.get("logs") and batch_summary["failure_alerts"]:
+        if _should_show_safe_diagnostic(job, batch_summary):
             with st.expander("詳細除錯日誌", expanded=False):
                 st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
                 safe_job_logs = _safe_operational_log_lines(
@@ -1463,6 +1445,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
     ok, job, reason = _JOB_REGISTRY.start(email, df, max_rows)
     if not ok or job is None:
         return False, reason
+    job.pop("runtime_setup_message", None)
     _write_job_lock(email)
 
     def _run():
@@ -1498,8 +1481,25 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     error_type="StatusEventError",
                 )
 
+        def _stop_for_runtime_setup(error):
+            message = "製單環境暫時無法啟動，訂單尚未送出，請稍後再試。"
+            log_runtime_failure(_log, error)
+            _log(message)
+            job["runtime_setup_message"] = message
+            job["results"] = []
+            mark_unfinished_orders(job, "failed", "未送出", message)
+            _JOB_REGISTRY.finish(job, "error")
+            _clear_job_lock(email)
+
         try:
             rows_for_run = df if max_rows is None else df.head(max_rows)
+            _log("🧰 正在準備郵便製單環境...")
+            try:
+                runtime_handle = ensure_browser_runtime()
+            except RuntimeSetupError:
+                raise
+            except Exception as runtime_error:
+                raise RuntimeSetupError("bootstrap", "bootstrap_unknown") from runtime_error
             from bot.sheets import (
                 COUNTRY_CODE_MAP,
                 get_pending_orders,
@@ -1622,9 +1622,6 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             _log(f"✅ 本批 {len(rows_for_run)} 筆通過製單前檢查，準備執行。")
 
             _log("🚀 任務啟動，正在載入模組...")
-            _log("🧰 正在準備 Playwright Chromium 環境...")
-            if not _install_playwright():
-                raise RuntimeError("Playwright runtime unavailable")
             from bot.automation import AUTOMATION_BUILD_ID, _prepare_batch_hs_codes, run_automation
             automation_module = _load_current_automation_module()
             AUTOMATION_BUILD_ID = automation_module.AUTOMATION_BUILD_ID
@@ -1653,6 +1650,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 status_cb=_status,
                 headless=True,
                 precomputed_hs_codes=hs_codes_by_order,
+                runtime_handle=runtime_handle,
             )
             if not results:
                 _log("ℹ️ 自動化完成，無新增結果。")
@@ -1737,6 +1735,12 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             _JOB_REGISTRY.finish(job, terminal_status)
             _clear_job_lock(email)
         except BaseException as e:
+            if isinstance(e, RuntimeSetupError):
+                try:
+                    _stop_for_runtime_setup(e)
+                except Exception:
+                    _clear_job_lock(email)
+                return
             print(
                 f"[BOT_ERROR] {type(e).__name__}",
                 file=sys.stderr,
@@ -3359,6 +3363,17 @@ PDF 會上傳至指定 Google Drive 資料夾。
         )
 
     with diagnostics_tab:
+        with st.expander("製單環境檢查", expanded=False):
+            st.caption("會短暫啟動並關閉空白頁；不送出訂單，也不修改試算表。")
+            if is_busy:
+                st.caption("目前有製單執行中，請完成後再檢查。")
+            if st.button("檢查製單環境", key="cloud_browser_runtime_probe", disabled=is_busy):
+                try:
+                    probe_browser_runtime_fresh()
+                except Exception:
+                    st.error("未就緒。此檢查不送出訂單，也不修改試算表；請聯絡系統管理人員。")
+                else:
+                    st.success("可用。此檢查不送出訂單，也不修改試算表。")
         visible_pending_logs = _visible_pending_logs(
             pending_logs,
             sensitive_values=_dataframe_sensitive_values(df_pending),

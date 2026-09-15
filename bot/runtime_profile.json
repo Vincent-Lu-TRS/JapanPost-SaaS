@@ -1,0 +1,46 @@
+{
+  "format": 1,
+  "browser": "chromium",
+  "browser_root": "/tmp/ms-playwright",
+  "headless": true,
+  "compatibility": {
+    "system": "linux",
+    "machine": "x86_64",
+    "python_major": 3,
+    "python_minor": 12,
+    "supported_os": {
+      "debian": ["12", "13"],
+      "ubuntu": ["22.04", "24.04", "26.04"]
+    },
+    "libc_name": "glibc",
+    "minimum_libc_version": "2.35"
+  },
+  "prepare_timeout_seconds": 120,
+  "install_attempt_timeout_seconds": 45,
+  "install_max_attempts": 3,
+  "install_retry_backoff_seconds": [1, 3],
+  "probe_timeout_seconds": 30,
+  "probe_title": "JPPOST runtime probe",
+  "launch_profile": "streamlit-linux-headless-v1",
+  "launch_args": [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--no-zygote",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--mute-audio",
+    "--disable-features=site-per-process",
+    "--blink-settings=imagesEnabled=false",
+    "--disable-background-timer-throttling",
+    "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection"
+  ],
+  "fallback_args": [
+    "--single-process",
+    "--renderer-process-limit=1"
+  ]
+}

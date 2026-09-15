@@ -11,7 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_TEST_SCRIPT = textwrap.dedent(
     r'''
     from pathlib import Path
-    from unittest.mock import patch
+    import sys
+    from unittest.mock import Mock, patch
 
     import pandas as pd
     from streamlit.testing.v1 import AppTest
@@ -60,10 +61,14 @@ APP_TEST_SCRIPT = textwrap.dedent(
         "bot.sheets.get_pending_orders",
         return_value=mock_pending.copy(deep=True),
     ).start()
-    patch(
+    picking_loader = patch(
         "features.picking_labels.load_picking_payload",
         return_value=PickingPayload((), (), {}),
     ).start()
+    runtime_probe = Mock(return_value=object())
+    patch("bot.browser_runtime.probe_browser_runtime_fresh", runtime_probe).start()
+    writeback = patch("bot.sheets.backfill_results").start()
+    completion_read = patch("bot.sheets.read_completion_authority").start()
 
     app = AppTest.from_file(str(Path.cwd() / "app.py"))
     app.run(timeout=30)
@@ -77,7 +82,7 @@ APP_TEST_SCRIPT = textwrap.dedent(
     assert "郵局待打單（新版測試）" not in [tab.label for tab in app.tabs]
     assert "郵局待打單" not in [tab.label for tab in app.tabs]
     buttons = [item.label for item in app.button]
-    for label in ("選取全部", "清除全部", "開始製單", "重新讀取", "全部恢復預設資料"):
+    for label in ("選取全部", "清除全部", "開始製單", "重新讀取", "全部恢復預設資料", "檢查製單環境"):
         assert label in buttons, label
     assert not app.exception, app.exception
     assert pending_loader.call_count >= 1, pending_loader.call_count
@@ -107,8 +112,37 @@ APP_TEST_SCRIPT = textwrap.dedent(
         for item in app.checkbox
         if item.key and item.key.startswith("pending_v2_selected_")
     ] == [True, True]
+
+    pending_reads_before_probe = pending_loader.call_count
+    picking_reads_before_probe = picking_loader.call_count
+    next(button for button in app.button if button.label == "\u6aa2\u67e5\u88fd\u55ae\u74b0\u5883").click().run(timeout=30)
+    runtime_probe.assert_called_once_with()
+    assert any("\u53ef\u7528" in item.value for item in app.success), app.success
+    assert any("此檢查不送出訂單，也不修改試算表" in item.value for item in app.success)
+    assert pending_loader.call_count == pending_reads_before_probe
+    assert picking_loader.call_count == picking_reads_before_probe
+    assert writeback.call_count == 0
+    assert completion_read.call_count == 0
+    assert "bot.automation" not in sys.modules
     assert not app.exception, app.exception
-    assert not app.error, app.error
+
+    runtime_probe.side_effect = RuntimeError("PRIVATE_BROWSER_PATH /usr/bin/chromium")
+    next(button for button in app.button if button.label == "\u6aa2\u67e5\u88fd\u55ae\u74b0\u5883").click().run(timeout=30)
+    assert runtime_probe.call_count == 2
+    assert any("\u672a\u5c31\u7dd2" in item.value for item in app.error), app.error
+    assert any("此檢查不送出訂單，也不修改試算表" in item.value for item in app.error)
+    assert all(
+        all(forbidden not in item.value.lower() for forbidden in (
+            "private_browser_path", "/usr/bin/chromium", "runtimeerror", "linux", "chromium",
+        ))
+        for item in app.error
+    )
+    assert pending_loader.call_count == pending_reads_before_probe
+    assert picking_loader.call_count == picking_reads_before_probe
+    assert writeback.call_count == 0
+    assert completion_read.call_count == 0
+    assert "bot.automation" not in sys.modules
+    assert not app.exception, app.exception
     '''
 )
 

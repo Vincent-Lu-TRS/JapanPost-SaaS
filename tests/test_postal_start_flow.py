@@ -197,16 +197,17 @@ class PostalStartFlowTests(unittest.TestCase):
             app_source,
         )
 
-    def test_playwright_install_is_deferred_until_postal_job_start(self):
+    def test_browser_bootstrap_runs_inside_worker_before_final_sheet_preflight(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
         start_body = app_source[
             app_source.index("def _start_job("):app_source.index("# ══════════════════════════════════════════════════════\n# 頁面渲染函數")
         ]
 
-        self.assertLess(start_body.index("_JOB_REGISTRY.start"), start_body.index("_install_playwright()"))
-        self.assertLess(start_body.index("_install_playwright()"), start_body.index("from bot.automation import"))
-        self.assertNotIn("\n_install_playwright()\ninit_auth_state(_cm)", app_source)
+        self.assertLess(start_body.index("_JOB_REGISTRY.start"), start_body.index("runtime_handle = ensure_browser_runtime()"))
+        self.assertLess(start_body.index("runtime_handle = ensure_browser_runtime()"), start_body.index("read_completion_authority()"))
+        self.assertLess(start_body.index("runtime_handle = ensure_browser_runtime()"), start_body.index("from bot.automation import"))
+        self.assertNotIn("_install_playwright", app_source)
 
     def test_fx_rate_load_is_ready_before_pending_orders_exist(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -254,11 +255,15 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertNotIn('st.subheader("📄 執行日誌")', app_source)
         self.assertNotIn('st.text_area(\n                "執行日誌內容"', app_source)
 
-    def test_detailed_debug_log_is_only_rendered_for_failed_batches(self):
+    def test_detailed_debug_log_is_rendered_for_failed_batches_or_runtime_setup_failure(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            'if job and job.get("logs") and batch_summary["failure_alerts"]:',
+            "def _should_show_safe_diagnostic(job: dict | None, batch_summary: dict) -> bool:",
+            app_source,
+        )
+        self.assertIn(
+            "if _should_show_safe_diagnostic(job, batch_summary):",
             app_source,
         )
 
@@ -505,7 +510,7 @@ class PostalStartFlowTests(unittest.TestCase):
         ]
 
         blocker_gate = start_body.index("if preflight_blocked_results:")
-        automation_start = start_body.index("_install_playwright()")
+        automation_start = start_body.index("run_automation(")
         ready_assignment = start_body.index("rows_for_run = ready_rows")
         self.assertLess(blocker_gate, ready_assignment)
         self.assertLess(blocker_gate, automation_start)
