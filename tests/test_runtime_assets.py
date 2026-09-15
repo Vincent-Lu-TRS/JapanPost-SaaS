@@ -80,6 +80,44 @@ class RuntimeAssetBuilderTests(unittest.TestCase):
                 },
             )
 
+    def test_apt_uri_map_uses_apt_saved_filename_when_epoch_differs_from_url_basename(self):
+        from scripts.vendor_playwright_runtime import parse_apt_download_urls
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "apt-uris.txt"
+            url_name = "dmsetup_1.02.185-2_amd64.deb"
+            saved_name = "dmsetup_2%3a1.02.185-2_amd64.deb"
+            source.write_text(
+                f"'http://deb.debian.org/debian/pool/main/l/lvm2/{url_name}' {saved_name} 123 SHA256:abc\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                parse_apt_download_urls(source),
+                {
+                    saved_name: f"https://deb.debian.org/debian/pool/main/l/lvm2/{url_name}",
+                },
+            )
+
+    def test_apt_uri_map_uses_apt_saved_filename_when_uri_encodes_tilde(self):
+        from scripts.vendor_playwright_runtime import parse_apt_download_urls
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "apt-uris.txt"
+            url_name = "dbus-bin_1.14.10-1%7edeb12u1_amd64.deb"
+            saved_name = "dbus-bin_1.14.10-1~deb12u1_amd64.deb"
+            source.write_text(
+                f"'https://deb.debian.org/debian/pool/main/d/dbus/{url_name}' {saved_name} 123 SHA256:abc\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                parse_apt_download_urls(source),
+                {
+                    saved_name: f"https://deb.debian.org/debian/pool/main/d/dbus/{url_name}",
+                },
+            )
+
     def test_dpkg_control_fields_are_parsed_with_labels(self):
         from scripts.vendor_playwright_runtime import _parse_deb_package_metadata
 

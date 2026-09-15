@@ -162,17 +162,28 @@ def parse_apt_download_urls(uri_list: str | Path) -> dict[str, str]:
             fields = shlex.split(line)
         except ValueError as exc:
             raise ValueError("apt URI list is malformed") from exc
-        if not fields or ".deb" not in fields[0]:
+        if not fields or ".deb" not in fields[0].lower():
             continue
+        if len(fields) < 2:
+            raise ValueError("apt URI entry is missing its saved filename")
         parsed = urlsplit(fields[0])
         if parsed.scheme not in {"http", "https"} or parsed.hostname not in approved_hosts:
             raise ValueError("apt package URI uses an unapproved repository host")
         if parsed.username or parsed.password or parsed.fragment:
             raise ValueError("apt package URI contains unsupported components")
-        filename = Path(parsed.path).name
+        # apt prints both the package URI and the exact local filename it will
+        # save. Those names can differ: Debian epochs and URL-escaped tildes
+        # are normalized differently in the local filename. Key the map by
+        # apt's second field so it matches the downloaded file on disk.
+        filename = fields[1]
         decoded_filename = unquote(filename)
         if (
-            not filename.endswith(".deb")
+            not filename
+            or Path(filename).name != filename
+            or "/" in filename
+            or "\\" in filename
+            or "\x00" in filename
+            or not filename.lower().endswith(".deb")
             or not decoded_filename.endswith(".deb")
             or "/" in decoded_filename
             or "\\" in decoded_filename
