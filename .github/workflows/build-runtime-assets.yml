@@ -55,6 +55,15 @@ jobs:
               sha256sum /output/jppost-runtime-assets.tar.gz
             '
 
+      - name: Preserve resolver URI map if package bundling fails
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jppost-runtime-apt-uri-diagnostics
+          path: ${{ runner.temp }}/jppost-runtime-assets/apt-uris.txt
+          if-no-files-found: ignore
+          retention-days: 1
+
       - name: Upload verified bundle for the release candidate
         # actions/upload-artifact v4.6.2.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
