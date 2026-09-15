@@ -1,6 +1,6 @@
 # JPPOST 2026-09-15 — GPT-5.6 Luna Max Fast 接手點
 
-**最新狀態：本機候選實作與mock已完成；G1發布流程已獲使用者明確授權，正等待獨立審查、branch push後的Linux CI與正式站不製單Cloud smoke。G2真實製單、Sheets／Drive業務寫入及G3主機遷移仍關閉。**
+**最新狀態（2026-09-15）：候選版本已推送至 `codex/jppost-runtime-reliability-20260915`，PR #7 的 Linux CI 與真實 Chromium 冷啟動已通過；PR 等待 JapanPost-SaaS 域主覆核／合併。正式 Streamlit App 尚未更新，正式站不製單 smoke 尚未執行。沒有真實製單或 Google Sheets／Drive 業務寫入；G2/G3仍關閉。**
 
 ## 起始需求與目前授權
 
@@ -70,7 +70,7 @@
 - 全域治理AGENTS在本輪開始時已讀取；沒有改ACL或繞過。domain owner登錄仍未指定，故implementer不得自審自合main或繞過repository branch protection。
 - 修改仍只在隔離worktree及分支；目前尚未commit/push/merge、部署或reboot，沒有真實製單或Google Sheets／Drive業務寫入。使用者已授權繼續G1 branch/CI/no-order Cloud smoke；不得再詢問資料夾存取權。G2/G3仍關閉。
 
-## 最新接手動作（2026-09-15）
+## 先前待辦（已由下方PR與CI紀錄取代）
 
 1. 完成獨立審查；P0/P1先修正，再重跑完整458項本機測試。
 2. 審查乾淨後依核准檔案清單stage、commit並推送`codex/jppost-runtime-reliability-20260915`。不要stage `backups/`、session `tmp/`、secrets或舊受保護`vendor/playwright-runtime/`。
@@ -78,3 +78,13 @@
 4. CI通過後，唯讀確認正式站沒有活躍製單／回填；更新時記錄build／asset／Python／browser識別，透過「讀取診斷 → 製單環境檢查」執行真正Cloud blank-page probe（不登入郵局、不建立標籤、不寫Google Sheets／Drive）。冷啟動及warm probe都通過前不得宣稱線上恢復。
 5. 最近`TargetClosedError`位於runtime準備成功後的真正郵局browser啟動；目前只新增明確TargetClosed低資源重試mock，真Cloud結果仍未知。若Cloud probe可用但實際製單若再失敗，本輪沒有真訂單重試授權；先以安全診斷定位郵局browser，不得盲目提交。
 6. repository治理登錄的domain owner仍為「待使用者指定」，implementer不得自審自合main或繞過branch protection。可先推feature branch/PR完成CI及Cloud safe smoke；若合併流程需要owner approval，將其作為唯一治理閘門回報，不再重問存取權。
+
+## 最新發布候選紀錄（2026-09-15）
+
+- Worktree：`C:\Users\shaku\個人\Claude Cowork\jppost\tmp\JapanPost-SaaS-worktrees\codex-jppost-runtime-reliability-20260915`；branch `codex/jppost-runtime-reliability-20260915`；HEAD `a2f9fa1746b2d012453527fadc33156e329968df`。遠端 `main` 仍為基線 `5be34cd6f7372178be8f579447b3cc83a4f3a5e8`。
+- PR [#7 修復 Streamlit Cloud 製單瀏覽器啟動](https://github.com/Vincent-Lu-TRS/JapanPost-SaaS/pull/7) 已建立；狀態 OPEN、mergeable，尚無 review decision。不要將GitHub帳號管理權等同於登記域主覆核；不得自行合併或改正式App分支設定繞過此閘門。
+- Linux CI run `34941076703`（push）及 `34941299377`（PR）均成功；Bookworm runtime bundle builder `34941076696` 成功。PR CI輸出 `469 tests`、獨立 cold-start suite `3 tests`，且真 Chromium readiness輸出 `status=ready / stage=complete / error_code=none`，冷啟與warm probe均完成。
+- 本機 Windows Python 3.14：`python -X utf8 -m unittest discover -s tests` → 469 tests，OK，6 skipped（需Linux）。
+- 發布包為 147 個 SHA-256 驗證的 Debian 12 `.deb`，manifest SHA-256 `1d7dd656cfbe09d6f33424b3c1413a6a33b52b52fdb3224ffd60d0f8b2f3fdce`；執行期不再網路下載這批Linux系統套件。真實失敗點已定位並修正：套件包建置時需以apt列出的落盤檔名配對URI；執行期亦須同時收集 `/lib` 與 `/usr/lib` 下的Chromium元件。
+- `backups/`、`tmp/`、`docs/.../backups/`均為本次工作既有／新增之本機未追蹤資料，勿stage或刪除；舊受保護目錄 `vendor/playwright-runtime/` 未列舉、未修改、未stage。
+- 尚未完成：由登記域主覆核並合併PR、更新正式Streamlit Cloud App、讀取部署後安全診斷及不製單冷啟／warm smoke。發布前仍只做唯讀活躍job檢查，不得中斷正在執行的製單；部署後僅用不製單探針，無G2真實訂單授權。

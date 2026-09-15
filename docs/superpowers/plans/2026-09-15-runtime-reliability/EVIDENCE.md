@@ -1,6 +1,6 @@
 # JPPOST 2026-09-15 故障證據與判讀
 
-原始診斷快照：當時修復未實作、未部署、未執行真實製單。隔離實作後的最新狀態見第9節。時間均以日本時間顯示；原日誌為 UTC。
+原始診斷快照：當時修復未實作、未部署、未執行真實製單。後續實作、Linux冷啟驗證及PR狀態見第11節。時間均以日本時間顯示；原日誌為 UTC。
 
 ## 1. 基線與來源
 
@@ -112,7 +112,9 @@
 
 交付狀態：`LOCAL_TESTED / BLOCKED_WITH_EVIDENCE`；不是`READY_TO_DEPLOY`。G1/G2/G3仍關閉。
 
-## 10. 2026-09-15 發布候選更新（最新）
+## 10. 2026-09-15 發布候選更新（歷史快照；已由第11節更新）
+
+本節記錄的是分支推送前的狀態；其中「尚未commit/push」與「CI未實跑」等句子不是目前狀態，請以第11節為準。
 
 使用者後續明確授權不再停留本機，要求直接推進正式發布流程；包含隔離分支推送、Linux CI、正式站更新後的不製單健康檢查。不再因資料夾／資源存取權或發布授權重複詢問。本段取代第9節後半的舊狀態，但不擴大到真實Japan Post標籤、Google Sheets／Drive業務寫入或主機遷移。
 
@@ -125,4 +127,29 @@
 - 尚未完成：獨立差異審查、branch push、GitHub真Linux workflow、production OS／glibc指紋核對、Community Cloud cold/warm空白頁smoke。最近Cloud日誌的`TargetClosedError`發生於runtime準備成功後的郵局自動化啟動；目前新增的精簡模式 fallback尚未經真Cloud證明有效，因此不得先宣稱該錯誤已排除。
 - 部署前仍須唯讀確認沒有活躍製單／回填工作；不得藉reboot打斷現有job。G1的branch/CI/no-order smoke已獲使用者授權；G2真實業務驗收與G3主機遷移仍未授權。main域主尚未登記，實作者不得自審自合main或繞過repository branch protection。
 
-目前正確狀態：`LOCAL_TESTED / RELEASE_CANDIDATE_PENDING_LINUX_CI_AND_CLOUD_SMOKE`；不是「已部署」或「正式修復完成」。
+當時狀態：`LOCAL_TESTED / RELEASE_CANDIDATE_PENDING_LINUX_CI_AND_CLOUD_SMOKE`；不是「已部署」或「正式修復完成」。
+
+## 11. 2026-09-15 候選版雲端驗證與PR狀態（最新）
+
+### 修正後的實際根因
+
+第一個 Debian 12 bundle builder 雖能解出套件，但僅以下載網址尾端當本機檔名；apt 對含版本 epoch 或 URL 編碼符號的套件，網址名稱與實際保存名稱不同。現改用apt列出的第二欄保存名稱，並以兩個回歸測試覆蓋epoch與`~`案例。
+
+接著在固定Bookworm環境的真冷啟動中，完整套件雖已通過hash驗證，runtime仍缺6個Chromium必要共享元件。原因是Debian套件有些將元件放在`/lib/x86_64-linux-gnu`，舊解包器只從`/usr/lib/x86_64-linux-gnu`收集。現將兩種來源安全映射至隔離runtime目錄，並增加RED→GREEN測試。
+
+### 已完成的驗證
+
+- 候選HEAD：`a2f9fa1746b2d012453527fadc33156e329968df`；branch：`codex/jppost-runtime-reliability-20260915`；base及目前遠端`main`：`5be34cd6f7372178be8f579447b3cc83a4f3a5e8`。
+- Linux runtime builder run `34941076696`：SUCCESS。產出147個Debian 12 `.deb`，壓縮artifact為89,158,588 bytes；逐檔SHA256／大小／路徑均核驗相符，manifest SHA256=`1d7dd656cfbe09d6f33424b3c1413a6a33b52b52fdb3224ffd60d0f8b2f3fdce`。最大單檔低於25 MiB。
+- Candidate push CI run `34941076703`：SUCCESS。PR CI run `34941299377`：SUCCESS，完整suite `469 tests` 通過，另外重跑`test_runtime_cold_start.py`的3項測試；真Chromium readiness輸出`status=ready`、`stage=complete`、`error_code=none`，同次run亦完成cold與warm檢查。
+- 本機Windows Python 3.14：`python -X utf8 -m unittest discover -s tests` → 469 tests、OK、6 skipped（6項需Linux runtime/process能力）。新解包範圍在Python 3.12實際package資料上驗證147包後，所有`REQUIRED_RUNTIME_LIBRARY_NAMES`均存在。
+- `git diff --check`通過。以上未登入Japan Post、未建立標籤、未呼叫Google Sheets／Drive寫入。
+
+### 發布邊界
+
+- PR [#7 修復 Streamlit Cloud 製單瀏覽器啟動](https://github.com/Vincent-Lu-TRS/JapanPost-SaaS/pull/7) 為OPEN、mergeable；檢查已通過，尚無review decision。遠端`main`仍為原基線，Streamlit正式站未更新。
+- 全域registry目前將JapanPost-SaaS域主列為「待使用者指定」。依治理規則，實作者不得自行覆核合併`main`或以改Streamlit branch設定繞過。這是目前唯一合併閘門，不是缺少GitHub檔案存取權。
+- PR合併後才執行已獲授權的正式站不製單smoke。執行前唯讀確認沒有活躍製單／回填；冷啟及warm blank-page probe只檢查環境，不按開始製單、不寫Google Sheets／Drive。現在尚未做正式站Cloud smoke，所以不能稱「正式站已修復」或「已部署」。
+- G2真實郵便製單與Google業務資料寫入、G3另遷主機仍關閉。
+
+目前正確狀態：`CANDIDATE_CI_GREEN / PR_OPEN_WAITING_DOMAIN_OWNER_REVIEW`；已完成本機及固定Linux容器驗收，**未合併、未部署、正式站尚未smoke**。
