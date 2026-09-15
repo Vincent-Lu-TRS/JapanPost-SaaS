@@ -1,7 +1,9 @@
 import hashlib
+import io
 import json
 import os
 import socket
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +84,37 @@ class PlaywrightRuntimeTests(unittest.TestCase):
                 (library_dir / soname).write_bytes(f"verified:{soname}".encode())
 
         return extract
+
+    def test_extract_deb_includes_libraries_stored_under_legacy_lib_directory(self):
+        from bot.playwright_runtime import _extract_deb
+
+        library_name = "libfixture-runtime.so.1"
+        payload = b"fixture shared library"
+        archive_stream = io.BytesIO()
+        with tarfile.open(fileobj=archive_stream, mode="w:xz") as archive:
+            member = tarfile.TarInfo(f"./lib/x86_64-linux-gnu/{library_name}")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+
+        data_archive = archive_stream.getvalue()
+        ar_header = (
+            f"{'data.tar.xz/':<16}{'0':<12}{'0':<6}{'0':<6}"
+            f"{'100644':<8}{len(data_archive):<10}`\n"
+        ).encode("ascii")
+        deb_payload = b"!<arch>\n" + ar_header + data_archive
+        if len(data_archive) % 2:
+            deb_payload += b"\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_path = root / "fixture.deb"
+            destination = root / "runtime"
+            package_path.write_bytes(deb_payload)
+
+            _extract_deb(package_path, destination)
+
+            extracted = destination / "usr" / "lib" / "x86_64-linux-gnu" / library_name
+            self.assertEqual(extracted.read_bytes(), payload)
 
     def test_verified_bundled_assets_prepare_offline_and_reuse_valid_runtime(self):
         from bot.playwright_runtime import prepare_playwright_runtime

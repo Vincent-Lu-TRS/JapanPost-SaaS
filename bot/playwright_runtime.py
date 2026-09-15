@@ -409,16 +409,23 @@ def _extract_deb(package_path: Path, destination: Path, *, deadline: float | Non
         for member in archive:
             _check_deadline(deadline)
             normalized = _safe_tar_member_name(member.name)
-            if not normalized.startswith("usr/lib/x86_64-linux-gnu/"):
+            if normalized.startswith("usr/lib/x86_64-linux-gnu/"):
+                extracted_name = normalized
+            elif normalized.startswith("lib/x86_64-linux-gnu/"):
+                # Debian's merged-/usr packages may still store essential
+                # libraries under /lib. Keep the runtime self-contained by
+                # placing those files in the same private library directory.
+                extracted_name = f"usr/{normalized}"
+            else:
                 continue
-            target = (destination / normalized).resolve()
+            target = (destination / extracted_name).resolve()
             if not target.is_relative_to(destination_root):
                 raise RuntimeError("unsafe library path in Debian package")
             if member.issym() or member.islnk():
                 link_target = (target.parent / member.linkname).resolve()
                 if not link_target.is_relative_to(destination_root):
                     raise RuntimeError("unsafe library link in Debian package")
-            member.name = normalized
+            member.name = extracted_name
             archive.extract(member, path=destination)
             _check_deadline(deadline)
 
