@@ -2,6 +2,8 @@
 .streamlit/secrets.toml
 *.json
 !package.json
+!vendor/playwright-runtime-v1-linux-x86_64/manifest.json
+!bot/runtime_profile.json
 
 # Python
 __pycache__/

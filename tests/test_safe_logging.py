@@ -5,10 +5,52 @@ from safe_logging import (
     build_safe_automation_logger,
     redact_operational_log,
     safe_log_event,
+    log_runtime_failure,
+    log_runtime_environment,
 )
 
 
 class SafeLoggingTests(unittest.TestCase):
+    def test_browser_runtime_environment_log_contains_only_allowlisted_fingerprint(self):
+        logs = []
+        log_runtime_environment(
+            logs.append,
+            {
+                "system": "linux",
+                "os_id": "debian",
+                "os_version": "12",
+                "machine": "x86_64",
+                "python_major": 3,
+                "python_minor": 12,
+                "libc_name": "glibc",
+                "libc_version": "2.36",
+            },
+        )
+        self.assertEqual(
+            logs,
+            [
+                "browser_runtime_profile system=linux os_id=debian os_version=12 "
+                "machine=x86_64 python_minor=3.12 libc_name=glibc libc_version=2.36"
+            ],
+        )
+
+    def test_browser_runtime_environment_log_rejects_injected_or_unallowlisted_values(self):
+        fields = {
+            "system": "linux", "os_id": "debian", "os_version": "12",
+            "machine": "x86_64", "python_major": 3, "python_minor": 12,
+            "libc_name": "glibc", "libc_version": "2.36",
+        }
+        logs = []
+        bad = dict(fields)
+        bad["os_version"] = "12\norder=private"
+        with self.assertRaises(ValueError):
+            log_runtime_environment(logs.append, bad)
+        bad = dict(fields)
+        bad["HOME"] = "/private/path"
+        with self.assertRaises(ValueError):
+            log_runtime_environment(logs.append, bad)
+        self.assertEqual(logs, [])
+
     def test_safe_log_event_allows_only_aggregate_fields(self):
         logs = []
 
@@ -54,6 +96,91 @@ class SafeLoggingTests(unittest.TestCase):
             )
 
         self.assertEqual(logs, [])
+
+    def test_browser_runtime_log_records_only_safe_classification(self):
+        logs = []
+
+        safe_log_event(
+            logs.append,
+            "browser_runtime_failed",
+            stage="browser_install",
+            code="browser_download",
+            retryable=True,
+            attempts=2,
+            http_status=503,
+        )
+
+        self.assertEqual(
+            logs,
+            [
+                "browser_runtime_failed stage=browser_install code=browser_download "
+                "retryable=true attempts=2 http_status=503"
+            ],
+        )
+
+    def test_browser_runtime_log_rejects_raw_urls_and_order_data(self):
+        logs = []
+        with self.assertRaises(ValueError):
+            safe_log_event(
+                logs.append,
+                "browser_runtime_failed",
+                stage="browser_install",
+                code="https://example.invalid?token=secret",
+                retryable=True,
+            )
+        with self.assertRaises(ValueError):
+            safe_log_event(
+                logs.append,
+                "browser_runtime_failed",
+                stage="browser_install",
+                code="browser_download",
+                retryable=True,
+                order_id="im2041000",
+            )
+        self.assertEqual(logs, [])
+
+    def test_runtime_failure_helper_discards_unsafe_exception_details(self):
+        logs = []
+        error = RuntimeError("receiver@example.com im2041000 https://secret.invalid")
+        error.stage = "browser_install"
+        error.code = "browser_download"
+        error.retryable = True
+        error.attempts = 2
+        error.http_status = 503
+
+        log_runtime_failure(logs.append, error)
+
+        self.assertEqual(
+            logs,
+            [
+                "browser_runtime_failed stage=browser_install code=browser_download "
+                "retryable=true attempts=2 http_status=503"
+            ],
+        )
+
+    def test_runtime_failure_helper_preserves_runtime_fence_safety_codes(self):
+        for code in (
+            "bootstrap_protocol_error",
+            "subreaper_unavailable",
+            "operation_children_leaked",
+            "operation_cleanup_failed",
+        ):
+            with self.subTest(code=code):
+                logs = []
+                error = RuntimeError("private diagnostic details must not be logged")
+                error.stage = "bootstrap"
+                error.code = code
+                error.retryable = True
+
+                log_runtime_failure(logs.append, error)
+
+                self.assertEqual(
+                    logs,
+                    [
+                        "browser_runtime_failed stage=bootstrap "
+                        f"code={code} retryable=true attempts=0"
+                    ],
+                )
 
     def test_redact_operational_log_removes_order_receiver_tracking_and_pii(self):
         message = (

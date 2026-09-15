@@ -102,13 +102,15 @@ class AutomationHtmlTests(unittest.TestCase):
         chromium = FakeChromium()
         logs = []
         args = ["--no-sandbox"]
-        env = {"LD_LIBRARY_PATH": "/tmp/runtime"}
+        env = {"LD_LIBRARY_PATH": "/tmp/runtime", "PLAYWRIGHT_BROWSERS_PATH": "/wrong/parent/path"}
+        executable_path = "/tmp/ms-playwright/chromium-1234/chrome-linux/chrome"
 
         result = _launch_browser_with_fallback(
             chromium,
             headless=True,
             args=args,
             env=env,
+            executable_path=executable_path,
             log_cb=logs.append,
         )
 
@@ -120,6 +122,8 @@ class AutomationHtmlTests(unittest.TestCase):
         self.assertIn("--renderer-process-limit=1", chromium.calls[1]["args"])
         self.assertEqual(chromium.calls[0]["env"], env)
         self.assertEqual(chromium.calls[1]["env"], env)
+        self.assertEqual(chromium.calls[0]["executable_path"], executable_path)
+        self.assertEqual(chromium.calls[1]["executable_path"], executable_path)
         self.assertTrue(any("reason=browser_process_closed" in message for message in logs))
 
     def test_browser_launch_does_not_retry_non_closed_executable_error(self):
@@ -138,6 +142,27 @@ class AutomationHtmlTests(unittest.TestCase):
                 headless=True,
                 args=[],
                 env={},
+                executable_path="/tmp/ms-playwright/chromium-1234/chrome-linux/chrome",
+            )
+        self.assertEqual(chromium.calls, 1)
+
+    def test_browser_launch_does_not_retry_unknown_startup_error(self):
+        class FakeChromium:
+            def __init__(self):
+                self.calls = 0
+
+            def launch(self, **kwargs):
+                self.calls += 1
+                raise RuntimeError("unexpected startup failure; TargetClosedError was mentioned")
+
+        chromium = FakeChromium()
+        with self.assertRaisesRegex(RuntimeError, "unexpected startup failure"):
+            _launch_browser_with_fallback(
+                chromium,
+                headless=True,
+                args=[],
+                env={},
+                executable_path="/tmp/ms-playwright/chromium-1234/chrome-linux/chrome",
             )
         self.assertEqual(chromium.calls, 1)
 

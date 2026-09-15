@@ -1,0 +1,48 @@
+name: Runtime validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-runtime:
+    name: Linux x86_64 / Python 3.12 runtime validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      # The amd64 child-manifest digest was read from Docker Hub Registry v2
+      # for python:3.12.14-slim-bookworm on 2026-09-15. CI always pulls by
+      # immutable digest; the mutable tag is provenance only. Registry index:
+      # sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+      # amd64 image manifest: sha256:9c47360a2a0355e2da18516d0b1c2126ec22c195d2185e97347c9d98398c5bef
+      # Source: https://registry-1.docker.io/v2/library/python/manifests/3.12.14-slim-bookworm
+      JPPOST_RUNTIME_TEST_IMAGE: python:3.12.14-slim-bookworm@sha256:9c47360a2a0355e2da18516d0b1c2126ec22c195d2185e97347c9d98398c5bef
+    steps:
+      - name: Check out source
+        # v4.2.2 commit resolved from the official repository API on 2026-09-15:
+        # https://api.github.com/repos/actions/checkout/commits/v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Run the complete locked suite and real Chromium checks in the pinned container
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          docker pull --platform linux/amd64 "${JPPOST_RUNTIME_TEST_IMAGE}"
+          docker run --rm --platform linux/amd64 \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --workdir /workspace \
+            "${JPPOST_RUNTIME_TEST_IMAGE}" \
+            sh -euc '
+              python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r requirements.txt
+              python -m pip check
+              python -m unittest discover -s tests -v
+              python -m unittest discover -s tests -p "test_runtime_cold_start.py" -v
+              python scripts/check_browser_runtime.py
+            '

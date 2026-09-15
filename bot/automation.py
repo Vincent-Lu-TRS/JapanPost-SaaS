@@ -23,7 +23,8 @@ import pandas as pd
 
 from shipment_quantity import parse_shipment_quantity
 from safe_logging import build_safe_automation_logger
-from .playwright_runtime import prepare_playwright_runtime
+from .browser_bootstrap import RuntimeHandle
+from .browser_runtime import ensure_browser_runtime, load_runtime_profile
 
 AUTOMATION_BUILD_ID = "2026-09-09-browser-launch-fallback"
 
@@ -1177,11 +1178,19 @@ def _classify_browser_launch_error(error: BaseException) -> str:
     """Return a PII-free category for a browser startup failure."""
 
     text = " ".join(str(error or "").split()).lower()
+    exception_types = {base.__name__ for base in type(error).__mro__}
     if "shared librar" in text or "cannot open shared object file" in text:
         return "missing_runtime_library"
     if "executable doesn't exist" in text or "browser executable" in text:
         return "browser_executable_missing"
-    if "targetclosederror" in text or "target page, context or browser has been closed" in text:
+    if "TargetClosedError" in exception_types or any(
+        marker in text
+        for marker in (
+            "target page, context or browser has been closed",
+            "browser has been closed",
+            "browser process closed",
+        )
+    ):
         return "browser_process_closed"
     return "browser_launch_failed"
 
@@ -1190,7 +1199,7 @@ def _is_retryable_browser_launch_error(error: BaseException) -> bool:
     """Retry only failures that indicate the browser process closed at launch."""
 
     category = _classify_browser_launch_error(error)
-    return category in {"browser_process_closed", "browser_launch_failed"}
+    return category == "browser_process_closed"
 
 
 def _launch_browser_with_fallback(
@@ -1199,6 +1208,8 @@ def _launch_browser_with_fallback(
     headless: bool,
     args: list[str],
     env: dict[str, str],
+    executable_path: str,
+    fallback_args: tuple[str, ...] | list[str] | None = None,
     log_cb=None,
 ):
     """Launch Chromium once normally, then once in a low-resource mode.
@@ -1212,8 +1223,14 @@ def _launch_browser_with_fallback(
     """
 
     launch_args = list(args)
+    verified_executable_path = str(executable_path)
     try:
-        return chromium.launch(headless=headless, args=launch_args, env=env)
+        return chromium.launch(
+            headless=headless,
+            args=launch_args,
+            env=dict(env),
+            executable_path=verified_executable_path,
+        )
     except Exception as first_error:
         if not _is_retryable_browser_launch_error(first_error):
             raise
@@ -1225,12 +1242,17 @@ def _launch_browser_with_fallback(
                 f" reason={category}"
             )
 
-        fallback_args = list(launch_args)
-        for flag in _LOW_RESOURCE_BROWSER_FLAGS:
-            if flag not in fallback_args:
-                fallback_args.append(flag)
+        fallback_launch_args = list(launch_args)
+        for flag in fallback_args if fallback_args is not None else _LOW_RESOURCE_BROWSER_FLAGS:
+            if flag not in fallback_launch_args:
+                fallback_launch_args.append(flag)
         try:
-            return chromium.launch(headless=headless, args=fallback_args, env=env)
+            return chromium.launch(
+                headless=headless,
+                args=fallback_launch_args,
+                env=dict(env),
+                executable_path=verified_executable_path,
+            )
         except Exception as retry_error:
             if log_cb is not None:
                 log_cb(
@@ -1661,6 +1683,7 @@ def run_automation(
     status_cb=None,
     headless: bool = True,
     precomputed_hs_codes: dict[str, dict[str, str]] | None = None,
+    runtime_handle: RuntimeHandle | None = None,
 ) -> list[dict]:
     """
     執行日本郵政自動化打單。
@@ -1672,6 +1695,7 @@ def run_automation(
         status_cb : package-qualified 狀態事件回呼函數 (dict -> None)
         headless  : 是否以 headless 模式執行（生產環境固定 True）
         precomputed_hs_codes: 預先查好的 HS Code，避免重複呼叫 AI
+        runtime_handle: 已通過瀏覽器健康檢查的執行環境；CLI未提供時由本模組準備。
 
     Returns:
         結果清單；成功項目包含 tracking，失敗項目包含 status、reason_code、reason_text。
@@ -1721,8 +1745,6 @@ def run_automation(
     for _, row in rows.iterrows():
         _shipment_role(row)
 
-    from playwright.sync_api import sync_playwright
-
     results: list[dict] = []
     user, pwd = _get_jp_post_creds()
     pw_cookies = []
@@ -1741,36 +1763,29 @@ def run_automation(
         _log("❌ 未設定 JP_POST_USER / JP_POST_PASS，無法登入日本郵政")
         return results
 
-    runtime = prepare_playwright_runtime()
-    if not runtime.ok:
-        _log("❌ Chromium 執行環境準備失敗，已停止本批製單")
-        raise RuntimeError("Playwright runtime unavailable")
+    runtime_handle = ensure_browser_runtime(expected_handle=runtime_handle)
+    runtime_env = dict(runtime_handle.env)
+    browser_root = runtime_env.get("PLAYWRIGHT_BROWSERS_PATH")
+    if not browser_root:
+        raise RuntimeError("verified browser profile is missing")
+    # The Playwright driver reads this when it starts. Every job uses the same
+    # configured root; this is not switched between users or jobs.
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_root
+    profile = load_runtime_profile()
+    chromium_args = list(profile["launch_args"])
+    fallback_args = list(profile["fallback_args"])
+
+    from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        chromium_args = [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--no-zygote",          # 容器環境必加：停用 zygote fork，避免 seccomp 限制殺掉進程
-                "--disable-gpu",
-                "--disable-software-rasterizer",
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--mute-audio",
-                "--disable-features=site-per-process",
-                "--blink-settings=imagesEnabled=false",
-                "--disable-background-timer-throttling",
-                "--disable-hang-monitor",
-                "--disable-ipc-flooding-protection",
-            ]
-
         def launch_browser():
             return _launch_browser_with_fallback(
                 p.chromium,
                 headless=headless,
                 args=chromium_args,
-                env=runtime.env,
+                env=runtime_env,
+                executable_path=str(runtime_handle.executable_path),
+                fallback_args=fallback_args,
                 log_cb=_log,
             )
 

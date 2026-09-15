@@ -1,30 +1,38 @@
-"""User-space Linux runtime libraries required by Playwright Chromium.
+"""Verified user-space Linux libraries required by Playwright Chromium.
 
-Streamlit Community Cloud can temporarily fail before the app starts when its
-``packages.txt`` apt index is stale.  Chromium still needs a chain of shared
-libraries, so this module downloads hash-pinned Debian packages and extracts
-only their x86_64 library files into ``/tmp``.  No root permission or apt
-operation is required.
+Production startup reads the hash-pinned Debian packages shipped in the
+repository. It never fetches Debian URLs at runtime, and publishes extracted
+libraries only after the complete set passes checks.
 """
 
 from __future__ import annotations
 
 import ctypes
+import contextlib
 import hashlib
 import io
+import json
 import os
 import platform
+import shutil
 import tarfile
 import tempfile
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
-from urllib.request import Request, urlopen
 
 
 DEFAULT_RUNTIME_ROOT = Path(tempfile.gettempdir()) / "jppost-playwright-runtime"
+DEFAULT_ASSET_ROOT = (
+    Path(__file__).resolve().parent.parent
+    / "vendor"
+    / "playwright-runtime-v1-linux-x86_64"
+)
 MAX_PACKAGE_BYTES = 25 * 1024 * 1024
+MAX_MANIFEST_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,8 @@ class PlaywrightRuntimeResult:
     message: str = ""
     downloaded: bool = False
     reused: bool = False
+    error_code: str = ""
+    manifest_digest: str = ""
 
 
 _RUNTIME_LOCK = threading.Lock()
@@ -60,13 +70,46 @@ def _library_dir(runtime_root: Path) -> Path:
     return runtime_root / "usr" / "lib" / "x86_64-linux-gnu"
 
 
-def _vendor_libraries_ready(runtime_root: Path) -> bool:
-    marker = runtime_root / ".ready"
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("runtime preparation deadline exceeded")
+
+
+def _vendor_libraries_ready(
+    runtime_root: Path, *, manifest_digest: str, platform_fingerprint: str,
+    deadline: float | None = None,
+) -> bool:
+    _check_deadline(deadline)
+    marker = runtime_root / ".ready.json"
     try:
-        marker_matches = marker.read_text(encoding="utf-8").strip() == RUNTIME_VERSION
-    except (OSError, UnicodeError):
-        marker_matches = False
-    return marker_matches and _vendor_library_files_present(runtime_root)
+        metadata = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(metadata, dict):
+        return False
+    if (
+        metadata.get("format") != 1
+        or metadata.get("manifest_digest") != manifest_digest
+        or metadata.get("platform") != platform_fingerprint
+        or not isinstance(metadata.get("libraries"), dict)
+    ):
+        return False
+    library_dir = _library_dir(runtime_root)
+    hashes = metadata["libraries"]
+    if set(hashes) != set(REQUIRED_RUNTIME_LIBRARY_NAMES):
+        return False
+    try:
+        for name in REQUIRED_RUNTIME_LIBRARY_NAMES:
+            _check_deadline(deadline)
+            if not (library_dir / name).is_file():
+                return False
+            if _file_sha256(library_dir / name, deadline=deadline) != hashes[name]:
+                return False
+        return True
+    except TimeoutError:
+        raise
+    except OSError:
+        return False
 
 
 def _vendor_library_files_present(runtime_root: Path) -> bool:
@@ -79,44 +122,237 @@ def _prepend_library_path(lib_dir: Path, current: str) -> str:
     return prefix if not current else f"{prefix}{os.pathsep}{current}"
 
 
-def _file_sha256(path: Path) -> str:
+def _file_sha256(path: Path, *, deadline: float | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        while True:
+            _check_deadline(deadline)
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
+    _check_deadline(deadline)
     return digest.hexdigest()
 
 
-def _download_package(package: RuntimePackage, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(destination.name + ".part")
-    partial.unlink(missing_ok=True)
-    request = Request(
-        package.url,
-        headers={"User-Agent": "jppost-playwright-runtime/1"},
-    )
-    total = 0
-    digest = hashlib.sha256()
+class RuntimeAssetError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _load_verified_assets(
+    asset_root: Path,
+    *,
+    deadline: float | None = None,
+) -> tuple[str, tuple[tuple[RuntimePackage, Path], ...]]:
+    _check_deadline(deadline)
+    manifest_path = asset_root / "manifest.json"
     try:
-        with urlopen(request, timeout=120) as response, partial.open("wb") as stream:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_PACKAGE_BYTES:
-                    raise RuntimeError(f"{package.name} package exceeds size limit")
-                digest.update(chunk)
-                stream.write(chunk)
-        if digest.hexdigest().lower() != package.sha256.lower():
-            raise RuntimeError(f"{package.name} package checksum mismatch")
-        os.replace(partial, destination)
+        if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+            raise RuntimeAssetError("asset_manifest_invalid")
+        manifest_bytes = manifest_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise RuntimeAssetError("asset_missing") from exc
+    except OSError as exc:
+        raise RuntimeAssetError("asset_missing") from exc
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeAssetError("asset_manifest_invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("format") != 1
+        or manifest.get("platform") != "linux-x86_64"
+        or not isinstance(manifest.get("packages"), list)
+        or len(manifest["packages"]) != len(REQUIRED_RUNTIME_PACKAGES)
+    ):
+        raise RuntimeAssetError("asset_manifest_invalid")
+
+    verified: list[tuple[RuntimePackage, Path]] = []
+    for package, item in zip(REQUIRED_RUNTIME_PACKAGES, manifest["packages"]):
+        _check_deadline(deadline)
+        if not isinstance(item, dict):
+            raise RuntimeAssetError("asset_manifest_invalid")
+        if any(
+            item.get(key) != expected
+            for key, expected in (
+                ("name", package.name),
+                ("filename", package.filename),
+                ("url", package.url),
+                ("sha256", package.sha256),
+            )
+        ):
+            raise RuntimeAssetError("asset_manifest_invalid")
+        size = item.get("size")
+        if not isinstance(size, int) or size <= 0 or size > MAX_PACKAGE_BYTES:
+            raise RuntimeAssetError("asset_manifest_invalid")
+        package_path = asset_root / package.filename
+        try:
+            if package_path.is_symlink() or not package_path.is_file():
+                raise RuntimeAssetError("asset_missing")
+            if package_path.stat().st_size != size:
+                raise RuntimeAssetError("asset_checksum")
+            if _file_sha256(package_path, deadline=deadline).lower() != package.sha256.lower():
+                raise RuntimeAssetError("asset_checksum")
+        except TimeoutError:
+            raise
+        except FileNotFoundError as exc:
+            raise RuntimeAssetError("asset_missing") from exc
+        except OSError as exc:
+            raise RuntimeAssetError("asset_missing") from exc
+        verified.append((package, package_path))
+    return hashlib.sha256(manifest_bytes).hexdigest(), tuple(verified)
+
+
+def _platform_fingerprint(system: str, machine: str) -> str:
+    libc_name, libc_version = platform.libc_ver()
+    return f"{system.lower()}-{machine.lower()}-{libc_name.lower()}-{libc_version}"
+
+
+@contextlib.contextmanager
+def _runtime_file_lock(lock_path: Path, deadline: float):
+    """Acquire an OS-level extraction lock, honoring the caller's deadline."""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("runtime file lock deadline exceeded")
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                time.sleep(min(0.05, remaining))
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _library_hashes(runtime_root: Path, *, deadline: float | None = None) -> dict[str, str]:
+    library_dir = _library_dir(runtime_root)
+    hashes = {}
+    for name in REQUIRED_RUNTIME_LIBRARY_NAMES:
+        _check_deadline(deadline)
+        hashes[name] = _file_sha256(library_dir / name, deadline=deadline)
+    return hashes
+
+
+def _safe_remove_owned_directory(path: Path, runtime_root: Path, *, expected_prefix: str) -> None:
+    root = runtime_root.resolve()
+    if path.parent.resolve() != root or not path.name.startswith(expected_prefix):
+        raise RuntimeError("refusing to remove path outside runtime staging root")
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _publish_runtime(
+    *,
+    runtime_root: Path,
+    manifest_digest: str,
+    platform_fingerprint: str,
+    assets: tuple[tuple[RuntimePackage, Path], ...],
+    extractor: Callable[[Path, Path], None],
+    deadline: float,
+) -> bool:
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    final_dir = runtime_root / manifest_digest
+    if _vendor_libraries_ready(
+        final_dir,
+        manifest_digest=manifest_digest,
+        platform_fingerprint=platform_fingerprint,
+        deadline=deadline,
+    ):
+        return True
+
+    staging = Path(tempfile.mkdtemp(prefix=f"{manifest_digest}.staging-", dir=runtime_root))
+    stale: Path | None = None
+    try:
+        for package, package_path in assets:
+            _check_deadline(deadline)
+            if extractor is _extract_deb:
+                _extract_deb(package_path, staging, deadline=deadline)
+            else:
+                extractor(package_path, staging)
+        if not _vendor_library_files_present(staging):
+            raise RuntimeAssetError("asset_extract")
+        metadata = {
+            "format": 1,
+            "manifest_digest": manifest_digest,
+            "platform": platform_fingerprint,
+            "libraries": _library_hashes(staging, deadline=deadline),
+        }
+        marker = staging / ".ready.json"
+        with marker.open("xb") as stream:
+            stream.write(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        if not _vendor_libraries_ready(
+            staging,
+            manifest_digest=manifest_digest,
+            platform_fingerprint=platform_fingerprint,
+            deadline=deadline,
+        ):
+            raise RuntimeAssetError("asset_extract")
+
+        if final_dir.exists() or final_dir.is_symlink():
+            stale = runtime_root / f"{manifest_digest}.stale-{uuid.uuid4().hex}"
+            final_dir.rename(stale)
+        try:
+            staging.rename(final_dir)
+            staging = None  # type: ignore[assignment]
+        except Exception:
+            if stale is not None and stale.exists() and not final_dir.exists():
+                stale.rename(final_dir)
+                stale = None
+            raise
+        if stale is not None:
+            _safe_remove_owned_directory(stale, runtime_root, expected_prefix=f"{manifest_digest}.stale-")
+            stale = None
+        return False
     finally:
-        partial.unlink(missing_ok=True)
+        if staging is not None and staging.exists():
+            _safe_remove_owned_directory(
+                staging,
+                runtime_root,
+                expected_prefix=f"{manifest_digest}.staging-",
+            )
+        if stale is not None and stale.exists():
+            # A prior runtime was only moved aside if a fully validated stage
+            # was ready to take its place; preserve it if publication failed.
+            if not final_dir.exists():
+                stale.rename(final_dir)
 
 
 def _ar_data_member(package_path: Path) -> bytes:
-    raw = package_path.read_bytes()
+    return _ar_data_member_bytes(package_path.read_bytes())
+
+
+def _ar_data_member_bytes(raw: bytes) -> bytes:
     if not raw.startswith(b"!<arch>\n"):
         raise RuntimeError("invalid Debian package archive")
     offset = len(b"!<arch>\n")
@@ -147,14 +383,25 @@ def _safe_tar_member_name(name: str) -> str:
     return "/".join(parts)
 
 
-def _extract_deb(package_path: Path, destination: Path) -> None:
+def _extract_deb(package_path: Path, destination: Path, *, deadline: float | None = None) -> None:
     """Extract only x86_64 shared libraries from a .deb without root access."""
 
     destination.mkdir(parents=True, exist_ok=True)
-    data_archive = _ar_data_member(package_path)
+    _check_deadline(deadline)
+    raw_chunks = []
+    with package_path.open("rb") as stream:
+        while True:
+            _check_deadline(deadline)
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            raw_chunks.append(chunk)
+    package_bytes = b"".join(raw_chunks)
+    data_archive = _ar_data_member_bytes(package_bytes)
     destination_root = destination.resolve()
     with tarfile.open(fileobj=io.BytesIO(data_archive), mode="r:*") as archive:
-        for member in archive.getmembers():
+        for member in archive:
+            _check_deadline(deadline)
             normalized = _safe_tar_member_name(member.name)
             if not normalized.startswith("usr/lib/x86_64-linux-gnu/"):
                 continue
@@ -167,18 +414,24 @@ def _extract_deb(package_path: Path, destination: Path) -> None:
                     raise RuntimeError("unsafe library link in Debian package")
             member.name = normalized
             archive.extract(member, path=destination)
+            _check_deadline(deadline)
 
 
 def _runtime_failure(
     env: dict[str, str],
     lib_dir: Path,
     message: str,
+    *,
+    error_code: str,
+    manifest_digest: str = "",
 ) -> PlaywrightRuntimeResult:
     return PlaywrightRuntimeResult(
         ok=False,
         env=env,
         lib_dir=lib_dir,
         message=message,
+        error_code=error_code,
+        manifest_digest=manifest_digest,
     )
 
 
@@ -186,71 +439,165 @@ def prepare_playwright_runtime(
     *,
     env: Mapping[str, str] | None = None,
     runtime_root: Path | str | None = None,
+    asset_root: Path | str | None = None,
     platform_name: str | None = None,
     machine_name: str | None = None,
     library_checker: Callable[[str], bool] | None = None,
-    downloader: Callable[[RuntimePackage, Path], None] | None = None,
     extractor: Callable[[Path, Path], None] | None = None,
-    apply_to_process_env: bool = True,
+    apply_to_process_env: bool = False,
+    deadline: float | None = None,
 ) -> PlaywrightRuntimeResult:
-    """Prepare Chromium's Linux libraries and return the child-process env."""
+    """Verify bundled assets and prepare a child environment without apt/network."""
 
     child_env = dict(os.environ if env is None else env)
     system = (platform_name or platform.system()).lower()
     machine = (machine_name or platform.machine()).lower()
-    root = Path(runtime_root) if runtime_root is not None else DEFAULT_RUNTIME_ROOT
-    lib_dir = _library_dir(root)
+    runtime_base = Path(runtime_root) if runtime_root is not None else DEFAULT_RUNTIME_ROOT
+    asset_path = Path(asset_root) if asset_root is not None else DEFAULT_ASSET_ROOT
+    budget_deadline = deadline if deadline is not None else time.monotonic() + 120
+    try:
+        _check_deadline(budget_deadline)
+    except TimeoutError:
+        return _runtime_failure(
+            child_env,
+            _library_dir(runtime_base),
+            "runtime preparation deadline exceeded",
+            error_code="bootstrap_timeout",
+        )
 
     if system != "linux":
-        return PlaywrightRuntimeResult(True, child_env, lib_dir, "Linux libraries not required")
+        return PlaywrightRuntimeResult(True, child_env, _library_dir(runtime_base), "Linux libraries not required")
     if machine not in {"x86_64", "amd64"}:
-        return _runtime_failure(child_env, lib_dir, f"unsupported Linux architecture: {machine}")
+        return _runtime_failure(
+            child_env,
+            _library_dir(runtime_base),
+            "unsupported Linux architecture",
+            error_code="profile_unsupported",
+        )
+
+    try:
+        manifest_digest, assets = _load_verified_assets(asset_path, deadline=budget_deadline)
+    except RuntimeAssetError as exc:
+        public_message = {
+            "asset_missing": "runtime asset bundle is missing",
+            "asset_checksum": "runtime asset checksum validation failed",
+            "asset_manifest_invalid": "runtime asset manifest is invalid",
+        }.get(exc.code, "runtime assets could not be validated")
+        return _runtime_failure(
+            child_env,
+            _library_dir(runtime_base),
+            public_message,
+            error_code=exc.code,
+        )
+    except TimeoutError:
+        return _runtime_failure(
+            child_env,
+            _library_dir(runtime_base),
+            "runtime preparation deadline exceeded",
+            error_code="bootstrap_timeout",
+        )
+    except Exception:
+        return _runtime_failure(
+            child_env,
+            _library_dir(runtime_base),
+            "runtime assets could not be validated",
+            error_code="bootstrap_unknown",
+        )
 
     checker = library_checker or _library_available
-    if all(checker(name) for name in REQUIRED_RUNTIME_LIBRARY_NAMES):
-        return PlaywrightRuntimeResult(True, child_env, lib_dir, "system libraries available")
+    system_libraries_available = True
+    try:
+        for name in REQUIRED_RUNTIME_LIBRARY_NAMES:
+            _check_deadline(budget_deadline)
+            if not checker(name):
+                system_libraries_available = False
+                break
+    except TimeoutError:
+        return _runtime_failure(
+            child_env,
+            _library_dir(runtime_base),
+            "runtime preparation deadline exceeded",
+            error_code="bootstrap_timeout",
+            manifest_digest=manifest_digest,
+        )
+    if system_libraries_available:
+        return PlaywrightRuntimeResult(
+            True,
+            child_env,
+            _library_dir(runtime_base),
+            "system libraries available",
+            manifest_digest=manifest_digest,
+        )
 
-    active_downloader = downloader or _download_package
-    active_extractor = extractor or _extract_deb
-    was_downloaded = False
-    was_reused = False
-
-    with _RUNTIME_LOCK:
-        if _vendor_libraries_ready(root):
-            was_reused = True
-        else:
-            try:
-                root.mkdir(parents=True, exist_ok=True)
-                for package in REQUIRED_RUNTIME_PACKAGES:
-                    package_path = root / package.filename
-                    if downloader is None and (
-                        not package_path.is_file()
-                        or _file_sha256(package_path).lower() != package.sha256.lower()
-                    ):
-                        _download_package(package, package_path)
-                        was_downloaded = True
-                    elif downloader is not None:
-                        active_downloader(package, package_path)
-                        was_downloaded = True
-                    active_extractor(package_path, root)
-                if not _vendor_library_files_present(root):
-                    return _runtime_failure(
-                        child_env,
-                        lib_dir,
-                        "runtime libraries were not extracted completely",
-                    )
-                (root / ".ready").write_text(RUNTIME_VERSION, encoding="utf-8")
-            except Exception as exc:
-                return _runtime_failure(
-                    child_env,
-                    lib_dir,
-                    f"runtime library preparation failed: {type(exc).__name__}",
+    platform_fingerprint = _platform_fingerprint(system, machine)
+    digest_root = runtime_base / manifest_digest
+    reused = False
+    try:
+        remaining = budget_deadline - time.monotonic()
+        if remaining <= 0 or not _RUNTIME_LOCK.acquire(timeout=remaining):
+            raise TimeoutError("runtime process lock deadline exceeded")
+        try:
+            with _runtime_file_lock(runtime_base / ".runtime.lock", budget_deadline):
+                reused = _publish_runtime(
+                    runtime_root=runtime_base,
+                    manifest_digest=manifest_digest,
+                    platform_fingerprint=platform_fingerprint,
+                    assets=assets,
+                    extractor=extractor or _extract_deb,
+                    deadline=budget_deadline,
                 )
+        finally:
+            _RUNTIME_LOCK.release()
+    except TimeoutError:
+        return _runtime_failure(
+            child_env,
+            _library_dir(digest_root),
+            "runtime preparation deadline exceeded",
+            error_code="bootstrap_timeout",
+            manifest_digest=manifest_digest,
+        )
+    except RuntimeAssetError as exc:
+        return _runtime_failure(
+            child_env,
+            _library_dir(digest_root),
+            "runtime libraries could not be prepared",
+            error_code=exc.code,
+            manifest_digest=manifest_digest,
+        )
+    except Exception:
+        return _runtime_failure(
+            child_env,
+            _library_dir(digest_root),
+            "runtime libraries could not be prepared",
+            error_code="asset_extract",
+            manifest_digest=manifest_digest,
+        )
 
-    child_env["LD_LIBRARY_PATH"] = _prepend_library_path(
-        lib_dir,
-        child_env.get("LD_LIBRARY_PATH", ""),
-    )
+    lib_dir = _library_dir(digest_root)
+    try:
+        libraries_ready = _vendor_libraries_ready(
+            digest_root,
+            manifest_digest=manifest_digest,
+            platform_fingerprint=platform_fingerprint,
+            deadline=budget_deadline,
+        )
+    except TimeoutError:
+        return _runtime_failure(
+            child_env,
+            lib_dir,
+            "runtime preparation deadline exceeded",
+            error_code="bootstrap_timeout",
+            manifest_digest=manifest_digest,
+        )
+    if not libraries_ready:
+        return _runtime_failure(
+            child_env,
+            lib_dir,
+            "runtime libraries failed readiness validation",
+            error_code="asset_extract",
+            manifest_digest=manifest_digest,
+        )
+    child_env["LD_LIBRARY_PATH"] = _prepend_library_path(lib_dir, child_env.get("LD_LIBRARY_PATH", ""))
     if apply_to_process_env:
         os.environ["LD_LIBRARY_PATH"] = child_env["LD_LIBRARY_PATH"]
     return PlaywrightRuntimeResult(
@@ -258,8 +605,8 @@ def prepare_playwright_runtime(
         env=child_env,
         lib_dir=lib_dir,
         message="vendored runtime libraries ready",
-        downloaded=was_downloaded,
-        reused=was_reused,
+        reused=reused,
+        manifest_digest=manifest_digest,
     )
 
 
