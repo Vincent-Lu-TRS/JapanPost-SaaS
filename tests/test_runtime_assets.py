@@ -63,6 +63,22 @@ class RuntimeAssetBuilderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "repository host"):
                 parse_apt_download_urls(source)
 
+    def test_dpkg_control_fields_are_parsed_with_labels(self):
+        from scripts.vendor_playwright_runtime import _parse_deb_package_metadata
+
+        self.assertEqual(
+            _parse_deb_package_metadata("Package: adwaita-icon-theme\nArchitecture: all\n"),
+            ("adwaita-icon-theme", "all"),
+        )
+
+    def test_dpkg_control_fields_are_parsed_without_labels(self):
+        from scripts.vendor_playwright_runtime import _parse_deb_package_metadata
+
+        self.assertEqual(
+            _parse_deb_package_metadata("libcairo2\namd64\n"),
+            ("libcairo2", "amd64"),
+        )
+
     def test_builds_manifest_and_verified_asset_files(self):
         from scripts.vendor_playwright_runtime import build_asset_bundle
 

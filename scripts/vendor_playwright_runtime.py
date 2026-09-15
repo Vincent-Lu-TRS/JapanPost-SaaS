@@ -180,6 +180,34 @@ def parse_apt_download_urls(uri_list: str | Path) -> dict[str, str]:
     return urls
 
 
+def _parse_deb_package_metadata(output: str) -> tuple[str, str]:
+    """Read Package and Architecture fields from dpkg-deb output."""
+
+    fields: dict[str, str] = {}
+    positional: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            key, value = line.split(":", 1)
+            normalized_key = key.strip().lower()
+            if normalized_key in {"package", "architecture"}:
+                if normalized_key in fields or not value.strip():
+                    raise ValueError("runtime package control fields are invalid")
+                fields[normalized_key] = value.strip()
+            else:
+                raise ValueError("runtime package control fields are unexpected")
+        else:
+            positional.append(line)
+
+    if fields and not positional and set(fields) == {"package", "architecture"}:
+        return fields["package"], fields["architecture"]
+    if not fields and len(positional) == 2:
+        return positional[0], positional[1]
+    raise ValueError("runtime package control fields are invalid")
+
+
 def packages_from_deb_directory(source_dir: str | Path, uri_list: str | Path) -> tuple[object, ...]:
     """Discover package identity and checksums for an apt-downloaded .deb set."""
 
@@ -192,19 +220,20 @@ def packages_from_deb_directory(source_dir: str | Path, uri_list: str | Path) ->
         url = urls.get(package_path.name)
         if url is None:
             raise ValueError(f"missing apt source URL: {package_path.name}")
-        metadata = subprocess.run(
+        metadata_output = subprocess.run(
             ["dpkg-deb", "--field", str(package_path), "Package", "Architecture"],
             check=True,
             capture_output=True,
             text=True,
-        ).stdout.splitlines()
-        if len(metadata) != 2 or metadata[1] not in {"amd64", "all"}:
+        ).stdout
+        name, architecture = _parse_deb_package_metadata(metadata_output)
+        if not name or architecture not in {"amd64", "all"}:
             raise ValueError(f"runtime package architecture is unsupported: {package_path.name}")
         with package_path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         packages.append(
             SimpleNamespace(
-                name=metadata[0],
+                name=name,
                 filename=package_path.name,
                 url=url,
                 sha256=digest,
