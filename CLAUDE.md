@@ -216,21 +216,21 @@ python -m py_compile app.py pending_editor.py job_control.py
 python -m unittest discover -s tests
 ```
 
-Latest known verification for commit `a849f1c`:
+Historical verification snapshot (2026-06-20; commit `a849f1c`):
 
 - `python -m py_compile app.py pending_editor.py job_control.py` passed.
 - `python -m unittest discover -s tests` passed: 101 tests OK.
 - Remote visual/DOM check confirmed toolbar split rows, order-card rows, and PRC ID/PCCC fields after deploy.
 
-## Deployment Notes
+## Deployment Notes (2026-06-20 handoff snapshot)
 
 - Push to GitHub `main`; Streamlit Cloud auto-deploys from the repo.
 - Streamlit Cloud deployment can lag after push. Wait and refresh before assuming a UI change failed.
 - The in-app browser often points to production `https://jppost.streamlit.app/`; local test URL is usually `http://localhost:8502`.
 
-## Current Open UI Follow-ups
+## Open UI Follow-ups Recorded in 2026-06-20 Handoff
 
-The latest user direction before this handoff:
+The user direction recorded in that handoff:
 
 - Keep header divider spacing even tighter.
 - Toolbar must remain split:
