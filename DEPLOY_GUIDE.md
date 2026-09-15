@@ -1,5 +1,7 @@
 # 📮 JP Post SaaS 部署指南
 
+> **2026-09-15 更新：**本文件的 runtime 相依與發布驗收段落含歷史資訊；目前操作／故障排除／發布依據請改看 [JapanPost 操作手冊](docs/JAPANPOST_OPERATIONS_RUNBOOK.md)。現行 Debian native package bundle 已固定於 repo 並由程式驗證；Chromium 本體在冷 cache 時仍可能由 Playwright CDN 下載。勿依本文件舊流程把 Reboot 或真實運單／Drive／Sheets 寫入當成一般 smoke。
+
 ## 前置準備：Google Cloud Console 設定
 
 ### 1. 建立 OAuth 2.0 憑證

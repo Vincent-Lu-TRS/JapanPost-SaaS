@@ -1,6 +1,8 @@
 # CLAUDE.md - JP Post Label Maker Handoff
 
-Last updated: 2026-06-20 JST
+Last updated: 2026-09-15 JST
+
+> **Runtime／發布狀態提醒：**本檔下方的 current-worktree／commit 與舊部署步驟是歷史快照。當前已確認的 runtime、CI、Cloud 未驗證項目與安全發布方式請以 [JapanPost 操作手冊](docs/JAPANPOST_OPERATIONS_RUNBOOK.md) 為準；不得把舊 worktree HEAD 誤作正式站 commit。
 
 This is the first file to read when continuing work on the JP Post Streamlit app.
 
