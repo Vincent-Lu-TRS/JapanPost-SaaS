@@ -1,6 +1,8 @@
 # CLAUDE.md - JP Post Label Maker Handoff
 
-Last updated: 2026-06-20 JST
+Last updated: 2026-09-15 JST
+
+> **Runtime／發布狀態提醒：**本檔下方的 current-worktree／commit 與舊部署步驟是歷史快照。當前已確認的 runtime、CI、Cloud 未驗證項目與安全發布方式請以 [JapanPost 操作手冊](docs/JAPANPOST_OPERATIONS_RUNBOOK.md) 為準；不得把舊 worktree HEAD 誤作正式站 commit。
 
 This is the first file to read when continuing work on the JP Post Streamlit app.
 
@@ -19,15 +21,15 @@ Read next:
 2. `HANDOFF_CLAUDE.md` for older auth / automation context
 3. `SaaS_Requirements.md` if working in the original project folder
 
-## Current Source Of Truth
+## Historical Snapshot (2026-06-20; not the current production source of truth)
 
-The current active working tree used for the latest Streamlit Cloud updates is:
+At the time of this 2026-06-20 handoff, the active working tree used for Streamlit Cloud updates was:
 
 ```text
 C:\Users\shaku\AppData\Local\Temp\jppost-remote-fix
 ```
 
-Latest confirmed commit at this handoff:
+Commit confirmed at the time of this handoff:
 
 ```text
 a849f1c feat: split command rows and recipient IDs
@@ -43,7 +45,7 @@ Important files:
 - `bot/` - Japan Post, Sheets, Gemini, Drive automation logic.
 - `tests/` - unit tests.
 
-## Latest UI Direction
+## Historical UI Direction Snapshot (2026-06-20; not revalidated)
 
 Do not continue trying to force custom text blocks and Streamlit native widgets into one perfectly aligned single row. Streamlit inputs/selectboxes/buttons have different box models and rerun-generated wrappers, so repeated CSS alignment patches caused visual drift, clipping, and fragile selectors.
 
@@ -53,11 +55,11 @@ Use type-homogeneous rows instead:
 - Operation rows: Streamlit widgets only.
 - Tables: compact dark table style, with minimal CSS assistance.
 
-Current intended page structure:
+Page structure recorded in this snapshot:
 
 - Compact header:
   - Left: `JP Post 製單系統`
-  - Right: current user and `登出`
+  - Right: signed-in user and `登出`
   - Keep the divider, but keep top/bottom spacing tight. This is an operations tool, not a hero page.
 - Pending toolbar, split into two rows:
   - Info row: `待打單預覽`, `USD/JPY 161.20｜26/06/20`, `待製單 7`, `本次完成 0`
@@ -67,7 +69,7 @@ Current intended page structure:
   - Operation row: `Name [Fabian Kohlhaas]`, `TransType [國際小包]`, optional `PRC ID` / `PCCC`, `恢復預設`
   - Item table: `Content`, `Description`, `HSCode`, `Value`, `Quantity`
 
-Current copy:
+Copy recorded in this snapshot:
 
 - App title: `JP Post 製單系統`
 - Section title: `待打單預覽`
@@ -95,7 +97,7 @@ The user explicitly accepted the short reset wording.
 
 Do not change backend APIs, GAS logic, request payload field names, or core automation flow unless the user explicitly asks.
 
-Current editable pending-order requirements:
+Editable pending-order requirements recorded in this snapshot:
 
 - `Name` is editable and stored in `st.session_state`.
 - Streamlit rerun must not overwrite edited `Name`, `PRC ID`, or `PCCC`.
@@ -214,21 +216,21 @@ python -m py_compile app.py pending_editor.py job_control.py
 python -m unittest discover -s tests
 ```
 
-Latest known verification for commit `a849f1c`:
+Historical verification snapshot (2026-06-20; commit `a849f1c`):
 
 - `python -m py_compile app.py pending_editor.py job_control.py` passed.
 - `python -m unittest discover -s tests` passed: 101 tests OK.
 - Remote visual/DOM check confirmed toolbar split rows, order-card rows, and PRC ID/PCCC fields after deploy.
 
-## Deployment Notes
+## Deployment Notes (2026-06-20 handoff snapshot)
 
 - Push to GitHub `main`; Streamlit Cloud auto-deploys from the repo.
 - Streamlit Cloud deployment can lag after push. Wait and refresh before assuming a UI change failed.
 - The in-app browser often points to production `https://jppost.streamlit.app/`; local test URL is usually `http://localhost:8502`.
 
-## Current Open UI Follow-ups
+## Open UI Follow-ups Recorded in 2026-06-20 Handoff
 
-The latest user direction before this handoff:
+The user direction recorded in that handoff:
 
 - Keep header divider spacing even tighter.
 - Toolbar must remain split:
