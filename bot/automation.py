@@ -26,12 +26,13 @@ from safe_logging import build_safe_automation_logger
 from .browser_bootstrap import RuntimeHandle
 from .browser_runtime import ensure_browser_runtime, load_runtime_profile
 
-AUTOMATION_BUILD_ID = "2026-09-09-browser-launch-fallback"
+AUTOMATION_BUILD_ID = "2026-09-17-thai-address-translation"
 
 from .drive import DRIVE_FOLDER_ID, upload_file_to_drive, upload_pdf
 from .gemini_helper import predict_hs_code
 from .countries import resolve_country_code
 from .hs_codes import normalize_hs_code, prepare_hs_codes_for_items, required_hs_code_length
+from .thai_address import translate_thai_address
 
 # ── 日本郵政登入憑證 ────────────────────────────────────
 def _get_jp_post_creds() -> tuple[str, str]:
@@ -467,17 +468,24 @@ def _prepare_addr_to_bean_recipient_fields(row) -> dict[str, str]:
     name_val = _row_val(row, ["Shipping Name", "Shipping Name_1"])
     address_line = _row_val(row, ["Shipping Street", "收件地址"])
     city = _row_val(row, ["Shipping City", "城市"])
-    postal_code = _row_val(row, ["Shipping Zip", "Shipping Postal Code", "郵遞區號", "郵便番号"])
-    address_line = _select_bilingual_english_address_segment(
-        address_line,
-        city,
-        postal_code,
+    postal_code = _row_val(
+        row,
+        ["Shipping Zip", "Shipping Postal Code", "郵遞區號", "郵便番号"],
+    )
+    address_line = translate_thai_address(
+        _select_bilingual_english_address_segment(address_line, city, postal_code)
+    )
+    city = translate_thai_address(city)
+    province = translate_thai_address(
+        _row_val(row, ["收件人洲/省", "State", "Shipping Province Name", "Province"])
     )
     clean_name, recipient_id = _split_recipient_name_and_id(name_val)
     clean_name = _select_preferred_recipient_name(clean_name)
     return {
         "name": clean_name,
         "address_line": _append_recipient_id_to_address(address_line, recipient_id),
+        "city": city,
+        "province": province,
         "recipient_id": recipient_id,
     }
 
@@ -2351,7 +2359,7 @@ def run_automation(
                 f"final_width={_japan_post_text_width(final_name)}, "
                 f"thai_codepoints={sum(0x0E00 <= ord(char) <= 0x0E7F for char in raw_name)}"
             )
-            city = _get_excel_val(row, ["Shipping City", "城市"])
+            city = recipient_fields["city"]
             address_diagnostics = _diagnose_address_payload(
                 recipient_fields["address_line"],
                 city,
@@ -2398,7 +2406,7 @@ def run_automation(
                 "addrToBean.add1": address_lines["addrToBean.add1"],
                 "addrToBean.add2": address_lines["addrToBean.add2"],
                 "addrToBean.add3": address_lines["addrToBean.add3"],
-                "addrToBean.pref": _get_excel_val(row, ["收件人洲/省", "State"]),
+                "addrToBean.pref": recipient_fields["province"],
                 "addrToBean.postal": _get_excel_val(row, ["Shipping Zip", "郵遞區號"]),
                 "addrToBean.tel": _get_excel_val(row, ["Shipping Phone", "電話"]),
             })
