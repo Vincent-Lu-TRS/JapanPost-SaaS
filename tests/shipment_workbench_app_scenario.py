@@ -45,6 +45,11 @@ class WorkbenchAppTests(unittest.TestCase):
         self.assertEqual(app.button(key='test_execute').label, '送出拆單製單')
         self.assertEqual(list(app.dataframe[0].value.columns), ['包裹','方式','申告 USD','內容物'])
         self.assertTrue(any('計畫 ' in x.value for x in app.caption))
+        result=[{'order_id':'imy2099999','tracking':'split-one','status':'completed','drive_file_id':'split_pdf'}]
+        with patch('bot.shipment_service.execute_plan',return_value=result):
+            app.button(key='test_execute').click().run()
+        self.assertTrue(any('imy2099999｜split-one｜completed' in x.value for x in app.markdown))
+        self.assertTrue(any(x.label=='開啟既有 PDF（重印，不製單）' for x in app.get('link_button')))
 
 
     def test_anonymous_cannot_query_history(self):
@@ -148,8 +153,8 @@ class WorkbenchAppTests(unittest.TestCase):
             app.button(key='resume_saved').click().run()
             app.run()
             self.assertEqual(app.session_state['reissue_results'], result)
-            self.assertTrue(any('new-one' in x.value for x in app.markdown))
-            self.assertTrue(any(x.proto.url.endswith('/pdf1/view') for x in app.get('link_button')))
+            self.assertTrue(any('補單製作完成' in x.value for x in app.success))
+            self.assertTrue(any(x.label == '開啟本次補單' and x.proto.url.endswith('/pdf1/view') for x in app.get('link_button')))
 
 
     def test_resume_immediately_replaces_planned_with_unknown_and_keeps_safe_error(self):
@@ -182,15 +187,15 @@ class WorkbenchAppTests(unittest.TestCase):
                 app.button(key='resume_saved').click().run()
                 self.assertFalse(app.exception)
                 self.assertFalse(any(x.key == 'resume_saved' for x in app.button))
-                self.assertTrue(any('new-one' in x.value for x in app.markdown))
-                self.assertTrue(any(x.proto.url.endswith('/pdf1/view') for x in app.get('link_button')))
+                self.assertTrue(any('補單製作完成' in x.value for x in app.success))
+                self.assertTrue(any(x.label == '開啟本次補單' and x.proto.url.endswith('/pdf1/view') for x in app.get('link_button')))
                 if isinstance(refreshed, Exception):
                     self.assertNotIn('reissue_history', app.session_state)
                     self.assertNotIn('reissue_reviewed_plan', app.session_state)
                     self.assertTrue(any('重新查詢原訂單' in x.value for x in app.warning))
                     app.run()
                     self.assertTrue(any('重新查詢原訂單' in x.value for x in app.warning))
-                    self.assertTrue(any('new-one' in x.value for x in app.markdown))
+                    self.assertTrue(any('補單製作完成' in x.value for x in app.success))
                 self.assertEqual(lookup.call_count, 2)
                 execute.assert_called_once()
 
@@ -433,12 +438,14 @@ class WorkbenchAppTests(unittest.TestCase):
             app.button(key='reissue_execute').click().run()
             execute.assert_not_called()
             self.assertEqual(app.session_state['reissue_intent']['stage'],'waiting')
+            self.assertTrue(any('reissue-busy-guard' in x.value for x in app.markdown))
             app.run()  # Full rerenders, including editor callbacks, are not browser acknowledgments.
             execute.assert_not_called()
             intent=dict(app.session_state['reissue_intent']); intent['stage']='ready'; app.session_state['reissue_intent']=intent
             self.run_editor_event(app,{'0':{'Value':'21.00'}})
             execute.assert_called_once()
             self.assertEqual(execute.call_args.args[0]['shipments'][0]['total_usd'],'42.00')
+            self.assertFalse(any('class="running-guard-overlay reissue-busy-guard"' in x.value for x in app.markdown))
             self.assertTrue(app.button(key='reissue_execute').disabled)
 
     def test_submission_error_remains_visible_on_every_rerender(self):
@@ -509,3 +516,57 @@ class WorkbenchAppTests(unittest.TestCase):
             app.run()
             self.assertEqual(app.session_state['reissue_submission'],frozen)
             execute.assert_called_once()
+
+    def test_reissue_results_are_in_action_panel_and_keep_original_and_new_pdf_distinct(self):
+        self.pdf.return_value={'EL000000001JP':'https://drive.google.com/file/d/original/view'}
+        results=[{'order_id':'imy2099999','tracking':'new-one','status':'completed','drive_file_id':'pdf1'}]
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=results):
+            app=self.queried();self.submit(app)
+            self.assertEqual(app.session_state['reissue_results'],results)
+            self.assertFalse(any('imy2099999｜new-one｜completed' in x.value for x in app.markdown))
+            self.assertFalse(any(x.label=='開啟既有 PDF（重印，不製單）' for x in app.get('link_button')))
+            right=next(c for c in app.columns if any(x.key=='reissue_execute' for x in c.button))
+            self.assertTrue(any('補單製作完成' in x.value for x in right.success))
+            self.assertEqual({x.label for x in right.get('link_button')},{'開啟原運單','開啟本次補單'})
+
+    def test_reissue_partial_results_keep_tracking_and_package_pdf_without_machine_status(self):
+        results=[{'order_id':'imy2099999','tracking':'new-one','status':'completed','drive_file_id':'pdf1'},
+                 {'order_id':'imy2099999','tracking':'new-two','status':'backfill_failed','drive_file_id':'pdf2'}]
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=results):
+            app=self.queried();self.submit(app)
+            self.assertTrue(any('回填' in x.value for x in app.warning))
+            self.assertTrue(any('new-two' in x.value for x in app.caption))
+            self.assertFalse(any('backfill_failed' in x.value for x in app.markdown))
+            self.assertEqual({x.label for x in app.get('link_button')},{'開啟本次補單（包裹 1）','開啟本次補單（包裹 2）'})
+            self.assertFalse(any('class="running-guard-overlay reissue-busy-guard"' in x.value for x in app.markdown))
+
+    def test_resume_preserves_native_tab_container_identity_without_root_slot(self):
+        def tab_paths(block, path=()):
+            paths=[]
+            for index,child in block.children.items():
+                location=path+(index,)
+                if getattr(child,'type','')=='tab_container':paths.append(location)
+                if hasattr(child,'children'):paths.extend(tab_paths(child,location))
+            return paths
+        record={'plan':{'plan_id':'FAKEPLAN','order_id':'imy2099999'},
+                'shipments':[{'shipment_id':'s1','status':'uploaded','tracking':'new-one'}]}
+        result=[{'order_id':'imy2099999','tracking':'new-one','status':'completed','drive_file_id':'pdf1'}]
+        body="tabs=st.tabs(['first','補製單']);\nwith tabs[1]: render_reissue_tab()"
+        for outcome in (result,RuntimeError('fake unknown')):
+            refreshed=self.history()
+            if isinstance(outcome,Exception):
+                unknown={'plan':record['plan'],'shipments':[{'shipment_id':'s1','status':'unknown','tracking':'new-one'}]}
+                refreshed=self.history(unfinished=[unknown])
+            with self.subTest(outcome=type(outcome).__name__),patch('bot.shipment_service.lookup_history',side_effect=[self.history(unfinished=[record]),refreshed]),patch('bot.shipment_service.execute_plan',side_effect=outcome if isinstance(outcome,Exception) else None,return_value=outcome) as execute:
+                app=self.queried(body)
+                before=tab_paths(app._tree.main)
+                self.assertEqual(before,[(0,)])
+                app.button(key='resume_FAKEPLAN').click().run()
+                self.assertFalse(app.exception)
+                self.assertEqual(tab_paths(app._tree.main),before)
+                # Callback updates arrive before the page deltas; UI order is
+                # determined by their native child addresses, not dict insertion.
+                tabs=app._tree.main.children[0]
+                self.assertEqual([child.label for _,child in sorted(tabs.children.items())],['first','補製單'])
+                self.assertFalse(any('class="running-guard-overlay reissue-busy-guard"' in x.value for x in app.markdown))
+                execute.assert_called_once()

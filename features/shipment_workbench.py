@@ -13,6 +13,7 @@ from pending_editor import (SHIPPING_COL, SHIPPING_OPTIONS, apply_pending_order_
                             country_kind, parse_shipping_name)
 from postal_ui_v2 import build_v2_item_display_frame, restore_v2_item_frame
 from shipment_plans import ORDER, build_plan, digest, plan_frame, source_items, utc_now
+from .shipment_busy_ui import render_running_guard
 
 
 def verified_email():
@@ -48,6 +49,30 @@ def _show_results(results):
         file_id = result.get('drive_file_id', '')
         if re.fullmatch(r'[A-Za-z0-9_-]+', file_id):
             st.link_button('開啟既有 PDF（重印，不製單）', f'https://drive.google.com/file/d/{file_id}/view')
+
+
+def _show_reissue_results(results):
+    if not results:
+        return
+    statuses = {result.get('status', '') for result in results}
+    if statuses == {'completed'}:
+        st.success('補單製作完成。再次補製請重新查詢訂單。')
+    elif statuses & {'issuing', 'unknown', 'label_created'}:
+        st.warning('運單結果需要人工核對，請勿重新製單。')
+    else:
+        st.warning('補單尚有未完成的回填，請恢復原計畫；不要重新製單。')
+    for index, result in enumerate(results, 1):
+        if result.get('status') != 'completed' and result.get('tracking'):
+            st.caption('追蹤號碼：' + str(result['tracking']))
+        file_id = result.get('drive_file_id', '')
+        if re.fullmatch(r'[A-Za-z0-9_-]+', file_id):
+            label = '開啟本次補單' if len(results) == 1 else f'開啟本次補單（包裹 {index}）'
+            st.link_button(label, f'https://drive.google.com/file/d/{file_id}/view')
+
+
+def _render_reissue_busy(guard, order_id, stage):
+    render_running_guard(guard, title='補單製作中', active_order=order_id,
+                         active_stage=stage, block_background=True)
 
 
 def _execute(plan, *, key, baseline=None, confirmed=False, disabled=False, compact=False):
@@ -405,7 +430,13 @@ def _accept_reissue_commit_ack(actor, nonce, token, *, context=None):
 def _render_reissue_commit_fence(intent):
     actor, nonce, token = intent['actor'], intent['nonce'], intent['token']
     def commit_tick():
+        current = st.session_state.get('reissue_intent', {})
+        if (current.get('token') != token or current.get('nonce') != nonce
+                or verified_email() != actor or st.session_state.get('reissue_nonce') != nonce):
+            st.rerun(scope='app')
         if _accept_reissue_commit_ack(actor, nonce, token):
+            st.rerun(scope='app')
+        if st.session_state.get('reissue_intent', {}).get('stage') == 'failed':
             st.rerun(scope='app')
         if st.session_state.get('reissue_submission_error'):
             st.error(st.session_state['reissue_submission_error'])
@@ -415,7 +446,7 @@ def _render_reissue_commit_fence(intent):
     st.fragment(run_every=REISSUE_COMMIT_FENCE_SECONDS)(commit_tick)()
 
 
-def _submit_reissue(plan, history, actor):
+def _submit_reissue(plan, history, actor, *, guard=None):
     current_actor = verified_email()
     if not current_actor or current_actor != actor or st.session_state.get('reissue_query_actor') != current_actor:
         st.error('登入狀態已變更，請重新登入並查詢原訂單。')
@@ -425,6 +456,8 @@ def _submit_reissue(plan, history, actor):
     submission = {'plan':copy.deepcopy(plan), 'baseline':copy.deepcopy(history['tracking_baseline']),
                   'verified_actor':current_actor}
     st.session_state['reissue_submission'] = submission
+    guard = guard if guard is not None else st.empty()
+    _render_reissue_busy(guard, plan['order_id'], '製作運單與回填資料')
     try:
         from bot.shipment_service import execute_plan
         with st.spinner('正在製作補單；中斷後請以原計畫恢復。'):
@@ -437,7 +470,10 @@ def _submit_reissue(plan, history, actor):
         code = getattr(error, 'reason_code', 'shipment_safety_unavailable')
         st.session_state['reissue_submission_error'] = f'工作已停止，請以原計畫恢復或交管理員核對。計畫 {plan["plan_id"]}｜{code}'
     finally:
-        _refresh_reissue_history(plan['order_id'])
+        try:
+            _refresh_reissue_history(plan['order_id'])
+        finally:
+            guard.empty()
 
 
 def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
@@ -445,6 +481,7 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
     if not email:
         st.caption('請先登入授權帳號')
         return
+    guard = st.empty()
     st.markdown(REISSUE_CARD_CSS, unsafe_allow_html=True)
     with st.container(key='reissue_query_bar', width=440):
         query = st.columns([4, 1], gap='small', vertical_alignment='center')
@@ -483,8 +520,12 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
         st.warning('登入狀態已變更，請重新查詢原訂單。')
         return
     if not history or order.strip() != history['order_id']:
-        _show_results([r for r in st.session_state.get('reissue_results', [])
-                       if r['order_id'] == order.strip()])
+        results = [r for r in st.session_state.get('reissue_results', []) if r['order_id'] == order.strip()]
+        if results:
+            with st.columns([3.05, 1.2], gap='medium', vertical_alignment='top')[1]:
+                with st.container(border=True, key='reissue_actions'):
+                    st.markdown('<div class="postal-v2-panel-heading"><strong>補單操作</strong></div>', unsafe_allow_html=True)
+                    _show_reissue_results(results)
         return
     with st.container(key='reissue_workbench'):
         left_panel, right_panel = st.columns([3.05, 1.2], gap='medium', vertical_alignment='top')
@@ -540,6 +581,7 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
                                 'created_at':time.monotonic(), 'stage':'waiting'}
                             st.rerun()
                     if intent and intent.get('stage') == 'waiting':
+                        _render_reissue_busy(guard, history['order_id'], '同步最後編輯內容')
                         st.caption('正在同步最後編輯內容…')
                         _render_reissue_commit_fence(intent)
                     elif intent and intent.get('stage') == 'ready' and not submission:
@@ -552,23 +594,22 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
                                 st.session_state['reissue_submission_error'] = str(error)
                                 st.session_state.pop('reissue_intent', None)
                             else:
-                                _submit_reissue(plan, history, email)
+                                _submit_reissue(plan, history, email, guard=guard)
                             st.rerun()
                         else:
                             intent['stage'] = 'failed'
                             st.session_state['reissue_submission_error'] = '編輯同步確認已失效，未送出製單；請重新查詢原訂單。'
                             st.rerun()
-                    if st.session_state.get('reissue_submission'):
-                        st.caption('本次補製已送出；請查看結果或恢復原計畫。再次補製請重新查詢訂單。')
                 # Execution can create an unfinished record even when the initial
                 # query had none. Use the explicit post-operation refresh now.
                 history = st.session_state.get('reissue_history')
                 if history:
-                    _render_resume(history, email, disabled=disabled)
-    _show_results(st.session_state.get('reissue_results', []))
+                    _render_resume(history, email, disabled=disabled, guard=guard)
+                _show_reissue_results([r for r in st.session_state.get('reissue_results', [])
+                                       if r['order_id'] == order.strip()])
 
 
-def _render_resume(history, email, *, disabled=False):
+def _render_resume(history, email, *, disabled=False, guard=None):
     if not verified_email() or not history.get('unfinished_records'):
         return
     with st.expander('未完成計畫／恢復'):
@@ -582,10 +623,10 @@ def _render_resume(history, email, *, disabled=False):
                 st.warning('此計畫需管理員核對郵政結果或恢復 PDF，禁止再次製單。')
             st.button('恢復原計畫（已製單者只回填）', key='resume_' + plan['plan_id'],
                       disabled=disabled or unknown, on_click=_resume_plan,
-                      args=(copy.deepcopy(plan), email))
+                      args=(copy.deepcopy(plan), email), kwargs={'guard':guard})
 
 
-def _resume_plan(plan, email):
+def _resume_plan(plan, email, *, guard=None):
     # Widget callbacks run before the page is drawn, so status, actions and
     # results all use the refreshed ledger snapshot in the same interaction.
     current_email = verified_email()
@@ -596,6 +637,8 @@ def _resume_plan(plan, email):
         return
     st.session_state.pop('reissue_resume_error', None)
     st.session_state.pop('reissue_resume_warning', None)
+    guard = guard if guard is not None else st.empty()
+    _render_reissue_busy(guard, plan['order_id'], '恢復原計畫與回填資料')
     try:
         from bot.shipment_service import execute_plan
         st.session_state['reissue_results'] = execute_plan(copy.deepcopy(plan), requested_by=current_email)
@@ -604,4 +647,7 @@ def _resume_plan(plan, email):
     except Exception:
         st.session_state['reissue_resume_warning'] = '恢復已停止；請核對原計畫狀態，不可改建新計畫。'
     finally:
-        _refresh_reissue_history(plan['order_id'])
+        try:
+            _refresh_reissue_history(plan['order_id'])
+        finally:
+            guard.empty()

@@ -286,7 +286,7 @@ class PostalStartFlowTests(unittest.TestCase):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            '["跨境揀貨單", "待製郵便運單", "補製單／重印", "使用說明"]',
+            '["跨境揀貨單", "待製郵便運單", "補製單", "使用說明"]',
             app_source,
         )
         self.assertIn('labels.append("讀取診斷")', app_source)
