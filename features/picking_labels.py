@@ -8,6 +8,7 @@ import os
 
 import pandas as pd
 import streamlit as st
+import auth
 
 from bot.drive import list_drive_files, upload_file_to_drive
 from bot.picking_labels import (
@@ -139,19 +140,25 @@ def _preview_pdf(selected_orders: list[PickingOrder]) -> None:
     if not selected_orders:
         st.warning("請先選取至少一筆訂單。")
         return
-    preview_path = Path(tempfile.gettempdir()) / "jppost-picking-preview.pdf"
-    result = render_picking_labels_pdf(selected_orders, str(preview_path))
-    st.session_state["picking_preview_path"] = str(preview_path)
+    try:
+        with tempfile.TemporaryDirectory(prefix="jppost-picking-preview-") as preview_dir:
+            preview_path = Path(preview_dir) / "preview.pdf"
+            result = render_picking_labels_pdf(selected_orders, str(preview_path))
+            preview_bytes = preview_path.read_bytes()
+    except Exception:
+        st.error("無法產生預覽 PDF，請聯絡系統管理員。")
+        return
     st.success(f"預覽 PDF 已產生：{result.total_orders} 筆訂單，{result.total_pages} 頁。")
     st.download_button(
         "下載預覽 PDF",
-        data=preview_path.read_bytes(),
+        data=preview_bytes,
         file_name="preview-揀貨標籤.pdf",
         mime="application/pdf",
         width="stretch",
     )
-    with st.expander("預覽 / debug 摘要"):
-        st.json(build_picking_label_summary(selected_orders))
+    if auth.can_view_diagnostics():
+        with st.expander("預覽 / debug 摘要"):
+            st.json(build_picking_label_summary(selected_orders))
 
 
 def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
@@ -160,12 +167,16 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
         return False
 
     row_numbers = {order.source_row_number for order in selected_orders}
-    with st.spinner("重新確認來源表狀態..."):
-        values = load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name())
-        status_values = load_sheet_values(_shipping_status_spreadsheet_id(), _shipping_status_sheet_name())
-        shipping_deadlines = build_shipping_deadline_lookup(status_values)
-        fresh_orders, _warnings = parse_picking_label_candidates(values, shipping_deadlines=shipping_deadlines)
-        fresh_selected = filter_orders_by_rows(fresh_orders, row_numbers)
+    try:
+        with st.spinner("重新確認來源表狀態..."):
+            values = load_sheet_values(_picking_source_spreadsheet_id(), _picking_source_sheet_name())
+            status_values = load_sheet_values(_shipping_status_spreadsheet_id(), _shipping_status_sheet_name())
+            shipping_deadlines = build_shipping_deadline_lookup(status_values)
+            fresh_orders, _warnings = parse_picking_label_candidates(values, shipping_deadlines=shipping_deadlines)
+            fresh_selected = filter_orders_by_rows(fresh_orders, row_numbers)
+    except Exception:
+        st.error("無法重新確認來源表狀態，已中止。請重新讀取或聯絡系統管理員。")
+        return False
 
     if len(fresh_selected) != len(selected_orders):
         st.error("部分訂單已不符合可製作條件，請重新讀取後再試。")
@@ -184,24 +195,25 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
         return resolved_rows
 
     try:
-        result = generate_picking_labels_transaction(
-            orders=fresh_selected,
-            output_dir=tempfile.gettempdir(),
-            list_files=lambda prefix: list_drive_files(_picking_output_drive_folder_id(), prefix),
-            upload_file=lambda path: upload_file_to_drive(path, _picking_output_drive_folder_id(), "application/pdf"),
-            mark_done=_mark_done_after_revalidation,
-            now=datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
-        )
+        with tempfile.TemporaryDirectory(prefix="jppost-picking-output-") as output_dir:
+            result = generate_picking_labels_transaction(
+                orders=fresh_selected,
+                output_dir=output_dir,
+                list_files=lambda prefix: list_drive_files(_picking_output_drive_folder_id(), prefix),
+                upload_file=lambda path: upload_file_to_drive(path, _picking_output_drive_folder_id(), "application/pdf"),
+                mark_done=_mark_done_after_revalidation,
+                now=datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            output_bytes = Path(result.local_path).read_bytes()
     except Exception as exc:
         st.error("正式產生前檢查 Google Drive 檔名失敗，已中止。")
         return False
 
-    output_path = Path(result.local_path)
     if not result.success and not result.drive_file:
-        st.error(f"PDF 已產生但上傳 Google Drive 失敗：{result.error}")
+        st.error("PDF 已產生但上傳 Google Drive 失敗，請聯絡系統管理員。")
         st.download_button(
             "下載本機產生的 PDF",
-            data=output_path.read_bytes(),
+            data=output_bytes,
             file_name=result.filename,
             mime="application/pdf",
             width="stretch",
@@ -211,7 +223,7 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
     if not result.success and result.drive_file:
         st.error(
             "高風險警告：PDF 已成功上傳，但來源表未成功標記製單完成，"
-            f"請手動確認 L 欄，避免下次重複製作。錯誤：{result.error}"
+            "請手動確認 L 欄，避免下次重複製作。"
         )
         if result.drive_file.get("webViewLink"):
             st.link_button("開啟已上傳 PDF", result.drive_file["webViewLink"])
@@ -366,6 +378,8 @@ def render_picking_label_tab(refresh_source=None) -> None:
 
 
 def render_picking_label_diagnostics_panel() -> None:
+    if not auth.can_view_diagnostics():
+        return
     st.markdown("### 跨境揀貨單")
     diagnostics = st.session_state.get("picking_diagnostics")
     if not diagnostics:

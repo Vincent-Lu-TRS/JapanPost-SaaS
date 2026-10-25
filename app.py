@@ -116,6 +116,7 @@ st.set_page_config(
 )
 
 from auth import (
+    can_view_diagnostics,
     init_auth_state,
     handle_oauth_callback,
     get_login_url,
@@ -1821,7 +1822,7 @@ def _render_login_page():
             if st.button("🔑 使用 Google 帳號登入", type="primary"):
                 login_with_native_auth()
         else:
-            auth_url, state = get_login_url()
+            auth_url, state = get_login_url(_cm)
             st.session_state.oauth_state = state
 
             if "client_id=" in auth_url and "client_id=&" not in auth_url:
@@ -1833,6 +1834,41 @@ def _render_login_page():
             else:
                 st.error("⚠️ GOOGLE_CLIENT_ID 未設定！請至 Streamlit Cloud Secrets 添加。")
         st.caption("僅限公司 @tkrjm.co.jp 帳號或已授權人員")
+
+
+def _main_tab_labels():
+    labels = ["跨境揀貨單", "待製郵便運單", "使用說明"]
+    if can_view_diagnostics():
+        labels.append("讀取診斷")
+    return labels
+
+
+def _render_read_diagnostics(pending_logs, df_pending, pending_count, is_busy):
+    if not can_view_diagnostics():
+        return
+    with st.expander("製單環境檢查", expanded=False):
+        st.caption("會短暫啟動並關閉空白頁；不送出訂單，也不修改試算表。")
+        if is_busy:
+            st.caption("目前有製單執行中，請完成後再檢查。")
+        if st.button("檢查製單環境", key="cloud_browser_runtime_probe", disabled=is_busy):
+            try:
+                probe_browser_runtime_fresh()
+            except Exception:
+                st.error("未就緒。此檢查不送出訂單，也不修改試算表；請聯絡系統管理人員。")
+            else:
+                st.success("可用。此檢查不送出訂單，也不修改試算表。")
+    visible_pending_logs = _visible_pending_logs(
+        pending_logs,
+        sensitive_values=_dataframe_sensitive_values(df_pending),
+    )
+    if visible_pending_logs:
+        with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=True):
+            st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
+            st.code("\n".join(visible_pending_logs), language="text")
+    else:
+        st.info("目前沒有待製單讀取診斷資料。")
+    picking_labels_module = import_module_with_retry("features.picking_labels")
+    picking_labels_module.render_picking_label_diagnostics_panel()
 
 
 def _render_main_app():
@@ -2896,9 +2932,9 @@ def _render_main_app():
 
     _active_refresh_tick(is_busy=is_busy, job=job)
 
-    picking_tab, postal_tab, guide_tab, diagnostics_tab = st.tabs(
-        ["跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷"]
-    )
+    tabs = st.tabs(_main_tab_labels())
+    picking_tab, postal_tab, guide_tab = tabs[:3]
+    diagnostics_tab = tabs[3] if len(tabs) > 3 else None
 
     with picking_tab:
         picking_labels_module = import_module_with_retry("features.picking_labels")
@@ -3362,30 +3398,9 @@ PDF 會上傳至指定 Google Drive 資料夾。
             unsafe_allow_html=True,
         )
 
-    with diagnostics_tab:
-        with st.expander("製單環境檢查", expanded=False):
-            st.caption("會短暫啟動並關閉空白頁；不送出訂單，也不修改試算表。")
-            if is_busy:
-                st.caption("目前有製單執行中，請完成後再檢查。")
-            if st.button("檢查製單環境", key="cloud_browser_runtime_probe", disabled=is_busy):
-                try:
-                    probe_browser_runtime_fresh()
-                except Exception:
-                    st.error("未就緒。此檢查不送出訂單，也不修改試算表；請聯絡系統管理人員。")
-                else:
-                    st.success("可用。此檢查不送出訂單，也不修改試算表。")
-        visible_pending_logs = _visible_pending_logs(
-            pending_logs,
-            sensitive_values=_dataframe_sensitive_values(df_pending),
-        )
-        if visible_pending_logs:
-            with st.expander(f"待製單讀取診斷｜最終可打單 {pending_count} 筆", expanded=True):
-                st.markdown('<span class="debug-log-marker"></span>', unsafe_allow_html=True)
-                st.code("\n".join(visible_pending_logs), language="text")
-        else:
-            st.info("目前沒有待製單讀取診斷資料。")
-        picking_labels_module = import_module_with_retry("features.picking_labels")
-        picking_labels_module.render_picking_label_diagnostics_panel()
+    if diagnostics_tab is not None:
+        with diagnostics_tab:
+            _render_read_diagnostics(pending_logs, df_pending, pending_count, is_busy)
 
     if is_busy:
         time.sleep(2)

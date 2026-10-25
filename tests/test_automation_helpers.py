@@ -2050,7 +2050,7 @@ class AutomationHtmlTests(unittest.TestCase):
 
         self.assertNotIn("_iter_content_items(row, max_items=4)", source)
 
-    def test_run_automation_only_uses_playwright_html_injection_for_failure_snapshot(self):
+    def test_run_automation_does_not_save_or_upload_raw_failure_snapshots(self):
         from pathlib import Path
 
         source = Path(__file__).parents[1].joinpath("bot", "automation.py").read_text(encoding="utf-8")
@@ -2058,8 +2058,10 @@ class AutomationHtmlTests(unittest.TestCase):
 
         self.assertNotIn("set_content_from_requests(", body)
         self.assertIn("def capture_requests_debug_snapshot", source)
-        self.assertIn("page.screenshot(path=str(png_path), full_page=True)", source)
-        self.assertIn("upload_file_to_drive(str(local_path), DRIVE_FOLDER_ID", source)
+        self.assertNotIn("page.screenshot(path=str(png_path), full_page=True)", source)
+        self.assertNotIn("upload_file_to_drive(str(local_path), DRIVE_FOLDER_ID", source)
+        self.assertNotIn("html_path.write_text", source)
+        self.assertIn("ignore_https_errors=False", source)
         self.assertIn("M060800_next_failed", source)
 
 

@@ -79,8 +79,8 @@ def predict_hs_code(
             _HS_CODE_CACHE[cache_key] = code
             return code
         else:
-            _log(f"⚠️ 無法從 Gemini 回應解析 HS Code: {text!r}")
+            _log("⚠️ 無法從 Gemini 回應解析 HS Code")
     except Exception as e:
-        _log(f"❌ Gemini API 錯誤: {e}")
+        _log(f"❌ Gemini API 錯誤: {type(e).__name__}")
 
     return ""
