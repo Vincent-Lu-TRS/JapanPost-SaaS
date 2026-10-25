@@ -1424,16 +1424,10 @@ def _render_blocking_running_guard(job: dict | None, launching: bool = False) ->
     active_order = progress["active_order_id"] or "準備中"
     active_stage = progress["active_stage"] or ("啟動製單任務" if launching else "建立製單任務")
     title = "製單啟動中" if launching and not job else "製單進行中"
-    count_text = f"｜{done}/{total}" if total else ""
-    st.markdown(
-        '<div class="running-guard-overlay">'
-        '<div class="running-guard-box">'
-        f'<div class="running-guard-title">{title}{count_text}</div>'
-        f'<div class="running-guard-text">目前處理：{html.escape(active_order)}｜{html.escape(active_stage)}</div>'
-        '<div class="running-guard-sub">已鎖定操作以避免重複製單，畫面會自動更新。</div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
+    from features.shipment_busy_ui import render_running_guard
+    render_running_guard(st, title=title, active_order=active_order, active_stage=active_stage,
+                         done=done, total=total)
+
 
 
 def _native_info(label: str, value: str) -> str:
@@ -1873,7 +1867,7 @@ def _render_login_page():
 
 
 def _main_tab_labels():
-    labels = ["跨境揀貨單", "待製郵便運單", "補製單／重印", "使用說明"]
+    labels = ["跨境揀貨單", "待製郵便運單", "補製單", "使用說明"]
     if can_view_diagnostics():
         labels.append("讀取診斷")
     return labels
@@ -2321,43 +2315,6 @@ def _render_main_app():
             font-size: .86rem;
             line-height: 1.25;
             margin-top: .18rem;
-        }
-        .running-guard-overlay {
-            position: fixed;
-            inset: 0;
-            z-index: 999999;
-            background: rgba(3, 7, 18, 0.48);
-            backdrop-filter: blur(1.5px);
-            display: flex;
-            align-items: flex-start;
-            justify-content: center;
-            padding-top: 14.5rem;
-            pointer-events: all;
-        }
-        .running-guard-box {
-            width: min(560px, calc(100vw - 32px));
-            border: 1px solid rgba(82, 117, 168, 0.58);
-            background: rgba(15, 23, 42, 0.96);
-            border-radius: 8px;
-            padding: 1rem 1.25rem;
-            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
-        }
-        .running-guard-title {
-            color: #ffffff;
-            font-size: 1.25rem;
-            font-weight: 900;
-            line-height: 1.2;
-        }
-        .running-guard-text {
-            color: #9bb7df;
-            font-size: .95rem;
-            font-weight: 750;
-            margin-top: .42rem;
-        }
-        .running-guard-sub {
-            color: #cbd5e1;
-            font-size: .82rem;
-            margin-top: .35rem;
         }
         div[data-testid="stCheckbox"] {
             min-height: var(--control-h);
