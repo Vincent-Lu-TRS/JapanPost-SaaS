@@ -97,6 +97,14 @@ _PLATFORM_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _TRACKING_RE = re.compile(r"(?i)\b[A-Z]{2}\d{9}[A-Z]{2}\b")
 _LONG_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])\d{6,}(?![A-Za-z0-9])")
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----.*?-----END (?:[A-Z ]*PRIVATE KEY)-----",
+    re.DOTALL,
+)
+_CREDENTIAL_RE = re.compile(
+    r'''(?i)(\b(?:api[_-]?key|key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|authorization)\b["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[^\s&"',;}]+'''
+)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s&\"',;}]+")
 _IDENTIFIER_FIELD_RE = re.compile(
     r"(?i)\b(order(?:_id|\s+no\.?|\s+number)?|receiver|tracking(?:_no|\s+no\.?)?)"
     r"\s*([:=])\s*([^\s,;]+)"
@@ -258,7 +266,10 @@ def redact_operational_log(
     sensitive_values: Iterable[object] = (),
 ) -> str:
     """Normalize a diagnostic message and redact common operational identifiers."""
-    text = " ".join(str(message).splitlines())
+    text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", str(message))
+    text = _CREDENTIAL_RE.sub(lambda match: match.group(1) + "[REDACTED]", text)
+    text = _BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = " ".join(text.splitlines())
     for value in sensitive_values:
         token = str(value or "")
         if token:

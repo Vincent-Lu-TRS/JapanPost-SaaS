@@ -1798,7 +1798,7 @@ def run_automation(
             )
 
         def new_context_with_cookies():
-            new_context = browser.new_context(accept_downloads=True, ignore_https_errors=True)
+            new_context = browser.new_context(accept_downloads=True, ignore_https_errors=False)
             if pw_cookies:
                 new_context.add_cookies(pw_cookies)
             return new_context
@@ -1880,38 +1880,10 @@ def run_automation(
             order_id: str,
             step: str,
         ) -> None:
-            snapshot_dir = Path(tempfile.gettempdir()) / "jppost-debug-snapshots"
-            snapshot_dir.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            base_name = _sanitize_filename(f"{stamp}_{order_id}_{step}")
-            html_path = snapshot_dir / f"{base_name}.html"
-            png_path = snapshot_dir / f"{base_name}.png"
-            rendered_html = _with_base_href(
-                _html_for_playwright_form(html),
-                page_url or "https://www.int-mypage.post.japanpost.jp/mypage/",
-            )
-            try:
-                html_path.write_text(rendered_html, encoding="utf-8")
-                ensure_playwright_page(f"debug snapshot {step}")
-                page.set_viewport_size({"width": 1440, "height": 1200})
-                page.set_content(rendered_html, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(1000)
-                page.screenshot(path=str(png_path), full_page=True)
-                _log(f"📸 已建立郵局失敗快照：{png_path.name}")
-            except Exception as snapshot_err:
-                _log(f"⚠️ 郵局失敗快照建立失敗：{type(snapshot_err).__name__}: {snapshot_err}")
-                return
-
-            for local_path, mime_type, label in [
-                (png_path, "image/png", "PNG"),
-                (html_path, "text/html", "HTML"),
-            ]:
-                try:
-                    uploaded = upload_file_to_drive(str(local_path), DRIVE_FOLDER_ID, mime_type=mime_type)
-                    link = uploaded.get("webViewLink") or uploaded.get("id") or "-"
-                    _log(f"☁️ 郵局失敗快照{label}已上傳：{uploaded.get('name', local_path.name)}｜{link}")
-                except Exception as upload_err:
-                    _log(f"⚠️ 郵局失敗快照{label}上傳失敗：{type(upload_err).__name__}: {upload_err}")
+            # Raw postal HTML and screenshots can contain recipient data,
+            # session fields and tokens. Do not persist or upload them to the
+            # normal shipping-PDF folder, including on a failed request.
+            _log("postal_failure_snapshot_suppressed")
 
         def safe_page_url() -> str:
             try:
@@ -1925,13 +1897,13 @@ def run_automation(
             page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
             _log("✅ 瀏覽器基礎導航測試通過")
         except Exception as _diag_e:
-            _log(f"❌ 瀏覽器基礎導航失敗（可能缺少系統函式庫）: {_diag_e}")
+            _log(f"❌ 瀏覽器基礎導航失敗（可能缺少系統函式庫）: {type(_diag_e).__name__}")
             raise
         try:
             page.goto("https://example.com", wait_until="commit", timeout=15000)
             _log("✅ 外部網路連線測試通過")
         except Exception as _diag_e:
-            _log(f"⚠️ 外部網路連線測試失敗（略過）: {_diag_e}")
+            _log(f"⚠️ 外部網路連線測試失敗（略過）: {type(_diag_e).__name__}")
 
         # ── 工具：重試包裝 ──────────────────────────
         def retry(fn, attempts=3, delay=1, name="action"):
@@ -2098,7 +2070,7 @@ def run_automation(
                 m = _re.search(r'value="([^"]+)"[^>]*name="csrfToken"', r1.text)
             if m:
                 csrf = m.group(1)
-                _log(f"  → CSRF: {csrf[:10]}...")
+                _log("  → CSRF token 已取得")
             else:
                 _log("  ℹ️ login page has no CSRF token; continuing because this flow accepts a blank token")
 
@@ -2828,7 +2800,7 @@ def run_automation(
             pdf_url = _extract_pdf_download_url(text, resp.url) if text else ""
             tracking_for_name = tracking_match.group(1) if tracking_match else "NO_TRACKING"
             if pdf_url and not pdf_bytes:
-                _log(f"🌐 requests 下載 PDF：{pdf_url}")
+                _log("🌐 requests 下載 PDF")
                 pdf_resp = req_session.get(
                     pdf_url,
                     headers={"Referer": resp.url},

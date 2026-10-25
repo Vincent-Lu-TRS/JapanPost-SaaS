@@ -91,6 +91,7 @@ class AuthSessionTests(unittest.TestCase):
         fake_user = {
             "is_logged_in": True,
             "email": "admin@tkrjm.co.jp",
+            "email_verified": True,
             "name": "Admin User",
             "picture": "https://example.com/avatar.png",
         }

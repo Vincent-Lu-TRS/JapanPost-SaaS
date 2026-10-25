@@ -73,7 +73,8 @@ APP_TEST_SCRIPT = textwrap.dedent(
     app = AppTest.from_file(str(Path.cwd() / "app.py"))
     app.run(timeout=30)
     app.session_state["authenticated"] = True
-    app.session_state["user_email"] = "tester@tkrjm.co.jp"
+    app.session_state["user_email"] = "admin@tkrjm.co.jp"
+    app.session_state["_verified_auth_email"] = "admin@tkrjm.co.jp"
     app.session_state["user_name"] = "Mock Tester"
     app.run(timeout=30)
     assert [tab.label for tab in app.tabs] == [

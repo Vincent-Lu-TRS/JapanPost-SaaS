@@ -877,7 +877,9 @@ def backfill_results(
                         },
                     ]
                 )
-            worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+            # Free text may begin with '='; RAW preserves it without executing
+            # a spreadsheet formula or dropping tracking number leading zeros.
+            worksheet.batch_update(updates, value_input_option="RAW")
             verified = _verify_writeback_rows(
                 worksheet,
                 expected_by_row,

@@ -64,7 +64,7 @@ def upload_pdf(pdf_bytes: bytes, filename: str, folder_id: str = DRIVE_FOLDER_ID
         _log(f"☁️ PDF 上傳成功：{filename}（ID: {file_id}）")
         return file_id
     except Exception as e:
-        _log(f"❌ Google Drive 上傳失敗: {e}")
+        _log(f"❌ Google Drive 上傳失敗: {type(e).__name__}")
         return None
 
 

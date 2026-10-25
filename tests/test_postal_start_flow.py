@@ -286,9 +286,11 @@ class PostalStartFlowTests(unittest.TestCase):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            '["跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷"]',
+            '["跨境揀貨單", "待製郵便運單", "使用說明"]',
             app_source,
         )
+        self.assertIn('labels.append("讀取診斷")', app_source)
+        self.assertIn("if can_view_diagnostics():", app_source)
         self.assertNotIn("郵局待打單（新版測試）", app_source)
         self.assertNotIn("with preview_tab:", app_source)
         self.assertIn("with postal_tab:", app_source)
