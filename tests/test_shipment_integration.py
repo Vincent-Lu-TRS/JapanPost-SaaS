@@ -17,4 +17,3 @@ class IntegrationTests(unittest.TestCase):
         text = ast.get_source_segment(source,retry)
         self.assertIn('writer.acquire()', text)
         self.assertIn('writer.release()', text)
-

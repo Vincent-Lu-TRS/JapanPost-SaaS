@@ -64,4 +64,3 @@ class WorkbenchAppTests(unittest.TestCase):
             next(x for x in app.button if x.label=='確認補製計畫').click().run()
             self.assertFalse(app.exception)
             self.assertEqual(app.session_state['reissue_reviewed_plan']['mode'], 'reissue')
-

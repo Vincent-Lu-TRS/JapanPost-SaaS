@@ -28,4 +28,3 @@ class ShipmentWritebackTests(unittest.TestCase):
             outcome=backfill_results([result],client=FakeClient(ws))
             self.assertFalse(outcome['ok'])
             self.assertFalse(any(c[0]=='batch_update' for c in ws.calls))
-

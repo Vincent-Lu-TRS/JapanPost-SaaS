@@ -47,4 +47,3 @@ class ApiBudgetTests(unittest.TestCase):
             self.assertLessEqual(len(reads),35,f'two-package normal reads={len(reads)}')
         finally:
             for item in reversed(patches):item.stop()
-
