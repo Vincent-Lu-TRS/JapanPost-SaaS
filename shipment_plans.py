@@ -87,8 +87,8 @@ def build_plan(row, packages, *, mode='split', reason='', original_tracking='', 
     snapshot = business_snapshot(row)
     if not snapshot[ORDER]:
         raise ValueError('缺少原始訂單編號')
-    if mode == 'reissue' and (not reason.strip() or not original_tracking.strip() or not nonce):
-        raise ValueError('補製需原運單、原因及新工作識別')
+    if mode == 'reissue' and (not original_tracking.strip() or not nonce):
+        raise ValueError('補製需原運單及新工作識別')
     items = source_items(row)
     totals = {item['id']: 0 for item in items}
     shipments = []

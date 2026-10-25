@@ -67,7 +67,9 @@ def lookup_history(order_id, *, ledger=None, source_loader=None, completion_read
         raise ValueError('目標表沒有此訂單的既有運單，不能以補製繞過一般製單檢查')
     return {'order_id': order_id, 'row': row, 'source_kind': kind, 'source_time': stamp,
             'source_ref': records[0]['plan']['plan_id'] if records else '',
-            'tracking_baseline': tracking, 'shipments': shipments}
+            'tracking_baseline': tracking, 'shipments': shipments,
+            'unfinished_records': copy.deepcopy([r for r in records if any(
+                s['status'] != 'completed' for s in r['shipments'])])}
 
 
 def _result(plan, shipment):

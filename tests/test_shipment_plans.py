@@ -16,6 +16,27 @@ def source():
 
 
 class ShipmentPlansTests(unittest.TestCase):
+    def test_reissue_accepts_empty_reason_but_requires_original_tracking_and_nonce(self):
+        row = source()
+        packages = [{'method': 'EMS', 'quantities': {i['id']: i['quantity'] for i in plans.source_items(row)}}]
+        plan = plans.build_plan(row, packages, mode='reissue', original_tracking='AA000000000JP', nonce='test')
+        self.assertEqual(plan['reason'], '')
+        plans.validate_plan(plan)
+        for missing in ('original_tracking', 'nonce'):
+            options = {'original_tracking': 'AA000000000JP', 'nonce': 'test'}
+            options[missing] = ''
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                plans.build_plan(row, packages, mode='reissue', **options)
+
+    def test_legacy_reason_plan_identity_and_integrity_remain_unchanged(self):
+        row = source()
+        packages = [{'method': 'EMS', 'quantities': {i['id']: i['quantity'] for i in plans.source_items(row)}}]
+        plan = plans.build_plan(row, packages, mode='reissue', reason='damaged label',
+                                original_tracking='AA000000000JP', nonce='legacy')
+        before = (plan['plan_id'], plan['integrity'], plan['reason'])
+        plans.validate_plan(plan)
+        self.assertEqual(before, (plan['plan_id'], plan['integrity'], plan['reason']))
+
     def test_item_partition_and_totals(self):
         row = source()
         items = plans.source_items(row)
