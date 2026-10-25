@@ -37,6 +37,45 @@ class ShipmentPlansTests(unittest.TestCase):
         plans.validate_plan(plan)
         self.assertEqual(before, (plan['plan_id'], plan['integrity'], plan['reason']))
 
+    def test_v1_golden_identity_survives_copy_extension(self):
+        row = source()
+        packages = [{'method':'EMS', 'quantities':{i['id']:i['quantity'] for i in plans.source_items(row)}}]
+        plan = plans.build_plan(row, packages, mode='reissue', reason='damaged label',
+                                original_tracking='AA000000000JP', nonce='legacy')
+        self.assertEqual(plan['plan_id'], 'ad90698ca2ecb8f9dcf63362ee98e76820653910a98be5a471d608c32e94e903')
+        self.assertEqual(plan['integrity'], '71886c5a049dd013b84cb832080c35731a676affb05b5bae9f63de40901fcb9f')
+        self.assertEqual(plan['shipments'][0]['shipment_id'], '7733bec696180ec16fb84df9821ed0d802b0946103cc8d3ae99ef40d2cb35129')
+        self.assertEqual(plan['plan_version'], 1)
+        self.assertNotIn('copy_type', plan)
+
+    def test_complete_order_copy_is_explicit_v2_and_preserves_all_content(self):
+        row = source(); row['訂單合計申告金額(JPY)'] = '2100'
+        quantities = {i['id']:i['quantity'] for i in plans.source_items(row)}
+        packages = [{'method':m, 'quantities':quantities} for m in ('ePacket','EMS')]
+        plan = plans.build_plan(row, packages, mode='reissue', original_tracking='old', nonce='copy',
+                                copy_type='whole_order')
+        self.assertEqual(plan['plan_version'], 2)
+        plans.validate_plan(plan)
+        frame = plans.plan_frame(plan)
+        self.assertEqual(frame[plans.ORDER].tolist(), ['imy2099999'] * 2)
+        self.assertEqual(frame['數量1'].tolist(), ['2','2'])
+        self.assertEqual(frame['數量2'].tolist(), ['3','3'])
+        self.assertEqual(frame['訂單合計申告金額(JPY)'].tolist(), ['2100','2100'])
+        self.assertEqual(len({s['shipment_id'] for s in plan['shipments']}), 2)
+        for invalid in ([packages[0], packages[0]], [packages[0], {'method':'EMS','quantities':{}}],
+                        [packages[0]], packages + [{'method':'國際小包','quantities':quantities}]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                plans.build_plan(row, invalid, mode='reissue', original_tracking='old', nonce='copy', copy_type='whole_order')
+        with self.assertRaises(ValueError):
+            plans.build_plan(row, packages, copy_type='whole_order')
+        with self.assertRaises(ValueError):
+            plans.build_plan(row, packages, mode='reissue', original_tracking='old', nonce='copy')
+
+    def test_empty_package_error_identifies_each_package(self):
+        row = source(); quantities = {i['id']:i['quantity'] for i in plans.source_items(row)}
+        with self.assertRaisesRegex(ValueError, '包裹2中至少要有一項數量為1以上'):
+            plans.build_plan(row, [{'method':'EMS','quantities':quantities}, {'method':'EMS','quantities':{}}])
+
     def test_item_partition_and_totals(self):
         row = source()
         items = plans.source_items(row)

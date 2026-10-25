@@ -81,9 +81,11 @@ def _seal(plan):
 
 
 def build_plan(row, packages, *, mode='split', reason='', original_tracking='', nonce='',
-               source_kind='pending', source_time='', source_row=None, source_ref=''):
+               source_kind='pending', source_time='', source_row=None, source_ref='', copy_type=''):
     if mode not in {'split', 'reissue'}:
         raise ValueError('工作模式無效')
+    if copy_type and (copy_type != 'whole_order' or mode != 'reissue' or len(packages) != 2):
+        raise ValueError('整單追加只限補製兩包完整副本')
     snapshot = business_snapshot(row)
     if not snapshot[ORDER]:
         raise ValueError('缺少原始訂單編號')
@@ -94,7 +96,7 @@ def build_plan(row, packages, *, mode='split', reason='', original_tracking='', 
     shipments = []
     if not packages or len(packages) > 20:
         raise ValueError('包裹數必須介於1至20')
-    for package in packages:
+    for package_index, package in enumerate(packages, 1):
         method = package.get('method')
         if method not in SHIPPING_OPTIONS:
             raise ValueError('運送方式無效')
@@ -108,20 +110,25 @@ def build_plan(row, packages, *, mode='split', reason='', original_tracking='', 
             if quantity:
                 assigned.append({**item, 'quantity': quantity})
         if not assigned:
-            raise ValueError('包裹不可空白')
+            raise ValueError(f'包裹{package_index}中至少要有一項數量為1以上')
         amount = sum(Decimal(i['value']) * i['quantity'] for i in assigned)
         shipments.append({'method': method, 'items': assigned, 'total_usd': f'{amount:.2f}'})
-    if any(totals[i['id']] != i['quantity'] for i in items):
+    if copy_type:
+        if len({s['method'] for s in shipments}) != len(shipments) or any(s['items'] != items for s in shipments):
+            raise ValueError('整單追加需不同寄送方式，且每包保留全部品項與完整數量')
+    elif any(totals[i['id']] != i['quantity'] for i in items):
         raise ValueError('每項分配合計必須等於原始數量，不可超配或漏配')
     source = business_snapshot(source_row if source_row is not None else row)
     identity = {'source': source, 'payload': snapshot, 'shipments': shipments,
                 'mode': mode, 'reason': reason.strip(), 'original_tracking': original_tracking.strip(),
                 'nonce': nonce}
+    if copy_type:
+        identity['copy_type'] = copy_type
     plan_id = digest(identity)
     for index, shipment in enumerate(shipments):
         shipment['shipment_id'] = digest([plan_id, index])
     plan = {**identity, 'source_snapshot': source, 'source_fingerprint': digest(source),
-            'plan_id': plan_id, 'plan_version': 1, 'order_id': snapshot[ORDER],
+            'plan_id': plan_id, 'plan_version': 2 if copy_type else 1, 'order_id': snapshot[ORDER],
             'source_kind': source_kind, 'source_time': source_time, 'source_ref': source_ref,
             'shipments': shipments}
     plan['integrity'] = _seal(plan)
@@ -131,6 +138,8 @@ def build_plan(row, packages, *, mode='split', reason='', original_tracking='', 
 def validate_plan(plan):
     if plan.get('integrity') != _seal(plan):
         raise ValueError('計畫內容已變更，請重新確認')
+    if plan.get('plan_version') != (2 if plan.get('copy_type') else 1):
+        raise ValueError('計畫版本無效')
     # Rebuild from authoritative original item positions to validate all quantities.
     row = dict(plan['payload'])
     original_items = source_items(row)
@@ -139,7 +148,7 @@ def validate_plan(plan):
         id_by_index[i['source_index']]: i['quantity'] for i in s['items']
     }} for s in plan['shipments']]
     build_plan(row, packages, mode=plan['mode'], reason=plan['reason'],
-               original_tracking=plan['original_tracking'], nonce=plan['nonce'])
+               original_tracking=plan['original_tracking'], nonce=plan['nonce'], copy_type=plan.get('copy_type', ''))
 
 
 def plan_frame(plan):
