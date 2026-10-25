@@ -473,12 +473,27 @@ def _classify_writeback_records(results, columns):
                 )
             )
         elif pair in exact_pairs:
+            row_number = exact_pairs[pair]
+            actual = next(values for number, values in existing_rows if number == row_number)
+            expected_country = (resolve_country_code(result.get('country_raw', ''), COUNTRY_CODE_MAP)
+                                or _clean_cell(result.get('country_raw')))
+            expected = (_clean_cell(result.get('name')), order_id, tracking, expected_country)
+            verified = all(expected) and tuple(actual[c] for c in ('B','C','D','J')) == expected
+            repairable = (all(expected) and pair not in planned_pairs
+                          and all(not actual[c] or actual[c] == value
+                                  for c,value in zip(('B','C','D','J'),expected)))
+            if not verified and repairable:
+                result.update(input_index=index, _repair_row=row_number,
+                              _repair_columns=[c for c in ('B','J') if not actual[c]])
+                candidates.append(result)
+                planned_pairs.add(pair)
+                continue
             immediate.append(
                 _outcome_item(
                     index,
                     result,
-                    status="already_present",
-                    reason_code="exact_pair_exists",
+                    status="already_present" if verified else "partial_write",
+                    reason_code="exact_pair_exists" if verified else "incomplete_existing_row",
                     row=exact_pairs[pair],
                 )
             )
@@ -819,6 +834,15 @@ def backfill_results(
             grid.columns,
         )
         immediate_items.extend(classified_items)
+        safe_classified = []
+        for candidate in classified:
+            if candidate.get('_repair_row') in grid.occupied_formula_rows:
+                immediate_items.append(_outcome_item(
+                    candidate['input_index'], candidate, status='manual_review',
+                    reason_code='formula_protected_existing_row', row=candidate['_repair_row']))
+            else:
+                safe_classified.append(candidate)
+        classified = safe_classified
     except Exception as exc:
         reason_code = _safe_sheet_error_code(exc)
         safe_log_event(
@@ -843,8 +867,13 @@ def backfill_results(
         occupied_formula_rows=grid.occupied_formula_rows,
     ) + 1
     expected_by_row = {}
-    for offset, candidate in enumerate(classified):
-        row_number = next_row + offset
+    repair_columns_by_row = {}
+    for candidate in classified:
+        row_number = candidate.get('_repair_row') or next_row
+        if candidate.get('_repair_row'):
+            repair_columns_by_row[row_number] = candidate['_repair_columns']
+        else:
+            next_row += 1
         candidate["row"] = row_number
         country_raw = candidate.get("country_raw", "")
         country_code = (
@@ -865,6 +894,11 @@ def backfill_results(
             updates = []
             for row_number, values in expected_by_row.items():
                 name, order_id, tracking, country_code = values
+                if row_number in repair_columns_by_row:
+                    for column in repair_columns_by_row[row_number]:
+                        updates.append({'range': f'{column}{row_number}:{column}{row_number}',
+                                        'values': [[name if column == 'B' else country_code]]})
+                    continue
                 updates.extend(
                     [
                         {
@@ -920,6 +954,55 @@ def backfill_results(
             )
         )
     return summarize(items)
+
+
+def get_history_order(order_id: str, *, client=None) -> dict:
+    """Exact, server-side historical lookup without pending/status filters.
+
+    Conflicting retained versions require operator reconciliation. Only the
+    requested order's explicitly allowed business fields leave this function.
+    """
+    from shipment_plans import BUSINESS_COLUMNS, ORDER, business_snapshot, digest
+    if not isinstance(order_id, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', order_id):
+        raise ValueError('請輸入完整訂單編號（英數字、點、底線或連字號）')
+    client = client or _get_gspread_client()
+    book = client.open_by_key(SOURCE_SHEET_ID)
+    worksheet = _get_worksheet_by_gid(book, SOURCE_GID)
+    if worksheet is None:
+        raise RuntimeError('history_source_unavailable')
+    values = worksheet.get_all_values()
+    if len(values) < 2:
+        raise ValueError('找不到此訂單的完整歷史資料')
+    header, counts = [], {}
+    for raw in values[0]:
+        title = _clean_cell(raw)
+        count = counts.get(title, 0)
+        header.append(f'{title}_{count}' if count else title)
+        counts[title] = count + 1
+    matches = []
+    for row_number, values_row in enumerate(values[1:], 2):
+        row = dict(zip(header, values_row))
+        identity = _clean_cell(row.get(ORDER)) or _clean_cell(row.get(ORDER + '_1'))
+        if identity != order_id:
+            continue
+        for key, value in row.items():
+            match = re.fullmatch(r'(?:內容物|申告金額|數量|HSCode)(\d+)', key)
+            if match and int(match.group(1)) > 10 and _clean_cell(value):
+                raise ValueError('此訂單內容物超過10項，不可截斷歷史資料')
+        selected = {key: _clean_cell(row.get(key)) for key in BUSINESS_COLUMNS}
+        selected['_eligible_for_initial_split'] = (
+            _clean_cell(row.get('製單上傳狀態(請用[未打單]檢視模式)')) == '未打單'
+            and _clean_cell(row.get('製單檢核')).upper() != 'TRUE'
+        )
+        selected[ORDER] = identity
+        selected['Shipping Name'] = selected['Shipping Name'] or selected['Shipping Name_1']
+        selected['_source_row_number'] = str(row_number)
+        matches.append(selected)
+    if not matches:
+        raise ValueError('找不到此訂單的完整歷史資料；不可由追蹤號猜測收件資料')
+    if len({digest(business_snapshot(row)) for row in matches}) != 1:
+        raise ValueError('此訂單存在互相矛盾的來源版本，請先核對來源資料')
+    return matches[0]
 
 
 def load_sheet_values(spreadsheet_id: str, sheet_name: str) -> list[list[str]]:

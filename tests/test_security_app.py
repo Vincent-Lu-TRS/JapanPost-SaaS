@@ -35,16 +35,16 @@ class SecurityAppTests(unittest.TestCase):
             assert not app.exception, app.exception
             assert len(app.tabs) == 0
             assert pending.call_count == 0
-            for email, expected_tab_count in (("staff@tkrjm.co.jp", 3), ("ADMIN@TKRJM.CO.JP", 4)):
+            for email, expected_tab_count in (("staff@tkrjm.co.jp", 4), ("ADMIN@TKRJM.CO.JP", 5)):
                 provider.update(is_logged_in=True, email=email, email_verified=True, name="Synthetic")
                 app.run(timeout=30)
                 assert not app.exception, app.exception
                 assert len(app.tabs) == expected_tab_count, [tab.label for tab in app.tabs]
                 payload = " ".join(str(element.value) for element in app.get("json"))
                 for marker in ("PRIVATE-DIAGNOSTICS-SOURCE", "PRIVATE-DIAGNOSTICS-ID", "PRIVATE-DIAGNOSTICS-HEADER"):
-                    assert (marker in payload) == (expected_tab_count == 4), (email, marker)
+                    assert (marker in payload) == (expected_tab_count == 5), (email, marker)
                 probe_buttons = [button for button in app.button if button.key == "cloud_browser_runtime_probe"]
-                assert bool(probe_buttons) == (expected_tab_count == 4)
+                assert bool(probe_buttons) == (expected_tab_count == 5)
             # A stale display email from the last session does not retain access.
             provider.clear()
             app.run(timeout=30)

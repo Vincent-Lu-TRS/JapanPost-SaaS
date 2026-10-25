@@ -1,5 +1,49 @@
 # JapanPost-SaaS 操作、故障排除與發布手冊
 
+## 2026-10-25 拆單／補製單（本機候選，尚未部署）
+
+- 待製單卡片的「拆分包裹」按原始品項完整分配，各包可用相同方式。原始總數量不可在拆單中修改；每包需至少一項，零分配不送出，USD及有可靠原值的JPY分別重算。啟用拆單的訂單不會再由舊「開始製單」整單送出；請用該計畫的獨立送出按鈕。整單追加仍是完整複製，與拆單互斥。
+- 「補製單／重印」輸入完整單號。優先讀取加密的完整訂單快照，列出個別包裹與原tracking；沒有快照則清楚標示「來源現存資料，非當時製單快照」。來源缺失/衝突不能猜測。選原運單、填原因並確認新tracking後才可建立新補製。
+- 開啟舊PDF或「尋找舊PDF（只重印）」不呼叫郵政製單；Drive原權限仍有效。補製保留舊PDF及tracking，目標B/C/D/J每包一列且訂單號不加後綴。
+- 送出前保存不可變計畫。跨使用者共用同一全域製單鎖（同一Sheets batch原子建立固定title、隨機generation sheetId和owner）。正常製單、拆單、補製與正常回填重試皆共用。未知回應不做TTL搶鎖，也不自動重送Register。
+- 加密key依序讀 `SHIPMENT_LEDGER_SECRET`、`auth.cookie_secret`、`GOOGLE_CLIENT_SECRET`（至少32字元），以HKDF隔離用途、Fernet驗證加密。請保留原key；輪替前需另作受控遷移，不能刪key當成清空工作。沒有key的新安裝仍可正常製單；拆單/補製停止。若已存在加密ledger但key遺失/無法解密，一般製單也停止以防繞過未完成計畫。
+- 隱藏工作表 `_jppost_encrypted_shipments_v1` 僅保存加密快照。隱藏不是權限邊界；需維持既有最小服務帳號及工作表ACL。`_jppost_submission_guards_v1` 只存訂單/包裹雜湊、狀態及tracking/file ID，不保存完整個資或秘密。前台只收到查詢訂單需要的資料。
+- 單張計畫最多20包、每包最多10原始品項、數量最多1,000,000；加密後單格超過45,000字元在Register前拒絕，保留Sheets 50,000字元限制餘裕。
+
+### 恢復與人工核對
+
+1. `planned`尚未Register；恢復原計畫仍檢驗最新業務來源，初次拆單也必須仍符合未打單條件。
+2. `uploaded`/`writeback_pending`使用原tracking及不可變payload，只恢復回填，不重新查來源來覆蓋內容。B/C/D已存在而J空白時，只補空白J並四欄回讀；公式或非空衝突停止，不新增相同tracking列。`completed`重播只顯示原結果，後續合法補製不使舊完成紀錄失效。
+3. 在「補製單／重印」精確查原訂單，勾選「查看此訂單未完成計畫／恢復」，按「恢復原計畫」。此操作沿用持久plan ID，不能重新建UUID繞過未完成工作。
+4. `issuing`/`unknown`可能已送達郵政；`label_created`已知tracking但沒有耐久PDF證據。前台顯示計畫/包裹ID並停止。必須由管理員核對，禁止按新補製、刪tab或依時間推定未製單。PDF未存耐久位置時不承諾自動恢復上傳。
+
+管理員維護需另取得正式資料操作授權，並按以下順序；本次實作未執行任何維護寫入：
+
+1. 停止舊worker（若無法證明停止，保持鎖）；記錄執行環境、時間與停止證據。僅關閉員工瀏覽器不代表worker停止。
+2. 以郵政官方已建立運單清單及受限Drive核對該訂單/包裹，記錄是否已建立、精確tracking、PDF file ID及人工核對人。不能以目標表尚無列判斷未製單。
+3. 從固定鎖title讀取並保存當次owner與generation。使用同一generation及owner建立維護handle；`marker()`必須一致。禁止只按title刪除，禁止重新取得新鎖當成舊鎖。
+4. 加密ledger的`plan`與`payload`不可改寫。若已確認製單及PDF，僅將精確shipment的tracking/file ID與狀態修復成`uploaded`，在record追加人工核對時間/人員/證據摘要；再由正常「恢復原計畫」回填。若確認未建立運單且原狀態未有tracking，管理員可明確將該shipment恢復`planned`並留下同等審計記錄，再讓同仁重新核對來源。不能清除已知tracking。
+5. 一般製單的guard須與原tracking一起處理：先用原單號及人工確認的實際收件姓名/國別只回填原tracking，四欄回讀後才把該guard標`completed`。若無法還原實際資料，保持未完成，不新製。
+6. 記錄人工處置後，以captured generation釋放鎖。現有受控API示例如下；它不會清除未知ledger或guard，未完成訂單仍不能新建工作。
+
+```python
+from bot.shipment_ledger import GlobalShipmentLock, open_target_book
+
+# 只在已停止worker、核對郵政/Drive且完成上述狀態修復後執行。
+# generation/owner須來自實際讀回的停滯鎖，不可自行生成。
+book = open_target_book()
+reviewed = GlobalShipmentLock(book, owner=captured_owner)
+reviewed.sheet_id = captured_generation
+reviewed.held = True
+assert reviewed.marker()['owner'] == captured_owner
+reviewed.stage('manually_reconciled', review_reference=approved_review_reference)
+reviewed.release()  # 僅刪captured generation ID；不會刪後來的新generation。
+```
+
+7. 重新查詢原計畫，確認沒有額外Register，核對原tracking/PDF/目標B/C/D/J及ledger完成狀態。若任何一項不一致，停止並保留證據。
+
+本機驗證只使用合成資料與mock Sheets/Drive/郵政。尚未驗證正式ACL、平台當前配額、真郵政回應或Cloud執行；正式試單與部署仍需另外授權。
+
 更新：2026-09-15 JST。適用正式站：<https://jppost.streamlit.app/>。
 
 本手冊以當前程式、可讀 CI 證據與最新 runtime reliability 交接為準。它是操作指南，不構成真實製單、Google Drive／Sheets 寫入、秘密／權限變更或未涵蓋範圍之正式發布授權。
