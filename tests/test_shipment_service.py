@@ -9,6 +9,36 @@ from test_shipment_ledger import MemoryBook
 
 
 class ServiceTests(unittest.TestCase):
+    def test_empty_reason_reissue_still_requires_explicit_confirmation_and_exact_baseline(self):
+        self.pairs.add(('imy2099999', 'AA000000000JP'))
+        plan = build_plan(self.row, [{'method': 'EMS', 'quantities': {
+            i['id']: i['quantity'] for i in source_items(self.row)}}], mode='reissue',
+            original_tracking='AA000000000JP', nonce='empty-reason')
+        for options in ({}, {'tracking_baseline': {'AA000000000JP'}},
+                        {'tracking_baseline': {'wrong'}, 'confirmed_new_tracking': True}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.execute(plan, **options)
+            self.assertFalse(self.calls)
+        result = self.execute(plan, tracking_baseline={'AA000000000JP'}, confirmed_new_tracking=True)
+        self.assertEqual(result[0]['status'], 'completed')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_history_reads_ledger_once_and_returns_detached_unfinished_same_order_records(self):
+        from unittest.mock import Mock
+        self.execute(backfill=lambda results, **kwargs: {'ok': False, 'items': []})
+        ledger = ShipmentLedger(self.book, 'x' * 40)
+        records = ledger.records()
+        other = copy.deepcopy(records[0][1]); other['plan']['order_id'] = 'unrelated'
+        completed = copy.deepcopy(records[0][1])
+        for shipment in completed['shipments']:
+            shipment['status'] = 'completed'
+        ledger.records = Mock(return_value=records + [('other', other), ('completed', completed)])
+        history = lookup_history('imy2099999', ledger=ledger, completion_reader=self.completion)
+        self.assertEqual(ledger.records.call_count, 1)
+        self.assertEqual(len(history['unfinished_records']), 1)
+        history['unfinished_records'][0]['shipments'][0]['status'] = 'changed'
+        self.assertEqual(records[0][1]['shipments'][0]['status'], 'writeback_pending')
+
     def test_missing_recipient_fields_and_import_id_refuse_before_persist(self):
         for field in ('Shipping Name','Shipping Street','收件人國家'):
             self.setUp()

@@ -3012,7 +3012,7 @@ def _render_main_app():
 
     with reissue_tab:
         from features.shipment_workbench import render_reissue_tab
-        render_reissue_tab(disabled=is_busy)
+        render_reissue_tab(disabled=is_busy, usd_jpy_rate=rate)
 
     with guide_tab:
         st.markdown("# Cross-Border製單系統使用說明")
