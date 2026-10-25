@@ -28,7 +28,12 @@ def verified_email():
                      and is_authorized(email)) else ''
 
 
-def _preview(plan):
+def _preview(plan, *, compact=False):
+    if compact:
+        for shipment in plan['shipments']:
+            quantity = sum(item['quantity'] for item in shipment['items'])
+            st.caption(f"{shipment['method']}｜{quantity} 件｜USD {shipment['total_usd']}")
+        return
     st.caption(f"原訂單 {plan['order_id']}｜{len(plan['shipments'])} 包｜計畫 {plan['plan_id'][:16]}")
     rows = []
     for index, shipment in enumerate(plan['shipments'], 1):
@@ -45,11 +50,12 @@ def _show_results(results):
             st.link_button('開啟既有 PDF（重印，不製單）', f'https://drive.google.com/file/d/{file_id}/view')
 
 
-def _execute(plan, *, key, baseline=None, confirmed=False, disabled=False):
+def _execute(plan, *, key, baseline=None, confirmed=False, disabled=False, compact=False):
     attempted = False
-    _preview(plan)
-    if st.button('送出拆單製單' if plan['mode'] == 'split' else '送出新補製單',
-                 key=key + '_execute', disabled=disabled):
+    _preview(plan, compact=compact)
+    if st.button('送出拆單製單' if plan['mode'] == 'split' else '開始製作補單',
+                 key=key + '_execute', disabled=disabled,
+                 **({'type': 'primary', 'width': 'stretch'} if compact else {})):
         email = verified_email()
         if not email:
             st.error('請先登入授權帳號')
@@ -69,7 +75,8 @@ def _execute(plan, *, key, baseline=None, confirmed=False, disabled=False):
         finally:
             if plan['mode'] == 'reissue':
                 _refresh_reissue_history(plan['order_id'])
-    _show_results(st.session_state.get(key + '_results', []))
+    if not compact:
+        _show_results(st.session_state.get(key + '_results', []))
     return attempted
 
 
@@ -128,6 +135,28 @@ def _invalidate_reissue_review():
 
 REISSUE_CARD_CSS = """
 <style>
+.st-key-reissue_workbench {
+    container-name: reissue-workbench;
+    container-type: inline-size;
+    min-width: 0;
+}
+.st-key-reissue_workbench > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    min-width: 0;
+}
+.st-key-reissue_actions {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+@container reissue-workbench (max-width: 900px) {
+    .st-key-reissue_workbench > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] {
+        flex-direction: column;
+    }
+    .st-key-reissue_workbench > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        flex: 1 1 100%;
+        width: 100%;
+        min-width: 0;
+    }
+}
 .st-key-reissue_order_card {
     container-name: reissue-order;
     container-type: inline-size;
@@ -155,7 +184,6 @@ def _edit_history_row(history, *, disabled=False, usd_jpy_rate=None):
     country = str(row.get('收件人國家') or row.get('Country', ''))
     parsed = parse_shipping_name(row.get('Shipping Name') or row.get('Shipping Name_1', ''))
     kind = country_kind(country)
-    st.markdown(REISSUE_CARD_CSS, unsafe_allow_html=True)
     with st.container(border=True, key='reissue_order_card'):
         st.markdown('<span class="postal-v2-card-marker"></span>', unsafe_allow_html=True)
         summary_slot = st.empty()
@@ -255,7 +283,6 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
     if not email:
         st.caption('請先登入授權帳號')
         return
-    st.caption('重新列印既有 PDF 不會產生 tracking；補製會建立新運單並保留舊紀錄。')
     query = st.columns([3, 1], gap='small', vertical_alignment='bottom')
     with query[0]:
         order = st.text_input('完整訂單編號', key='reissue_order_query', max_chars=80, disabled=disabled)
@@ -288,58 +315,62 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
         _show_results([r for r in st.session_state.get('reissue_results', [])
                        if r['order_id'] == order.strip()])
         return
-    if history['source_kind'] != 'ledger_snapshot':
-        st.warning('來源現存資料，非當時製單快照；請逐項核對地址、內容物與數量。')
-    with st.expander('來源資訊'):
-        st.caption(f"資料來源時間 {history['source_time']}")
-        st.caption('已保存的完整訂單快照' if history['source_kind'] == 'ledger_snapshot' else '現存訂單資料')
-    if history['tracking_baseline']:
-        if not usd_jpy_rate:
-            st.warning('暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，'
-                       'TotalValue(JPY) 會保留來源預設值。')
-        row = _edit_history_row(history, disabled=disabled, usd_jpy_rate=usd_jpy_rate)
-        if len(history['tracking_baseline']) == 1:
-            original_tracking = history['tracking_baseline'][0]
-            st.caption('關聯原運單：' + original_tracking)
-        else:
-            original_tracking = st.selectbox('關聯原運單', history['tracking_baseline'],
-                                              key='reissue_original_tracking', disabled=disabled, on_change=_invalidate_reissue_review)
-        confirmed = st.checkbox('我已核對，這次將產生新 tracking，並保留舊運單',
-                                 key='reissue_new_tracking', disabled=disabled, on_change=_invalidate_reissue_review)
-        candidate = None
-        validation_error = ''
-        try:
-            from bot.shipment_service import validate_recipient
-            validate_recipient(row)
-            items = source_items(row)
-            candidate = build_plan(row, [{'method': row[SHIPPING_COL],
-                                          'quantities': {i['id']: i['quantity'] for i in items}}],
-                                   mode='reissue', original_tracking=original_tracking,
-                                   nonce=st.session_state['reissue_nonce'], source_row=history['row'],
-                                   source_kind=history['source_kind'], source_time=history['source_time'],
-                                   source_ref=history.get('source_ref',''))
-        except ValueError as error:
-            validation_error = str(error)
-        if st.button('確認補製計畫', key='reissue_review', disabled=disabled):
-            if not candidate or not confirmed:
-                st.error(validation_error or '請確認將產生新 tracking，並核對完整收件與品項資料。')
+    st.markdown(REISSUE_CARD_CSS, unsafe_allow_html=True)
+    with st.container(key='reissue_workbench'):
+        left_panel, right_panel = st.columns([3.05, 1.2], gap='medium', vertical_alignment='top')
+        with left_panel:
+            if history['tracking_baseline']:
+                if not usd_jpy_rate:
+                    st.warning('暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，'
+                               'TotalValue(JPY) 會保留來源預設值。')
+                row = _edit_history_row(history, disabled=disabled, usd_jpy_rate=usd_jpy_rate)
             else:
-                st.session_state['reissue_reviewed_plan'] = candidate
-        reviewed = st.session_state.get('reissue_reviewed_plan')
-        if candidate and reviewed and candidate['integrity'] == reviewed['integrity'] and confirmed:
-            _execute(reviewed, key='reissue', baseline=history['tracking_baseline'], confirmed=confirmed, disabled=disabled)
-        else:
-            _show_results(st.session_state.get('reissue_results', []))
-            if reviewed:
-                st.caption('補製資料或確認狀態已變更，請重新確認補製計畫。')
-    else:
-        st.warning('此訂單沒有已確認的舊運單，只能恢復原計畫或由管理員核對。')
-    # Execution can create an unfinished record even when the initial query had
-    # none. Render from the explicit post-operation refresh in this same run.
-    history = st.session_state.get('reissue_history')
-    if history:
-        _render_resume(history, email, disabled=disabled)
-        _render_reprint(history, disabled=disabled)
+                st.warning('此訂單沒有已確認的舊運單，只能恢復原計畫或由管理員核對。')
+        with right_panel:
+            with st.container(border=True, key='reissue_actions'):
+                st.markdown('<span class="postal-v2-operation-panel"></span>', unsafe_allow_html=True)
+                if history['tracking_baseline']:
+                    st.markdown('<div class="postal-v2-panel-heading">補單操作</div>', unsafe_allow_html=True)
+                    if len(history['tracking_baseline']) == 1:
+                        original_tracking = history['tracking_baseline'][0]
+                        st.caption('關聯原運單：' + original_tracking)
+                    else:
+                        original_tracking = st.selectbox('關聯原運單', history['tracking_baseline'],
+                                                          key='reissue_original_tracking', disabled=disabled, on_change=_invalidate_reissue_review)
+                    confirmed = st.checkbox('我已核對', help='這次將產生新 tracking，並保留舊運單。請核對完整收件與品項資料。',
+                                             key='reissue_new_tracking', disabled=disabled, on_change=_invalidate_reissue_review)
+                    candidate = None
+                    validation_error = ''
+                    try:
+                        from bot.shipment_service import validate_recipient
+                        validate_recipient(row)
+                        items = source_items(row)
+                        candidate = build_plan(row, [{'method': row[SHIPPING_COL],
+                                                      'quantities': {i['id']: i['quantity'] for i in items}}],
+                                               mode='reissue', original_tracking=original_tracking,
+                                               nonce=st.session_state['reissue_nonce'], source_row=history['row'],
+                                               source_kind=history['source_kind'], source_time=history['source_time'],
+                                               source_ref=history.get('source_ref',''))
+                    except ValueError as error:
+                        validation_error = str(error)
+                    if st.button('確認補單資料', key='reissue_review', disabled=disabled, width='stretch'):
+                        if not candidate or not confirmed:
+                            st.error(validation_error or '請確認將產生新 tracking，並核對完整收件與品項資料。')
+                        else:
+                            st.session_state['reissue_reviewed_plan'] = candidate
+                    reviewed = st.session_state.get('reissue_reviewed_plan')
+                    if candidate and reviewed and candidate['integrity'] == reviewed['integrity'] and confirmed:
+                        _execute(reviewed, key='reissue', baseline=history['tracking_baseline'],
+                                 confirmed=confirmed, disabled=disabled, compact=True)
+                    elif reviewed:
+                        st.caption('補製資料或確認狀態已變更，請重新確認補單資料。')
+                # Execution can create an unfinished record even when the initial
+                # query had none. Use the explicit post-operation refresh now.
+                history = st.session_state.get('reissue_history')
+                if history:
+                    _render_resume(history, email, disabled=disabled)
+                    _render_reprint(history, disabled=disabled)
+    _show_results(st.session_state.get('reissue_results', []))
 
 
 def _render_resume(history, email, *, disabled=False):
