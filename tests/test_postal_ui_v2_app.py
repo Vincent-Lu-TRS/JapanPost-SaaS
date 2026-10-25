@@ -78,7 +78,7 @@ APP_TEST_SCRIPT = textwrap.dedent(
     app.session_state["user_name"] = "Mock Tester"
     app.run(timeout=30)
     assert [tab.label for tab in app.tabs] == [
-        "跨境揀貨單", "待製郵便運單", "使用說明", "讀取診斷",
+        "跨境揀貨單", "待製郵便運單", "補製單／重印", "使用說明", "讀取診斷",
     ]
     assert "郵局待打單（新版測試）" not in [tab.label for tab in app.tabs]
     assert "郵局待打單" not in [tab.label for tab in app.tabs]

@@ -526,6 +526,8 @@ def _build_result_record(row, order_id: str, tracking: str) -> dict:
         "country_raw": country_raw,
         "trans_type": trans_type,
         "shipment_role": _shipment_role(row),
+        "shipment_id": _row_val(row, ["_shipment_id", "shipment_id"]),
+        "plan_id": _row_val(row, ["_plan_id", "plan_id"]),
         "date": time.strftime("%Y-%m-%d"),
     }
 
@@ -552,6 +554,8 @@ def _build_failure_record(row, order_id: str, error: Exception, status: str = "f
         "country_raw": _row_val(row, ["收件人國家", "Country"]),
         "trans_type": _row_val(row, ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"]),
         "shipment_role": _shipment_role(row),
+        "shipment_id": _row_val(row, ["_shipment_id", "shipment_id"]),
+        "plan_id": _row_val(row, ["_plan_id", "plan_id"]),
         "date": time.strftime("%Y-%m-%d"),
     }
 
@@ -1391,7 +1395,7 @@ def _prepare_batch_hs_codes(rows, country_code_map: dict[str, str], predictor=pr
         )
         codes.update(manual_codes)
         if codes:
-            prepared[order_id] = codes
+            prepared[_row_val(row, ["_shipment_id"]) or order_id] = codes
     return prepared
 
 
@@ -1684,6 +1688,13 @@ def _build_m061101_completed_payload(
     return urljoin(page_url, form.get("action") or page_url), payload
 
 
+class ShipmentExecutionStopped(RuntimeError):
+    """Abort later postal submissions while retaining already-created results."""
+    def __init__(self, partial_results):
+        super().__init__('shipment_execution_requires_review')
+        self.partial_results = partial_results
+
+
 def run_automation(
     df: pd.DataFrame,
     max_rows: int | None = None,
@@ -1692,6 +1703,7 @@ def run_automation(
     headless: bool = True,
     precomputed_hs_codes: dict[str, dict[str, str]] | None = None,
     runtime_handle: RuntimeHandle | None = None,
+    lifecycle_cb=None,
 ) -> list[dict]:
     """
     執行日本郵政自動化打單。
@@ -1742,6 +1754,8 @@ def run_automation(
                 ["郵局運送方式(複數商品請自行確認是否走小包)", "TransType", "trans_type"],
             ),
             "shipment_role": _shipment_role(row),
+        "shipment_id": _row_val(row, ["_shipment_id", "shipment_id"]),
+        "plan_id": _row_val(row, ["_plan_id", "plan_id"]),
             "row_index": row_index,
         }
         payload.update(fields)
@@ -1752,6 +1766,14 @@ def run_automation(
 
     for _, row in rows.iterrows():
         _shipment_role(row)
+
+    lifecycle_state = {}
+    def _lifecycle(stage, row, **fields):
+        lifecycle_state['stage'] = stage
+        if fields.get('tracking'):
+            lifecycle_state['tracking'] = fields['tracking']
+        if lifecycle_cb is not None:
+            lifecycle_cb(stage, row, **fields)
 
     results: list[dict] = []
     user, pwd = _get_jp_post_creds()
@@ -2716,6 +2738,7 @@ def run_automation(
                 html,
                 page_url,
             )
+            _lifecycle('issuing', row, hs_codes=hs_codes_by_order.get(_row_val(row, ['_shipment_id']) or order_id, {}))
             _log("m061000_started")
             resp = req_session.post(
                 action,
@@ -2729,6 +2752,8 @@ def run_automation(
             )
             _log(f"m061000_finished status={resp.status_code}")
             tracking_match = re.search(r"([A-Z]{2}\d{9}JP)", resp.text or "")
+            if tracking_match:
+                _lifecycle('label_created', row, tracking=tracking_match.group(1))
             marker_summary = ", ".join(
                 marker
                 for marker in [
@@ -2772,6 +2797,9 @@ def run_automation(
             pdf_bytes = resp.content if "%PDF" in resp.content[:16].decode("latin1", errors="ignore") else b""
             text = "" if pdf_bytes else (resp.text or "")
             tracking_match = re.search(r"([A-Z]{2}\d{9}JP)", text)
+            tracking_for_name = tracking_match.group(1) if tracking_match else lifecycle_state.get('tracking', 'NO_TRACKING')
+            if tracking_for_name != 'NO_TRACKING':
+                _lifecycle('label_created', row, tracking=tracking_for_name)
             _log(
                 "m061100_finished "
                 f"status={resp.status_code} content_type={content_type.split(';', 1)[0]} "
@@ -2798,7 +2826,7 @@ def run_automation(
             if resp.status_code >= 400:
                 raise RuntimeError(f"M061100 print submit failed: HTTP {resp.status_code}")
             pdf_url = _extract_pdf_download_url(text, resp.url) if text else ""
-            tracking_for_name = tracking_match.group(1) if tracking_match else "NO_TRACKING"
+            tracking_for_name = tracking_match.group(1) if tracking_match else lifecycle_state.get('tracking', 'NO_TRACKING')
             if pdf_url and not pdf_bytes:
                 _log("🌐 requests 下載 PDF")
                 pdf_resp = req_session.get(
@@ -2818,14 +2846,19 @@ def run_automation(
                 else:
                     _log("⚠️ PDF 下載回應不是 PDF，保留 diagnostics 後停止")
             pdf_uploaded = False
+            file_id = None
+            if tracking_match:
+                _lifecycle('label_created', row, tracking=tracking_for_name)
             if pdf_bytes:
                 content_name = _get_excel_val(row, ["郵局內容物"]) or _get_excel_val(row, ["內容物1"]) or "Item"
                 ship_name = _get_excel_val(row, ["Shipping Name", "Shipping Name_1"])
                 fname = _sanitize_filename(
                     f"{content_name}_{order_id}_{tracking_for_name}_{ship_name}.pdf"
                 )
-                upload_pdf(pdf_bytes, fname, log_cb=_log)
-                pdf_uploaded = True
+                file_id = upload_pdf(pdf_bytes, fname, log_cb=_log)
+                pdf_uploaded = bool(file_id)
+                if file_id and tracking_for_name != 'NO_TRACKING':
+                    _lifecycle('uploaded', row, tracking=tracking_for_name, drive_file_id=file_id)
                 _log(f"✅ PDF 已透過 requests 取得並上傳：{fname}")
             completed = False
             completed_response = None
@@ -2852,6 +2885,7 @@ def run_automation(
                 "completed_response": completed_response,
                 "tracking": tracking_for_name if tracking_for_name != "NO_TRACKING" else "",
                 "pdf_uploaded": pdf_uploaded,
+                "drive_file_id": file_id,
                 "completed": completed,
             }
 
@@ -2866,6 +2900,7 @@ def run_automation(
 
             tracking = "ERROR"
             results_before_order = len(results)
+            lifecycle_state.clear()
             try:
                 # ── 防前次未完成對話框 ────────────────
                 handle_previous_label_dialog()
@@ -2886,7 +2921,7 @@ def run_automation(
                         addr_resp.url,
                         row,
                         is_eu,
-                        hs_codes_by_order.get(order_id, {}),
+                        hs_codes_by_order.get(_row_val(row, ["_shipment_id"]) or order_id, {}),
                     )
                     main_menu_html = item_resp.text
                     main_menu_url = item_resp.url
@@ -2926,7 +2961,9 @@ def run_automation(
                                 _log("✅ M061100 Print 已用 requests payload submit；不回灌 Playwright HTML")
                                 if print_result.get("tracking") and print_result.get("pdf_uploaded"):
                                     tracking = print_result["tracking"]
-                                    results.append(_build_result_record(row, order_id, tracking))
+                                    result = _build_result_record(row, order_id, tracking)
+                                    result['drive_file_id'] = print_result.get('drive_file_id', '')
+                                    results.append(result)
                                     _emit_status(
                                         "label_created",
                                         row,
@@ -2940,6 +2977,8 @@ def run_automation(
                 if len(results) > results_before_order:
                     _log(f"✅ 訂單 {order_id} requests 打單流程已完成並回傳結果")
                 else:
+                    if lifecycle_cb is not None and lifecycle_state.get('stage') in {'issuing', 'label_created', 'uploaded'}:
+                        raise RuntimeError('shipment_result_unknown')
                     failure = RuntimeError(
                         "requests 流程已停止但未取得完整結果；請依最後一段 diagnostics 繼續排查"
                     )
@@ -3105,6 +3144,7 @@ def run_automation(
                     page.wait_for_timeout(1500)
 
                 # ── Step 5: 確認 + Register Shipment ───
+                _lifecycle('issuing', row)
                 safe_click("input[value='Register Shipment']", label="register", critical=True)
                 page.wait_for_timeout(2000)
 
@@ -3172,7 +3212,10 @@ def run_automation(
                     fname = _sanitize_filename(
                         f"{content_name}_{order_id}_{tracking}_{ship_name}.pdf"
                     )
-                    upload_pdf(pdf_content, fname, log_cb=_log)
+                    _lifecycle('label_created', row, tracking=tracking)
+                    file_id = upload_pdf(pdf_content, fname, log_cb=_log)
+                    if file_id:
+                        _lifecycle('uploaded', row, tracking=tracking, drive_file_id=file_id)
 
                 # ── Step 9: 點擊 Completed 返回首頁 ────
                 try:
@@ -3202,6 +3245,10 @@ def run_automation(
                 )
 
             except Exception as e:
+                if lifecycle_cb is not None and lifecycle_state.get('stage') in {'issuing', 'label_created', 'uploaded'}:
+                    unknown = _build_failure_record(row, order_id, e)
+                    unknown['reason_code'] = 'shipment_requires_review'
+                    raise ShipmentExecutionStopped(list(results) + [unknown]) from None
                 _log(f"order_failed error_type={type(e).__name__}")
                 if len(results) == results_before_order:
                     failure_record = _build_failure_record(row, order_id, e)

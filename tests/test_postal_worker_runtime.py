@@ -88,6 +88,10 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
                     return_value=True,
                 ):
                     ensure_browser_runtime(expected_handle=kwargs.get("runtime_handle"))
+            if scenario == 'partial_unknown':
+                stopped=RuntimeError('shipment_execution_requires_review')
+                stopped.partial_results=list(automation_results or [])
+                raise stopped
             return list(automation_results or [])
 
         automation = types.ModuleType("bot.automation")
@@ -174,7 +178,20 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
         }
         exec(function, namespace)
 
-        with patch.dict(sys.modules, {"bot.sheets": sheets, "bot.automation": automation}), patch(
+        class Safety:
+            def __init__(self, lock): pass
+            def assert_clear(self, rows): pass
+            def lifecycle(self, *args, **kwargs): pass
+            def mark_verified(self, results): pass
+            def safe_to_release(self): return True
+        class Writer:
+            held = False
+            retain = False
+            def acquire(self): self.held = True
+            def release(self): self.held = False
+        with patch('bot.shipment_ledger.global_writer_lock', return_value=Writer()), patch(
+            'bot.shipment_ledger.NormalShipmentSafety', Safety
+        ), patch.dict(sys.modules, {"bot.sheets": sheets, "bot.automation": automation}), patch(
             "socket.create_connection", side_effect=AssertionError("network access disabled in mock")
         ) as network_connect:
             result = namespace["_start_job"]("user@example.com", frame, None)
@@ -186,6 +203,18 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
         for order in job.get("orders") or []:
             if order.get("status") in {"queued", "running"}:
                 order.update({"status": status, "stage": stage, "message": message})
+
+    def test_unknown_later_shipment_keeps_prior_tracking_for_writeback(self):
+        result,job,calls,_namespace=self._invoke_start_job(
+            scenario='partial_unknown', automation_results=[
+                {'order_id':'ORDER-1','trans_type':'ePacket','shipment_role':'primary',
+                 'tracking':'EL000000001JP','status':'success'},
+                {'order_id':'ORDER-2','status':'failed','reason_code':'shipment_requires_review'},
+            ])
+        self.assertTrue(job.get('safety_review_required'))
+        self.assertIn(('backfill',1),calls)
+        self.assertEqual(job['results'][0]['tracking'],'EL000000001JP')
+        self.assertEqual(job['results'][0]['status'],'completed')
 
     def test_runtime_failure_stops_before_any_google_sheets_or_automation_call(self):
         error = RuntimeSetupError("browser_install", "browser_download", retryable=True, http_status=503)

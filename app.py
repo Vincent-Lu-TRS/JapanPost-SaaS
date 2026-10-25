@@ -796,6 +796,10 @@ def _build_pending_run_frame_from_v2_state(
     if not selected_indices:
         return edited.iloc[0:0].copy()
     selected = edited.loc[selected_indices].copy()
+    split_orders = {str(row.get("注文番号(貼上原始資料)", "")) for _,row in selected.iterrows()
+                    if st.session_state.get(f"split_{row.get('注文番号(貼上原始資料)', '')}_{_v2_reset_version(str(row.get('注文番号(貼上原始資料)', '')))}_enabled", False)}
+    if split_orders:
+        selected = selected[~selected["注文番号(貼上原始資料)"].astype(str).isin(split_orders)].copy()
     return expand_pending_orders_for_trans_types(
         selected,
         _v2_extra_trans_types_by_index_from_state(df_pending, editable_count),
@@ -809,8 +813,18 @@ def _retry_writeback_results(job):
             "ok": False,
             "message": "運單可能已產生但回填紀錄不足，請提供既有追跡番号後再回填。",
         }
-    outcome = backfill_results(candidates)
-    terminal_status = apply_writeback_outcome(job, candidates, outcome)
+    from bot.shipment_ledger import global_writer_lock, NormalShipmentSafety
+    writer = global_writer_lock()
+    try:
+        writer.acquire()
+    except Exception:
+        return {'ok': False, 'message': '全域製單鎖正在使用或需管理員核對；未重製運單。'}
+    try:
+        outcome = backfill_results(candidates)
+        terminal_status = apply_writeback_outcome(job, candidates, outcome)
+        NormalShipmentSafety(writer).mark_verified(candidates)
+    finally:
+        writer.release()
     _JOB_REGISTRY.finish(job, terminal_status)
     return {
         "ok": outcome["ok"],
@@ -1290,10 +1304,23 @@ def _render_postal_pending_v2(
                             on_change=_mark_pending_editor_dirty,
                         )
                         edited_items_by_position[position] = restore_v2_item_frame(edited_display_frame)
+                        from features.shipment_workbench import render_split_planner
+                        split_row = apply_pending_order_editor_values(
+                            pd.DataFrame([row]), pd.DataFrame([edited_summary_rows[-1]]),
+                            {0: edited_items_by_position[position]}, usd_jpy_rate=rate,
+                        ).iloc[0]
+                        render_split_planner(
+                            split_row, source_row=row,
+                            key=f"split_{order_id}_{reset_version}",
+                            extra_selected=st.session_state.get(extra_trans_key, "無") != "無",
+                            disabled=is_busy,
+                        )
 
                 if len(df_pending) > editable_count:
                     st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
 
+        if job and job.get('safety_review_required') and not is_busy:
+            st.error('部分郵政結果需核對，已停止後續製單。請保留已產生的運單並由管理員依操作手冊恢復。')
         if job and job.get("runtime_setup_message") and not is_busy:
             st.error(job["runtime_setup_message"])
 
@@ -1450,6 +1477,9 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
     _write_job_lock(email)
 
     def _run():
+        writer = None
+        safety = None
+
         def _log(msg: str):
             try:
                 update_order_status_from_log(job, msg)
@@ -1507,6 +1537,10 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 read_completion_authority,
             )
 
+            from bot.shipment_ledger import global_writer_lock, NormalShipmentSafety
+            writer = global_writer_lock()
+            writer.acquire()
+            safety = NormalShipmentSafety(writer)
             _log("🔐 製單前重新確認 Google Sheets 完成狀態與來源快照...")
             try:
                 completion_authority = read_completion_authority()
@@ -1620,6 +1654,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 return
 
             rows_for_run = ready_rows
+            safety.assert_clear(rows_for_run)
             _log(f"✅ 本批 {len(rows_for_run)} 筆通過製單前檢查，準備執行。")
 
             _log("🚀 任務啟動，正在載入模組...")
@@ -1644,15 +1679,22 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                         f"{idx}:{code}" for idx, code in sorted(codes.items(), key=lambda pair: int(pair[0]))
                     )
             _log("✅ 模組載入成功，開始 Playwright 自動化...")
-            results = run_automation(
-                rows_for_run,
-                max_rows=None,
-                log_cb=_log,
-                status_cb=_status,
-                headless=True,
-                precomputed_hs_codes=hs_codes_by_order,
-                runtime_handle=runtime_handle,
-            )
+            try:
+                results = run_automation(
+                    rows_for_run,
+                    max_rows=None,
+                    log_cb=_log,
+                    status_cb=_status,
+                    headless=True,
+                    precomputed_hs_codes=hs_codes_by_order,
+                    runtime_handle=runtime_handle,
+                    lifecycle_cb=safety.lifecycle,
+                )
+            except Exception as automation_error:
+                if not hasattr(automation_error, 'partial_results'):
+                    raise
+                results = automation_error.partial_results
+                job['safety_review_required'] = True
             if not results:
                 _log("ℹ️ 自動化完成，無新增結果。")
                 results = [
@@ -1716,6 +1758,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     writeback_candidates,
                     backfill_outcome,
                 )
+                safety.mark_verified(writeback_candidates)
                 verified_results = [
                     result for result in writeback_candidates if result.get("status") == "completed"
                 ]
@@ -1775,6 +1818,17 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             except Exception:
                 pass
             _clear_job_lock(email)
+        finally:
+            if writer is not None and writer.held:
+                if safety is not None and not safety.safe_to_release():
+                    writer.retain = True
+                    job['safety_review_required'] = True
+                    job['safety_lock_generation'] = writer.sheet_id
+                if not writer.retain:
+                    try:
+                        writer.release()
+                    except Exception:
+                        job['safety_review_required'] = True
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -1837,7 +1891,7 @@ def _render_login_page():
 
 
 def _main_tab_labels():
-    labels = ["跨境揀貨單", "待製郵便運單", "使用說明"]
+    labels = ["跨境揀貨單", "待製郵便運單", "補製單／重印", "使用說明"]
     if can_view_diagnostics():
         labels.append("讀取診斷")
     return labels
@@ -2933,8 +2987,8 @@ def _render_main_app():
     _active_refresh_tick(is_busy=is_busy, job=job)
 
     tabs = st.tabs(_main_tab_labels())
-    picking_tab, postal_tab, guide_tab = tabs[:3]
-    diagnostics_tab = tabs[3] if len(tabs) > 3 else None
+    picking_tab, postal_tab, reissue_tab, guide_tab = tabs[:4]
+    diagnostics_tab = tabs[4] if len(tabs) > 4 else None
 
     with picking_tab:
         picking_labels_module = import_module_with_retry("features.picking_labels")
@@ -2955,6 +3009,10 @@ def _render_main_app():
             done=done,
             batch_summary=batch_summary,
         )
+
+    with reissue_tab:
+        from features.shipment_workbench import render_reissue_tab
+        render_reissue_tab(disabled=is_busy)
 
     with guide_tab:
         st.markdown("# Cross-Border製單系統使用說明")
