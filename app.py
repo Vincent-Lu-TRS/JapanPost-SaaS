@@ -48,6 +48,8 @@ from pending_editor import (
     pending_order_warning_lines,
     sanitize_hscode,
 )
+from features.shipment_workbench import (REISSUE_CARD_CSS, SUMMARY_COLUMN_WIDTHS, action_column_widths,
+                                         effective_split_enabled, render_split_toggle, render_split_planner)
 from fx_rates import fetch_usd_jpy_rate
 from postal_ui_feedback import (
     completed_order_ids,
@@ -797,7 +799,7 @@ def _build_pending_run_frame_from_v2_state(
         return edited.iloc[0:0].copy()
     selected = edited.loc[selected_indices].copy()
     split_orders = {str(row.get("注文番号(貼上原始資料)", "")) for _,row in selected.iterrows()
-                    if st.session_state.get(f"split_{row.get('注文番号(貼上原始資料)', '')}_{_v2_reset_version(str(row.get('注文番号(貼上原始資料)', '')))}_enabled", False)}
+                    if effective_split_enabled(row, key=f"split_{row.get('注文番号(貼上原始資料)', '')}_{_v2_reset_version(str(row.get('注文番号(貼上原始資料)', '')))}")}
     if split_orders:
         selected = selected[~selected["注文番号(貼上原始資料)"].astype(str).isin(split_orders)].copy()
     return expand_pending_orders_for_trans_types(
@@ -872,7 +874,8 @@ def _render_postal_pending_v2(
     required_id_warnings = _required_id_warning_lines(df_pending_for_run)
     pending_data_warnings = _pending_data_warning_lines(df_pending_for_run)
 
-    with st.container():
+    st.markdown(REISSUE_CARD_CSS, unsafe_allow_html=True)
+    with st.container(key="pending_workbench"):
         left_panel, right_panel = st.columns([3.05, 1.2], gap="medium", vertical_alignment="top")
 
         with right_panel:
@@ -1176,44 +1179,11 @@ def _render_postal_pending_v2(
                     )
                     summary_row = build_pending_summary_frame(preview_df).iloc[0]
 
-                    with st.container(border=True):
+                    with st.container(border=True, key=f"pending_order_card_{position}"):
                         st.markdown('<span class="postal-v2-card-marker"></span>', unsafe_allow_html=True)
-                        info_cols = st.columns(
-                            [.58, 1.75, 2.45, .86, .86, 1.0],
-                            gap="small",
-                            vertical_alignment="center",
-                        )
-                        with info_cols[0]:
-                            _initialize_v2_order_selected_widget(order_id, selected_key)
-                            st.checkbox(
-                                "製單",
-                                key=selected_key,
-                                on_change=_sync_v2_order_selected_from_widget,
-                                args=(order_id, selected_key),
-                            )
-                        with info_cols[1]:
-                            st.markdown(_native_info("Order No.", order_id), unsafe_allow_html=True)
-                        with info_cols[2]:
-                            st.markdown(_native_info("Country", summary_row["Country"]), unsafe_allow_html=True)
-                        with info_cols[3]:
-                            st.markdown(_native_info("USD", summary_row["TotalValue(USD)"]), unsafe_allow_html=True)
-                        with info_cols[4]:
-                            st.markdown(_native_info("JPY", summary_row["TotalValue(JPY)"]), unsafe_allow_html=True)
-
-                        if kind in {"china", "korea"}:
-                            # Keep both select columns at 1.8 (1.5x the previous 1.2 ratio)
-                            # while retaining room for country-specific ID fields.
-                            action_cols = st.columns(
-                                [1.2, 1.8, 1.8, 1.1, 1.2, .7],
-                                gap="small",
-                                vertical_alignment="center",
-                            )
-                        else:
-                            action_cols = st.columns(
-                                [1.42, 1.8, 1.8, 1.25, .9],
-                                gap="small",
-                                vertical_alignment="center",
-                            )
+                        info_slot = st.empty()
+                        with st.container(key=f"pending_recipient_fields_{position}"):
+                            action_cols = st.columns(action_column_widths(kind), gap="small", vertical_alignment="center")
                         with action_cols[0]:
                             edited_name = st.text_input(
                                 "姓名",
@@ -1304,16 +1274,28 @@ def _render_postal_pending_v2(
                             on_change=_mark_pending_editor_dirty,
                         )
                         edited_items_by_position[position] = restore_v2_item_frame(edited_display_frame)
-                        from features.shipment_workbench import render_split_planner
                         split_row = apply_pending_order_editor_values(
                             pd.DataFrame([row]), pd.DataFrame([edited_summary_rows[-1]]),
                             {0: edited_items_by_position[position]}, usd_jpy_rate=rate,
                         ).iloc[0]
+                        current_summary = build_pending_summary_frame(pd.DataFrame([split_row])).iloc[0]
+                        with info_slot.container():
+                            info_cols = st.columns(SUMMARY_COLUMN_WIDTHS, gap="small", vertical_alignment="center")
+                            with info_cols[0]:
+                                _initialize_v2_order_selected_widget(order_id, selected_key)
+                                st.checkbox("製單", key=selected_key, on_change=_sync_v2_order_selected_from_widget,
+                                            args=(order_id, selected_key))
+                            for area, label, value in zip(info_cols[1:5], ('Order No.', 'Country', 'USD', 'JPY'),
+                                    (order_id, current_summary['Country'], current_summary['TotalValue(USD)'], current_summary['TotalValue(JPY)'])):
+                                with area:
+                                    st.markdown(_native_info(label, value), unsafe_allow_html=True)
+                            with info_cols[-1]:
+                                render_split_toggle(split_row, key=f"split_{order_id}_{reset_version}", disabled=is_busy)
                         render_split_planner(
                             split_row, source_row=row,
                             key=f"split_{order_id}_{reset_version}",
                             extra_selected=st.session_state.get(extra_trans_key, "無") != "無",
-                            disabled=is_busy,
+                            disabled=is_busy, header_rendered=True,
                         )
 
                 if len(df_pending) > editable_count:

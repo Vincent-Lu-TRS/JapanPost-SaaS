@@ -93,6 +93,24 @@ class ServiceTests(unittest.TestCase):
                             source_loader=lambda order: self.row, completion_reader=self.completion,
                             runner=kwargs.pop('runner', self.runner), backfill=kwargs.pop('backfill', self.backfill), **kwargs)
 
+    def test_whole_order_copy_two_tracking_rows_and_completed_replay(self):
+        self.pairs.add(('imy2099999','OLD000000001JP'))
+        quantities = {i['id']:i['quantity'] for i in source_items(self.row)}
+        plan = build_plan(self.row, [{'method':method,'quantities':quantities} for method in ('ePacket','EMS')],
+                          mode='reissue',original_tracking='OLD000000001JP',nonce='copy',copy_type='whole_order')
+        seen = []
+        def backfill(results, **kwargs):
+            seen.extend(copy.deepcopy(results))
+            return self.backfill(results,**kwargs)
+        result = self.execute(plan,backfill=backfill,tracking_baseline={'OLD000000001JP'},confirmed_new_tracking=True)
+        self.assertEqual(len(self.calls),2)
+        self.assertEqual(len({r['tracking'] for r in seen}),2)
+        self.assertEqual([r['order_id'] for r in seen],['imy2099999']*2)
+        self.assertEqual([r['shipment_role'] for r in seen],['additional']*2)
+        self.assertTrue(all(r['status']=='completed' for r in result))
+        self.execute(plan)
+        self.assertEqual(len(self.calls),2)
+
     def test_two_packages_keep_original_order_and_retry_after_restart_never_reissues(self):
         results = self.execute()
         self.assertEqual(len(self.calls), 2)

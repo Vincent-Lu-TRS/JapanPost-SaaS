@@ -80,26 +80,39 @@ def _execute(plan, *, key, baseline=None, confirmed=False, disabled=False, compa
     return attempted
 
 
-def render_split_planner(row, *, source_row=None, key='split', extra_selected=False, disabled=False):
-    if not verified_email():
-        return
-    if not st.checkbox('拆分包裹', key=key + '_enabled', disabled=disabled):
-        return
-    if extra_selected:
-        st.error('整單追加會複製完整內容；拆單請先把「追加製作」設為「無」。')
-        return
-    source_row = source_row if source_row is not None else row
+SUMMARY_COLUMN_WIDTHS = [.58, 1.75, 2.45, .86, .86, 1.0]
+
+
+def action_column_widths(kind):
+    return [1.2, 1.8, 1.8, 1.1, 1.2, .7] if kind in {'china','korea'} else [1.42, 1.8, 1.8, 1.25, .9]
+
+
+def split_eligible(row):
     try:
-        items = source_items(row)
-        original = source_items(source_row)
-        if [(i['source_index'], i['quantity']) for i in items] != [(i['source_index'], i['quantity']) for i in original]:
-            raise ValueError('拆單需保留來源各項總數量；請恢復數量後再分配包裹')
-    except ValueError as error:
-        st.error(str(error))
-        return
-    count = int(st.number_input('包裹數', min_value=1, max_value=20, value=1,
+        return sum(item['quantity'] for item in source_items(row)) >= 2
+    except ValueError:
+        return False
+
+
+def effective_split_enabled(row, *, key):
+    # Conflicting split + additional choices stay out of normal submission too.
+    return bool(split_eligible(row) and st.session_state.get(key + '_enabled', False))
+
+
+def render_split_toggle(row, *, key, disabled=False):
+    if not split_eligible(row):
+        st.session_state[key + '_enabled'] = False
+        st.session_state.pop(key + '_reviewed_plan', None)
+        return False
+    return st.toggle('拆分包裹', key=key + '_enabled', disabled=disabled)
+
+
+def _render_package_editor(row, *, key, disabled=False):
+    items = source_items(row)
+    count = int(st.number_input('包裹數', min_value=2, max_value=20, value=2,
                                 step=1, key=key + '_count', disabled=disabled))
     packages = []
+    valid = True
     for index in range(count):
         st.markdown(f'包裹 {index + 1}')
         method = st.selectbox('包裹寄送方式', SHIPPING_OPTIONS,
@@ -112,12 +125,34 @@ def render_split_planner(row, *, source_row=None, key='split', extra_selected=Fa
                 max_value=1000000, value=item['quantity'] if index == 0 else 0, step=1,
                 key=f"{key}_qty_{index}_{item['source_index']}", disabled=disabled)
         packages.append({'method': method, 'quantities': quantities})
-    st.caption('每項分配合計必須等於原數量；每包至少一項。相同寄送方式可分成多包。拆單使用獨立送出按鈕。')
+        if not any(quantities.values()):
+            valid = False
+            st.warning(f'包裹{index + 1}中至少要有一項數量為1以上')
+    st.caption('每項分配合計必須等於原數量；每包至少一項。相同寄送方式可分成多包。')
+    return packages, valid
+
+
+def render_split_planner(row, *, source_row=None, key='split', extra_selected=False, disabled=False, header_rendered=False):
+    if not verified_email():
+        return
+    enabled = (st.session_state.get(key + '_enabled', False) if header_rendered
+               else render_split_toggle(row, key=key, disabled=disabled))
+    if not enabled or not split_eligible(row):
+        return
+    if extra_selected:
+        st.error('整單追加會複製完整內容；拆單請先把「追加製作」設為「無」。')
+        return
+    source_row = source_row if source_row is not None else row
     candidate = None
     try:
-        from bot.shipment_service import validate_recipient
-        validate_recipient(row)
-        candidate = build_plan(row, packages, source_row=source_row)
+        items, original = source_items(row), source_items(source_row)
+        if [(i['source_index'], i['quantity']) for i in items] != [(i['source_index'], i['quantity']) for i in original]:
+            raise ValueError('拆單需保留來源各項總數量；請恢復數量後再分配包裹')
+        packages, valid = _render_package_editor(row, key=key, disabled=disabled)
+        if valid:
+            from bot.shipment_service import validate_recipient
+            validate_recipient(row)
+            candidate = build_plan(row, packages, source_row=source_row)
     except ValueError as error:
         st.warning(str(error))
     if st.button('確認拆單計畫', key=key + '_review', disabled=disabled or candidate is None):
@@ -135,40 +170,39 @@ def _invalidate_reissue_review():
 
 REISSUE_CARD_CSS = """
 <style>
-.st-key-reissue_workbench {
-    container-name: reissue-workbench;
+:is(.st-key-pending_workbench, .st-key-reissue_workbench) {
+    container-name: shipment-workbench;
     container-type: inline-size;
     min-width: 0;
 }
-.st-key-reissue_workbench > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+:is(.st-key-pending_workbench, .st-key-reissue_workbench) > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
     min-width: 0;
 }
 .st-key-reissue_actions {
     min-width: 0;
     overflow-wrap: anywhere;
 }
-@container reissue-workbench (max-width: 900px) {
-    .st-key-reissue_workbench > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] {
+@container shipment-workbench (max-width: 900px) {
+    :is(.st-key-pending_workbench, .st-key-reissue_workbench) > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] {
         flex-direction: column;
     }
-    .st-key-reissue_workbench > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    :is(.st-key-pending_workbench, .st-key-reissue_workbench) > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
         flex: 1 1 100%;
         width: 100%;
         min-width: 0;
     }
 }
-.st-key-reissue_order_card {
-    container-name: reissue-order;
+:is(.st-key-reissue_order_card, [class*="st-key-pending_order_card_"]) {
+    container-name: shipment-order;
     container-type: inline-size;
+    min-width: 0;
 }
 @media (min-width: 641px) {
-    @container reissue-order (max-width: 760px) {
-        .st-key-reissue_order_card .st-key-reissue_recipient_fields [data-testid="stHorizontalBlock"],
-        .st-key-reissue_order_card .st-key-reissue_address_fields [data-testid="stHorizontalBlock"] {
+    @container shipment-order (max-width: 760px) {
+        :is(.st-key-reissue_recipient_fields, .st-key-reissue_address_fields, [class*="st-key-pending_recipient_fields_"]) [data-testid="stHorizontalBlock"] {
             flex-wrap: wrap;
         }
-        .st-key-reissue_order_card .st-key-reissue_recipient_fields [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
-        .st-key-reissue_order_card .st-key-reissue_address_fields [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        :is(.st-key-reissue_recipient_fields, .st-key-reissue_address_fields, [class*="st-key-pending_recipient_fields_"]) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
             flex: 1 1 calc(50% - .5rem);
             width: calc(50% - .5rem);
             min-width: min(100%, 220px);
@@ -188,16 +222,18 @@ def _edit_history_row(history, *, disabled=False, usd_jpy_rate=None):
         st.markdown('<span class="postal-v2-card-marker"></span>', unsafe_allow_html=True)
         summary_slot = st.empty()
         with st.container(key='reissue_recipient_fields'):
-            actions = st.columns([1.4, 1.8, 1.2] if kind else [1.4, 1.8], gap='small')
+            actions = st.columns(action_column_widths(kind), gap='small', vertical_alignment='center')
             with actions[0]:
                 name = st.text_input('姓名', value=parsed['clean_name'], key='reissue_name', disabled=disabled, on_change=_invalidate_reissue_review)
             with actions[1]:
                 method = st.selectbox('寄送方式', SHIPPING_OPTIONS,
                                       index=SHIPPING_OPTIONS.index(row.get(SHIPPING_COL)) if row.get(SHIPPING_COL) in SHIPPING_OPTIONS else 0,
                                       key='reissue_method', disabled=disabled, on_change=_invalidate_reissue_review)
+            with actions[2]:
+                extra = st.selectbox('追加製作', ['無'] + SHIPPING_OPTIONS, key='reissue_extra_method', disabled=disabled)
             prc, pccc = parsed['prc_id'], parsed['pccc']
             if kind:
-                with actions[2]:
+                with actions[3]:
                     if kind == 'china':
                         prc = st.text_input('PRC ID', value=prc, key='reissue_prc', disabled=disabled, on_change=_invalidate_reissue_review)
                     else:
@@ -223,12 +259,34 @@ def _edit_history_row(history, *, disabled=False, usd_jpy_rate=None):
                                     'Quantity': st.column_config.TextColumn('數量', width=90)})
         row['Shipping Name'] = compose_shipping_name(name, country, prc, pccc)
         summary = pd.DataFrame([{'Name': row['Shipping Name'], 'TransType': method}])
-        applied = apply_pending_order_editor_values(pd.DataFrame([row]), summary,
-                                                    {0: restore_v2_item_frame(edited)},
-                                                    usd_jpy_rate=usd_jpy_rate).iloc[0]
-        summary_row = build_pending_summary_frame(pd.DataFrame([applied])).iloc[0]
+        try:
+            applied = apply_pending_order_editor_values(pd.DataFrame([row]), summary,
+                                                        {0: restore_v2_item_frame(edited)},
+                                                        usd_jpy_rate=usd_jpy_rate).iloc[0]
+            source_items(applied)
+            summary_row = build_pending_summary_frame(pd.DataFrame([applied])).iloc[0]
+        except (ValueError, OverflowError) as error:
+            # Keep the real editor and its invalid text visible. No corrected
+            # fallback row may flow into a plan, and a discarded click cannot
+            # restart when the operator later fixes the cell.
+            applied = None
+            if not st.session_state.get('reissue_submission'):
+                st.session_state.pop('reissue_intent', None)
+            message = (str(error) if isinstance(error, ValueError) else
+                       '品項金額或數量超出可計算範圍，請修正後重新按開始。')
+            st.error(message)
+            summary_row = {'Country':country, 'TotalValue(USD)':'—', 'TotalValue(JPY)':'—'}
         with summary_slot.container():
-            for area, label, value in zip(st.columns([1.75, 2.45, .86, .86], gap='small'),
+            columns = st.columns(SUMMARY_COLUMN_WIDTHS, gap='small', vertical_alignment='center')
+            with columns[-1]:
+                if applied is None:
+                    # The header widget has not been instantiated in this run.
+                    st.session_state['reissue_split_enabled'] = False
+                    st.session_state.pop('reissue_split_reviewed_plan', None)
+                    split_active = False
+                else:
+                    split_active = render_split_toggle(applied, key='reissue_split', disabled=disabled)
+            for area, label, value in zip(columns[1:5],
                     ('Order No.', 'Country', 'USD', 'JPY'),
                     (history['order_id'], summary_row['Country'], summary_row['TotalValue(USD)'], summary_row['TotalValue(JPY)'])):
                 style = 'order' if label == 'Order No.' else 'country' if label == 'Country' else 'standard'
@@ -237,14 +295,19 @@ def _edit_history_row(history, *, disabled=False, usd_jpy_rate=None):
                                 f'<span class="native-info-label">{html.escape(label)}</span>'
                                 f'<span class="native-info-value">{html.escape(str(value))}</span></div>',
                                 unsafe_allow_html=True)
-    return applied
+        packages = None
+        if split_active:
+            if extra != '無':
+                st.error('整單追加會複製完整內容；拆單請先把「追加製作」設為「無」。')
+            else:
+                packages, _ = _render_package_editor(applied, key='reissue_split', disabled=disabled)
+    return applied, packages, split_active, extra
 
 
 def _refresh_reissue_history(order_id):
     # Only explicit execution/recovery triggers this refresh; reruns use the
     # lookup snapshot. The execution service still checks authoritative state.
     st.session_state.pop('reissue_reviewed_plan', None)
-    st.session_state['reissue_nonce'] = uuid.uuid4().hex
     try:
         from bot.shipment_service import lookup_history
         st.session_state['reissue_history'] = lookup_history(order_id)
@@ -256,26 +319,99 @@ def _refresh_reissue_history(order_id):
         st.warning(message)
 
 
-def _render_reprint(history, *, disabled=False):
-    with st.expander('既有 PDF／重印'):
-        for index, shipment in enumerate(history['shipments'], 1):
-            file_id = shipment.get('drive_file_id', '')
-            if re.fullmatch(r'[A-Za-z0-9_-]+', file_id):
-                st.link_button(f'開啟既有 PDF {index}（重印）', f'https://drive.google.com/file/d/{file_id}/view')
-        if st.button('尋找舊 PDF（只重印）', key='reissue_find_pdf', disabled=disabled):
-            from bot.drive import DRIVE_FOLDER_ID, list_drive_files
-            try:
-                found = [file for file in list_drive_files(DRIVE_FOLDER_ID, name_prefix=history['order_id'])
-                         if '_' + history['order_id'] + '_' in file.get('name','')]
-                st.session_state['reissue_old_pdfs'] = [{'id': file['id'], 'name': file.get('name','PDF')} for file in found]
-            except Exception:
-                st.session_state.pop('reissue_old_pdfs', None)
-                st.warning('舊 PDF 無法讀取，請到受限 Drive 資料夾確認。')
-        if 'reissue_old_pdfs' in st.session_state and not st.session_state['reissue_old_pdfs']:
-            st.info('找不到此訂單的舊 PDF；不會因此建立新運單。')
-        for file in st.session_state.get('reissue_old_pdfs', []):
-            if re.fullmatch(r'[A-Za-z0-9_-]+', file['id']):
-                st.link_button(file['name'], f'https://drive.google.com/file/d/{file["id"]}/view')
+def _cache_original_pdf_urls(history, actor):
+    try:
+        from bot.drive import resolve_original_label_urls
+        urls = resolve_original_label_urls(history['order_id'], history['tracking_baseline'],
+                                           shipments=history.get('shipments', ()))
+    except Exception:
+        urls = {}
+    st.session_state['reissue_pdf_cache'] = {'order_id':history['order_id'], 'actor':actor, 'urls':urls}
+
+
+def _reissue_candidate(row, packages, history, original_tracking, extra, split_active):
+    from bot.shipment_service import validate_recipient
+    validate_recipient(row)
+    if split_active and extra != '無':
+        raise ValueError('整單追加與拆單不能同時使用')
+    items = source_items(row)
+    if not split_active:
+        packages = [{'method':row[SHIPPING_COL], 'quantities':{i['id']:i['quantity'] for i in items}}]
+        if extra != '無' and extra != row[SHIPPING_COL]:
+            packages.append({'method':extra, 'quantities':dict(packages[0]['quantities'])})
+    return build_plan(row, packages, mode='reissue', original_tracking=original_tracking,
+                      nonce=st.session_state['reissue_nonce'], source_row=history['row'],
+                      source_kind=history['source_kind'], source_time=history['source_time'],
+                      source_ref=history.get('source_ref',''),
+                      copy_type='whole_order' if not split_active and len(packages) == 2 else '')
+
+
+# Streamlit 1.56.0's native DataEditor syncEditState is debounced by 150 ms.
+# A browser fragment tick is enqueued after that commit on the same WebSocket.
+# A full script rerun is never treated as that acknowledgment.
+REISSUE_COMMIT_FENCE_SECONDS = .25
+REISSUE_COMMIT_FENCE_TIMEOUT = 10
+
+
+def _accept_reissue_commit_ack(actor, nonce, token, *, context=None):
+    intent = st.session_state.get('reissue_intent')
+    if not intent or intent.get('stage') != 'waiting':
+        return False
+    if (intent.get('actor'), intent.get('nonce'), intent.get('token')) != (actor, nonce, token):
+        return False
+    if (verified_email() != actor or st.session_state.get('reissue_query_actor') != actor
+            or st.session_state.get('reissue_nonce') != nonce):
+        return False
+    if context is None:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        context = get_script_run_ctx()
+    current = getattr(context, 'current_fragment_id', None)
+    if not current or current not in (getattr(context, 'fragment_ids_this_run', None) or []):
+        return False
+    if time.monotonic() - intent['created_at'] > REISSUE_COMMIT_FENCE_TIMEOUT:
+        intent['stage'] = 'failed'
+        st.session_state['reissue_submission_error'] = '編輯同步確認逾時，未送出製單；請重新查詢原訂單。'
+        return False
+    intent['stage'] = 'ready'
+    return True
+
+
+def _render_reissue_commit_fence(intent):
+    actor, nonce, token = intent['actor'], intent['nonce'], intent['token']
+    def commit_tick():
+        if _accept_reissue_commit_ack(actor, nonce, token):
+            st.rerun(scope='app')
+        if st.session_state.get('reissue_submission_error'):
+            st.error(st.session_state['reissue_submission_error'])
+    # Streamlit 1.56 hashes __qualname__ into fragment_id. Old draft timers
+    # cannot acknowledge a later click that happens to occupy the same UI slot.
+    commit_tick.__qualname__ = '_reissue_commit_fence_' + token
+    st.fragment(run_every=REISSUE_COMMIT_FENCE_SECONDS)(commit_tick)()
+
+
+def _submit_reissue(plan, history, actor):
+    current_actor = verified_email()
+    if not current_actor or current_actor != actor or st.session_state.get('reissue_query_actor') != current_actor:
+        st.error('登入狀態已變更，請重新登入並查詢原訂單。')
+        return
+    if st.session_state.get('reissue_submission'):
+        return
+    submission = {'plan':copy.deepcopy(plan), 'baseline':copy.deepcopy(history['tracking_baseline']),
+                  'verified_actor':current_actor}
+    st.session_state['reissue_submission'] = submission
+    try:
+        from bot.shipment_service import execute_plan
+        with st.spinner('正在製作補單；中斷後請以原計畫恢復。'):
+            st.session_state['reissue_results'] = execute_plan(copy.deepcopy(submission['plan']),
+                requested_by=submission['verified_actor'], tracking_baseline=copy.deepcopy(submission['baseline']),
+                confirmed_new_tracking=True)
+    except ValueError as error:
+        st.session_state['reissue_submission_error'] = str(error)
+    except Exception as error:
+        code = getattr(error, 'reason_code', 'shipment_safety_unavailable')
+        st.session_state['reissue_submission_error'] = f'工作已停止，請以原計畫恢復或交管理員核對。計畫 {plan["plan_id"]}｜{code}'
+    finally:
+        _refresh_reissue_history(plan['order_id'])
 
 
 def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
@@ -301,16 +437,23 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
                 from bot.shipment_service import lookup_history
                 st.session_state['reissue_history'] = lookup_history(order.strip())
                 st.session_state['reissue_nonce'] = uuid.uuid4().hex
+                st.session_state['reissue_query_actor'] = email
+                _cache_original_pdf_urls(st.session_state['reissue_history'], email)
             except ValueError as error:
                 st.error(str(error))
             except Exception:
                 st.error('歷史資料或加密明細帳無法安全讀取；請聯絡管理員。')
+    if st.session_state.get('reissue_submission_error'):
+        st.error(st.session_state['reissue_submission_error'])
     for key in ('reissue_resume_warning', 'reissue_refresh_warning'):
         if st.session_state.get(key):
             st.warning(st.session_state[key])
     if st.session_state.get('reissue_resume_error'):
         st.error(st.session_state['reissue_resume_error'])
     history = st.session_state.get('reissue_history')
+    if st.session_state.get('reissue_query_actor') not in (None, email):
+        st.warning('登入狀態已變更，請重新查詢原訂單。')
+        return
     if not history or order.strip() != history['order_id']:
         _show_results([r for r in st.session_state.get('reissue_results', [])
                        if r['order_id'] == order.strip()])
@@ -323,53 +466,74 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
                 if not usd_jpy_rate:
                     st.warning('暫時無法取得 USD/JPY 匯率；若編輯 Value 或 Quantity，'
                                'TotalValue(JPY) 會保留來源預設值。')
-                row = _edit_history_row(history, disabled=disabled, usd_jpy_rate=usd_jpy_rate)
+                row, packages, split_active, extra = _edit_history_row(history, disabled=disabled, usd_jpy_rate=usd_jpy_rate)
             else:
                 st.warning('此訂單沒有已確認的舊運單，只能恢復原計畫或由管理員核對。')
         with right_panel:
             with st.container(border=True, key='reissue_actions'):
                 st.markdown('<span class="postal-v2-operation-panel"></span>', unsafe_allow_html=True)
                 if history['tracking_baseline']:
-                    st.markdown('<div class="postal-v2-panel-heading">補單操作</div>', unsafe_allow_html=True)
                     if len(history['tracking_baseline']) == 1:
                         original_tracking = history['tracking_baseline'][0]
+                    else:
+                        original_tracking = st.session_state.get('reissue_original_tracking', history['tracking_baseline'][0])
+                    title, link = st.columns([1.2,1], gap='small', vertical_alignment='center')
+                    with title:
+                        st.markdown('<div class="postal-v2-panel-heading">補單操作</div>', unsafe_allow_html=True)
+                    cached = st.session_state.get('reissue_pdf_cache', {})
+                    url = cached.get('urls', {}).get(original_tracking) if cached.get('actor') == email and cached.get('order_id') == history['order_id'] else None
+                    if url:
+                        with link:
+                            st.link_button('開啟原運單', url)
+                    if len(history['tracking_baseline']) == 1:
                         st.caption('關聯原運單：' + original_tracking)
                     else:
                         original_tracking = st.selectbox('關聯原運單', history['tracking_baseline'],
-                                                          key='reissue_original_tracking', disabled=disabled, on_change=_invalidate_reissue_review)
-                    confirmed = st.checkbox('我已核對', help='這次將產生新 tracking，並保留舊運單。請核對完整收件與品項資料。',
-                                             key='reissue_new_tracking', disabled=disabled, on_change=_invalidate_reissue_review)
-                    candidate = None
-                    validation_error = ''
-                    try:
-                        from bot.shipment_service import validate_recipient
-                        validate_recipient(row)
-                        items = source_items(row)
-                        candidate = build_plan(row, [{'method': row[SHIPPING_COL],
-                                                      'quantities': {i['id']: i['quantity'] for i in items}}],
-                                               mode='reissue', original_tracking=original_tracking,
-                                               nonce=st.session_state['reissue_nonce'], source_row=history['row'],
-                                               source_kind=history['source_kind'], source_time=history['source_time'],
-                                               source_ref=history.get('source_ref',''))
-                    except ValueError as error:
-                        validation_error = str(error)
-                    if st.button('確認補單資料', key='reissue_review', disabled=disabled, width='stretch'):
-                        if not candidate or not confirmed:
-                            st.error(validation_error or '請確認將產生新 tracking，並核對完整收件與品項資料。')
+                                                          key='reissue_original_tracking', disabled=disabled)
+                    split_invalid = row is None
+                    if split_active:
+                        try:
+                            _reissue_candidate(row, packages, history, original_tracking, extra, split_active)
+                        except ValueError as error:
+                            split_invalid = True
+                            if not packages or all(any(p['quantities'].values()) for p in packages):
+                                st.warning(str(error))
+                    submission = st.session_state.get('reissue_submission')
+                    intent = st.session_state.get('reissue_intent')
+                    if st.button('開始製作補單', key='reissue_execute', type='primary', width='stretch',
+                                 disabled=disabled or bool(submission) or bool(intent) or split_invalid):
+                        if not st.session_state.get('reissue_submission') and not st.session_state.get('reissue_intent'):
+                            st.session_state.pop('reissue_submission_error', None)
+                            st.session_state['reissue_intent'] = {'actor':email,
+                                'nonce':st.session_state['reissue_nonce'], 'token':uuid.uuid4().hex,
+                                'created_at':time.monotonic(), 'stage':'waiting'}
+                            st.rerun()
+                    if intent and intent.get('stage') == 'waiting':
+                        st.caption('正在同步最後編輯內容…')
+                        _render_reissue_commit_fence(intent)
+                    elif intent and intent.get('stage') == 'ready' and not submission:
+                        if (intent['actor'] == verified_email() == email
+                                and intent['nonce'] == st.session_state.get('reissue_nonce')
+                                and time.monotonic() - intent['created_at'] <= REISSUE_COMMIT_FENCE_TIMEOUT):
+                            try:
+                                plan = _reissue_candidate(row, packages, history, original_tracking, extra, split_active)
+                            except ValueError as error:
+                                st.session_state['reissue_submission_error'] = str(error)
+                                st.session_state.pop('reissue_intent', None)
+                            else:
+                                _submit_reissue(plan, history, email)
+                            st.rerun()
                         else:
-                            st.session_state['reissue_reviewed_plan'] = candidate
-                    reviewed = st.session_state.get('reissue_reviewed_plan')
-                    if candidate and reviewed and candidate['integrity'] == reviewed['integrity'] and confirmed:
-                        _execute(reviewed, key='reissue', baseline=history['tracking_baseline'],
-                                 confirmed=confirmed, disabled=disabled, compact=True)
-                    elif reviewed:
-                        st.caption('補製資料或確認狀態已變更，請重新確認補單資料。')
+                            intent['stage'] = 'failed'
+                            st.session_state['reissue_submission_error'] = '編輯同步確認已失效，未送出製單；請重新查詢原訂單。'
+                            st.rerun()
+                    if st.session_state.get('reissue_submission'):
+                        st.caption('本次補製已送出；請查看結果或恢復原計畫。再次補製請重新查詢訂單。')
                 # Execution can create an unfinished record even when the initial
                 # query had none. Use the explicit post-operation refresh now.
                 history = st.session_state.get('reissue_history')
                 if history:
                     _render_resume(history, email, disabled=disabled)
-                    _render_reprint(history, disabled=disabled)
     _show_results(st.session_state.get('reissue_results', []))
 
 

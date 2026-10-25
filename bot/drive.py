@@ -13,6 +13,188 @@ from googleapiclient.http import MediaIoBaseUpload
 
 DRIVE_FOLDER_ID = "1_JYIwmtpKQ7FjWY2zplofLGe0GHaEMvw"
 SCOPES = ["https://www.googleapis.com/auth/drive"]
+HISTORICAL_LABEL_FOLDER_ID = "1RZ0hxcRxwjNomTTfsznAsBmfumGOzdhe"
+ORIGINAL_LABEL_FOLDER_IDS = frozenset((HISTORICAL_LABEL_FOLDER_ID, DRIVE_FOLDER_ID))
+_ORIGINAL_LABEL_METADATA = "id,name,mimeType,parents,trashed,shortcutDetails"
+_ORIGINAL_LABEL_MAX_PAGES = 5
+_ORIGINAL_LABEL_MAX_GETS = 20
+
+
+def _valid_drive_file_id(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", value) is not None
+
+
+def _validated_original_pdf_url(metadata, expected_id=None):
+    """Validate direct PDF metadata; never follow a shortcut or trust a supplied URL."""
+    if not isinstance(metadata, dict):
+        return None
+    file_id = metadata.get("id")
+    if not _valid_drive_file_id(file_id) or (expected_id is not None and file_id != expected_id):
+        return None
+    parents = metadata.get("parents")
+    if (metadata.get("mimeType") != "application/pdf"
+            or metadata.get("trashed") is not False
+            or "shortcutDetails" in metadata
+            or not isinstance(parents, list)
+            or not any(parent in ORIGINAL_LABEL_FOLDER_IDS for parent in parents if isinstance(parent, str))):
+        return None
+    return f"https://drive.google.com/file/d/{file_id}/view"
+
+
+def _find_original_pdf_candidates(service, order_id):
+    """Return complete, bounded metadata candidates, or None when completeness is unknown."""
+    # Inputs are validated too; escape Drive query literals independently of that policy.
+    def literal(value):
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    folders = " or ".join(f"{literal(folder)} in parents" for folder in sorted(ORIGINAL_LABEL_FOLDER_IDS))
+    # `name contains` is prefix-only in Drive. A fullText phrase also matches name
+    # tokens; Drive explicitly treats underscores as spaces in quoted phrases.
+    # Search may include content-index matches, so local filename validation remains
+    # authoritative. No content or description is requested/downloaded.
+    order_phrase = '"' + order_id.replace("_", " ") + '"'
+    query = (f"({folders}) and trashed = false and mimeType = 'application/pdf'"
+             f" and fullText contains {literal(order_phrase)}")
+    candidates = []
+    page_token = None
+    seen_tokens = set()
+    try:
+        for _page in range(_ORIGINAL_LABEL_MAX_PAGES):
+            response = service.files().list(
+                q=query, fields=f"nextPageToken,incompleteSearch,files({_ORIGINAL_LABEL_METADATA})",
+                pageToken=page_token, pageSize=100, supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            if not isinstance(response, dict) or response.get("incompleteSearch"):
+                return None
+            files = response.get("files", [])
+            if not isinstance(files, list):
+                return None
+            candidates.extend(files)
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                return candidates
+            if not isinstance(page_token, str) or page_token in seen_tokens:
+                return None
+            seen_tokens.add(page_token)
+    except Exception:
+        return None
+    return None
+
+
+def _original_filename_matches(name, order_id, tracking):
+    """Accept only a unique order/tracking interpretation across both producer grammars."""
+    if not isinstance(name, str) or not name.lower().endswith(".pdf"):
+        return False
+    stem = name[:-4]
+    candidates = set()
+    # Legacy producer uses an actual space between content and the complete
+    # order_tracking suffix. Punctuation/underscores inside that order are retained.
+    if " " in stem:
+        content, suffix = stem.rsplit(" ", 1)
+        if content and "_" in suffix:
+            legacy_order, legacy_tracking = suffix.rsplit("_", 1)
+            if (re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", legacy_order)
+                    and re.fullmatch(r"[A-Za-z0-9-]{1,80}", legacy_tracking)):
+                candidates.add((legacy_order, legacy_tracking))
+    # Current producer uses content_order_tracking_recipient. Enumerate every
+    # legal order boundary instead of assuming the last underscore belongs to item.
+    # Do not begin from the requested tracking: a recipient can itself contain
+    # " order_tracking", while the actual current label belongs to another order.
+    # Generic legal tracking tokens are considered too, rather than guessing that
+    # only a postal-looking token is authoritative. Multiple interpretations hide.
+    parts = stem.split("_")
+    for tracking_index in range(2, len(parts) - 1):
+        candidate_tracking = parts[tracking_index]
+        if (not re.fullmatch(r"[A-Za-z0-9-]{1,80}", candidate_tracking)
+                or not "_".join(parts[tracking_index + 1:])):
+            continue
+        for order_index in range(1, tracking_index):
+            if not "_".join(parts[:order_index]):
+                continue
+            candidate_order = "_".join(parts[order_index:tracking_index])
+            if re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", candidate_order):
+                candidates.add((candidate_order, candidate_tracking))
+    return candidates == {(order_id, tracking)}
+
+
+def resolve_original_label_urls(order_id, tracking_numbers, *, shipments=(), service=None) -> dict[str, str]:
+    """Resolve only requested original labels using trusted ledger links, then exact filenames.
+
+    `shipments` must come from server-filtered history for this order. This reads metadata
+    only. Missing access, ambiguous matches and incomplete searches omit that tracking;
+    callers can hide the link without exposing Drive metadata or service exceptions.
+    """
+    if not isinstance(order_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", order_id):
+        return {}
+    if isinstance(tracking_numbers, (str, bytes)):
+        return {}
+    try:
+        tracking_values = list(dict.fromkeys(tracking_numbers))
+        ledger_shipments = list(shipments)
+    except (TypeError, ValueError):
+        return {}
+    if (not tracking_values or len(tracking_values) > 50 or any(
+            not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}", value)
+            for value in tracking_values)):
+        return {}
+    try:
+        if service is None:
+            service = _get_drive_service()
+    except Exception:
+        return {}
+
+    resolved = {}
+    unresolved = []
+    metadata_cache = {}
+    for tracking in tracking_values:
+        ledger_ids = {shipment.get("drive_file_id") for shipment in ledger_shipments
+                      if isinstance(shipment, dict) and shipment.get("tracking") == tracking
+                      and _valid_drive_file_id(shipment.get("drive_file_id"))}
+        ledger_urls = set()
+        unavailable = False
+        for file_id in sorted(ledger_ids):
+            if file_id not in metadata_cache:
+                if len(metadata_cache) >= _ORIGINAL_LABEL_MAX_GETS:
+                    unavailable = True
+                    break
+                try:
+                    metadata_cache[file_id] = service.files().get(
+                        fileId=file_id, fields=_ORIGINAL_LABEL_METADATA,
+                        supportsAllDrives=True).execute()
+                except Exception:
+                    # 404 can conceal missing access too; never infer absence from
+                    # an exception, or choose a visible subset of ledger links.
+                    metadata_cache[file_id] = None
+            metadata = metadata_cache[file_id]
+            if not isinstance(metadata, dict):
+                unavailable = True
+                break
+            url = _validated_original_pdf_url(metadata, expected_id=file_id)
+            if url:
+                ledger_urls.add(url)
+        if unavailable:
+            continue
+        if ledger_urls:
+            if len(ledger_urls) == 1:
+                resolved[tracking] = ledger_urls.pop()
+            continue
+        unresolved.append(tracking)
+
+    # One complete order query serves all unresolved tracking numbers. Together
+    # with the shared get cache this caps the entire call at 20 gets + 5 lists.
+    candidates = _find_original_pdf_candidates(service, order_id) if unresolved else None
+    if candidates is None:
+        return resolved
+    for tracking in unresolved:
+        urls = set()
+        for metadata in candidates:
+            url = _validated_original_pdf_url(metadata)
+            if url and _original_filename_matches(metadata.get("name"), order_id, tracking):
+                urls.add(url)
+        if len(urls) == 1:
+            resolved[tracking] = urls.pop()
+    return resolved
 
 
 def _get_drive_service():

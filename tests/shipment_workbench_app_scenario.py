@@ -17,7 +17,8 @@ class WorkbenchAppTests(unittest.TestCase):
                '收件人國家':'GERMANY', 'Shipping Street':'Example Street', SHIPPING_COL:'ePacket',
                '內容物1':'A','申告金額1':'2.50','數量1':'2',
                '內容物2':'B','申告金額2':'3','數量2':'3'})
-        ''') + '\n' + body)
+        ''') + '\n' + body, default_timeout=15)
+
 
     def authenticate(self, app):
         app.run()
@@ -26,9 +27,10 @@ class WorkbenchAppTests(unittest.TestCase):
         app.session_state['_verified_auth_email'] = 'staff@tkrjm.co.jp'
         return app.run()
 
+
     def test_actual_split_form_quantity_interaction_and_preview(self):
         app = self.authenticate(self.app("render_split_planner(row, source_row=row, key='test')"))
-        next(x for x in app.checkbox if x.label == '拆分包裹').check().run()
+        next(x for x in app.toggle if x.label == '拆分包裹').set_value(True).run()
         next(x for x in app.number_input if x.label == '包裹數').set_value(2).run()
         next(x for x in app.number_input if x.key == 'test_qty_0_1').set_value(1).run()
         next(x for x in app.number_input if x.key == 'test_qty_1_1').set_value(1).run()
@@ -44,10 +46,12 @@ class WorkbenchAppTests(unittest.TestCase):
         self.assertEqual(list(app.dataframe[0].value.columns), ['包裹','方式','申告 USD','內容物'])
         self.assertTrue(any('計畫 ' in x.value for x in app.caption))
 
+
     def test_anonymous_cannot_query_history(self):
         app = self.app('render_reissue_tab()').run()
         self.assertFalse(app.text_input)
         self.assertFalse(app.button)
+
 
     def history(self, *, tracking=None, unfinished=None, country='GERMANY'):
         return {'order_id':'imy2099999','row':{'注文番号(貼上原始資料)':'imy2099999',
@@ -60,12 +64,14 @@ class WorkbenchAppTests(unittest.TestCase):
             'tracking_baseline':tracking if tracking is not None else ['EL000000001JP'],
             'shipments':[], 'source_ref':'', 'unfinished_records':unfinished or []}
 
+
     def queried(self, body='render_reissue_tab()'):
         app = self.authenticate(self.app(body))
         app.text_input(key='reissue_order_query').set_value('imy2099999').run()
         app.button(key='reissue_query').click().run()
         self.assertFalse(app.exception)
         return app
+
 
     def run_editor_event(self, app, edited_rows):
         # AppTest renders data_editor as a read-only Dataframe and omits its
@@ -79,97 +85,6 @@ class WorkbenchAppTests(unittest.TestCase):
         state.string_value = json.dumps({'edited_rows': edited_rows, 'added_rows': [], 'deleted_rows': []})
         return app._run(widget_state=states)
 
-    def test_reissue_card_has_expanded_address_v2_items_and_no_reason(self):
-        with patch('bot.shipment_service.lookup_history', return_value=self.history()):
-            app = self.queried()
-            self.assertFalse(app.text_area)
-            self.assertFalse(any(x.label == '收件地址與聯絡資料' for x in app.expander))
-            for key in ('Shipping Street','Shipping City','收件人洲/省','Shipping Zip','Shipping Phone'):
-                self.assertTrue(app.text_input(key='reissue_' + key).value)
-            self.assertFalse(any('Country' == x.label for x in app.text_input))
-            self.assertEqual(list(app.dataframe[0].value.columns), ['No.','Description','HSCode','Value','Quantity'])
-            self.assertEqual(app.dataframe[0].value.iloc[0]['No.'], '1')
-            self.assertTrue(any('postal-v2-card-marker' in x.value for x in app.markdown))
-            self.assertFalse(any('非當時製單快照' in x.value for x in app.warning))
-            app.button(key='reissue_review').click().run()
-            self.assertTrue(app.error)
-            self.assertFalse(any(x.key == 'reissue_execute' for x in app.button))
-            app.checkbox(key='reissue_new_tracking').check().run()
-            app.button(key='reissue_review').click().run()
-            self.assertEqual(app.session_state['reissue_reviewed_plan']['reason'], '')
-            self.assertTrue(any(x.key == 'reissue_execute' for x in app.button))
-
-    def test_reissue_removes_source_disclosures_without_discarding_plan_metadata(self):
-        for source_kind in ('current_source_not_historical_snapshot', 'ledger_snapshot'):
-            history = self.history()
-            history['source_kind'] = source_kind
-            with self.subTest(source_kind=source_kind), patch('bot.shipment_service.lookup_history', return_value=history):
-                app = self.queried()
-                visible_text = '\n'.join(x.value for group in (app.caption, app.warning, app.markdown) for x in group)
-                self.assertNotIn('重新列印既有 PDF 不會產生 tracking', visible_text)
-                self.assertNotIn('來源現存資料，非當時製單快照', visible_text)
-                self.assertFalse(any(x.label == '來源資訊' for x in app.expander))
-                app.checkbox(key='reissue_new_tracking').check().run()
-                app.button(key='reissue_review').click().run()
-                plan = app.session_state['reissue_reviewed_plan']
-                self.assertEqual(plan['source_kind'], history['source_kind'])
-                self.assertEqual(plan['source_time'], history['source_time'])
-
-    def test_reissue_actions_and_secondary_tools_share_right_column(self):
-        record = {'plan':{'plan_id':'saved','order_id':'imy2099999'},
-                  'shipments':[{'shipment_id':'s1','status':'uploaded','tracking':'new-one'}]}
-        with patch('bot.shipment_service.lookup_history', return_value=self.history(unfinished=[record])):
-            app = self.queried()
-            left = next(column for column in app.columns if any(x.key == 'reissue_name' for x in column.text_input))
-            action_columns = [column for column in app.columns if any(x.key == 'reissue_review' for x in column.button)]
-            self.assertEqual(len(action_columns), 1, '補單操作應位於獨立右欄')
-            right = action_columns[0]
-            self.assertIsNot(left, right)
-            self.assertAlmostEqual(left.proto.weight / right.proto.weight, 3.05 / 1.2)
-            self.assertEqual(right.checkbox(key='reissue_new_tracking').label, '我已核對')
-            self.assertIn('新 tracking', right.checkbox(key='reissue_new_tracking').proto.help)
-            self.assertTrue(any(x.key == 'reissue_find_pdf' for x in right.button))
-            self.assertTrue(any(x.key == 'resume_saved' for x in right.button))
-            self.assertFalse(right.dataframe)
-            self.assertFalse(app.sidebar.button)
-
-    def test_reissue_review_is_separate_from_start_and_uses_compact_summary(self):
-        result = [{'order_id':'imy2099999','tracking':'new-one','status':'completed','drive_file_id':'pdf1'}]
-        with patch('bot.shipment_service.lookup_history', return_value=self.history()), patch('bot.shipment_service.execute_plan', return_value=result) as execute:
-            app = self.queried()
-            self.assertEqual(app.button(key='reissue_review').label, '確認補單資料')
-            app.checkbox(key='reissue_new_tracking').check().run()
-            app.button(key='reissue_review').click().run()
-            execute.assert_not_called()
-            self.assertEqual(app.button(key='reissue_execute').label, '開始製作補單')
-            self.assertEqual(len(app.dataframe), 1)
-            self.assertFalse(any('計畫 ' in x.value for x in app.caption))
-            self.assertTrue(any('ePacket' in x.value and '2 件' in x.value and 'USD 5.00' in x.value for x in app.caption))
-            app.button(key='reissue_execute').click().run()
-            execute.assert_called_once()
-            self.assertTrue(any('new-one' in x.value for x in app.markdown))
-            self.assertTrue(any(x.proto.url.endswith('/pdf1/view') for x in app.get('link_button')))
-
-    def test_edit_invalidates_review_and_single_or_multiple_original_tracking(self):
-        with patch('bot.shipment_service.lookup_history', return_value=self.history()):
-            app = self.queried()
-            self.assertFalse(any(x.key == 'reissue_original_tracking' for x in app.selectbox))
-            app.checkbox(key='reissue_new_tracking').check().run()
-            app.button(key='reissue_review').click().run()
-            app.text_input(key='reissue_Shipping Street').set_value('Updated Street').run()
-            self.assertFalse(any(x.key == 'reissue_execute' for x in app.button))
-            app.text_input(key='reissue_Shipping Street').set_value('Example Street').run()
-            self.assertNotIn('reissue_reviewed_plan', app.session_state)
-            self.assertFalse(any(x.key == 'reissue_execute' for x in app.button))
-            app.text_input(key='reissue_Shipping Street').set_value('Updated Street').run()
-            app.button(key='reissue_review').click().run()
-            self.assertEqual(app.session_state['reissue_reviewed_plan']['payload']['Shipping Street'], 'Updated Street')
-        with patch('bot.shipment_service.lookup_history', return_value=self.history(tracking=['old-one','old-two'])):
-            app = self.queried()
-            app.selectbox(key='reissue_original_tracking').select('old-two').run()
-            app.checkbox(key='reissue_new_tracking').check().run()
-            app.button(key='reissue_review').click().run()
-            self.assertEqual(app.session_state['reissue_reviewed_plan']['original_tracking'], 'old-two')
 
     def test_country_kind_ids_follow_shared_chinese_and_korean_classification(self):
         for country, key in [('中國', 'reissue_prc'), ('韓國', 'reissue_pccc')]:
@@ -177,18 +92,6 @@ class WorkbenchAppTests(unittest.TestCase):
                 app = self.queried()
                 self.assertTrue(any(x.key == key for x in app.text_input))
 
-    def test_reprint_is_secondary_and_drive_search_is_lazy_with_empty_feedback(self):
-        with patch('bot.shipment_service.lookup_history', return_value=self.history()), patch('bot.drive.list_drive_files', return_value=[]) as search:
-            app = self.queried()
-            app.text_input(key='reissue_name').set_value('Edited Recipient').run()
-            search.assert_not_called()
-            reprint = next(x for x in app.expander if '重印' in x.label)
-            self.assertTrue(any(x.key == 'reissue_find_pdf' for x in reprint.button))
-            app.button(key='reissue_find_pdf').click().run()
-            search.assert_called_once()
-            self.assertTrue(any('找不到' in x.value for x in app.info))
-            app.run()
-            search.assert_called_once()
 
     def test_resume_is_conditional_and_never_rereads_ledger_on_rerun(self):
         record = {'plan':{'plan_id':'legacy', 'order_id':'imy2099999', 'reason':'old reason'},
@@ -210,6 +113,7 @@ class WorkbenchAppTests(unittest.TestCase):
             self.assertFalse(any('未完成' in x.label for x in app.expander))
             self.assertEqual(lookup.call_count, 2)
 
+
     def test_unknown_resume_is_blocked_and_planned_can_resume(self):
         for status in ('issuing','unknown','label_created','planned','writeback_pending'):
             record = {'plan':{'plan_id':'legacy', 'order_id':'imy2099999'},
@@ -218,57 +122,6 @@ class WorkbenchAppTests(unittest.TestCase):
                 app = self.queried()
                 self.assertEqual(app.button(key='resume_legacy').disabled, status in {'issuing','unknown','label_created'})
 
-    def test_execute_success_partial_and_exception_refresh_history_and_invalidate_review(self):
-        for result in ([{'order_id':'imy2099999','tracking':'new-one','status':'completed','drive_file_id':'pdf1'}],
-                       [{'order_id':'imy2099999','tracking':'new-one','status':'backfill_failed','drive_file_id':'pdf1'}], RuntimeError('stopped')):
-            unfinished = [] if isinstance(result, list) and result[0]['status'] == 'completed' else [
-                {'plan':{'plan_id':'saved', 'order_id':'imy2099999'}, 'shipments':[{'shipment_id':'s1','status':'unknown' if isinstance(result, Exception) else 'writeback_pending','tracking':'new-one'}]}]
-            with self.subTest(result=str(result)), patch('bot.shipment_service.lookup_history', side_effect=[self.history(), self.history(unfinished=unfinished)]) as lookup, patch('bot.shipment_service.execute_plan', side_effect=result if isinstance(result, Exception) else None, return_value=result) as execute:
-                app = self.queried()
-                app.checkbox(key='reissue_new_tracking').check().run()
-                app.button(key='reissue_review').click().run()
-                app.button(key='reissue_execute').click().run()
-                self.assertFalse(app.exception)
-                self.assertEqual(lookup.call_count, 2)
-                self.assertTrue(execute.call_args.kwargs['confirmed_new_tracking'])
-                self.assertNotIn('reissue_reviewed_plan', app.session_state)
-                app.run()
-                self.assertEqual(any('未完成' in x.label for x in app.expander), bool(unfinished))
-                self.assertFalse(any(x.key == 'reissue_execute' for x in app.button))
-                self.assertEqual(lookup.call_count, 2)
-
-    def test_item_edits_preserve_source_positions_values_quantities_and_calculated_usd(self):
-        history = self.history()
-        history['row'].update({'內容物3':'C','申告金額3':'3.00','數量3':'4','HSCode3':'333333'})
-        edits = {'1':{'Description':'Changed C','Value':'4.00','Quantity':'2','HSCode':'444444'}}
-        with patch('bot.shipment_service.lookup_history', return_value=history):
-            app = self.queried()
-            self.run_editor_event(app, edits)
-            app.checkbox(key='reissue_new_tracking').check()
-            self.run_editor_event(app, edits)
-            app.button(key='reissue_review').click()
-            self.run_editor_event(app, edits)
-            plan = app.session_state['reissue_reviewed_plan']
-            self.assertEqual(plan['payload']['內容物3'], 'Changed C')
-            self.assertEqual(plan['payload']['HSCode3'], '444444')
-            self.assertEqual(plan['payload']['數量3'], '2')
-            self.assertEqual(plan['shipments'][0]['total_usd'], '13.00')
-            self.assertEqual([i['source_index'] for i in plan['shipments'][0]['items']], ['1','3'])
-            self.run_editor_event(app, {'1':{**edits['1'], 'Value':'5.00'}})
-            self.assertNotIn('reissue_reviewed_plan', app.session_state)
-            self.assertFalse(any(x.key == 'reissue_execute' for x in app.button))
-
-    def test_existing_pdf_is_available_in_secondary_reprint_without_drive_search(self):
-        history = self.history()
-        history['shipments'] = [{'tracking':'EL000000001JP','drive_file_id':'saved_pdf','status':'completed'}]
-        with patch('bot.shipment_service.lookup_history', return_value=history), patch('bot.drive.list_drive_files') as search:
-            app = self.queried()
-            reprint = next(x for x in app.expander if '重印' in x.label)
-            links = reprint.get('link_button')
-            self.assertEqual(len(links), 1)
-            self.assertEqual(links[0].proto.url, 'https://drive.google.com/file/d/saved_pdf/view')
-            search.assert_not_called()
-            self.assertEqual(sum('EL000000001JP' in x.value for x in app.caption), 1)
 
     def test_resume_exception_and_partial_refresh_without_resubmitting(self):
         record = {'plan':{'plan_id':'saved','order_id':'imy2099999','reason':'legacy'},
@@ -284,19 +137,6 @@ class WorkbenchAppTests(unittest.TestCase):
                 self.assertEqual(lookup.call_count, 2)
                 execute.assert_called_once()
 
-    def test_post_execution_refresh_failure_requires_new_query_and_blocks_stale_review(self):
-        with patch('bot.shipment_service.lookup_history', side_effect=[self.history(), RuntimeError('unavailable')]) as lookup, patch('bot.shipment_service.execute_plan', side_effect=RuntimeError('stopped')):
-            app = self.queried()
-            app.checkbox(key='reissue_new_tracking').check().run()
-            app.button(key='reissue_review').click().run()
-            app.button(key='reissue_execute').click().run()
-            self.assertFalse(app.exception)
-            self.assertNotIn('reissue_history', app.session_state)
-            self.assertNotIn('reissue_reviewed_plan', app.session_state)
-            self.assertTrue(any('重新查詢原訂單' in x.value for x in app.warning))
-            app.run()
-            self.assertFalse(any(x.key == 'reissue_execute' for x in app.button))
-            self.assertEqual(lookup.call_count, 2)
 
     def test_resume_results_remain_visible_after_completed_record_disappears(self):
         record = {'plan':{'plan_id':'saved','order_id':'imy2099999'},
@@ -311,43 +151,6 @@ class WorkbenchAppTests(unittest.TestCase):
             self.assertTrue(any('new-one' in x.value for x in app.markdown))
             self.assertTrue(any(x.proto.url.endswith('/pdf1/view') for x in app.get('link_button')))
 
-    def test_reissue_uses_passed_rate_only_for_edited_values_and_warns_without_rate(self):
-        for rate, edit, expected in ((150, True, '1800'), (150, False, '750'), (None, True, '750')):
-            edits = {'0':{'Value':'4.00','Quantity':'3'}} if edit else {}
-            with self.subTest(rate=rate, edit=edit), patch('bot.shipment_service.lookup_history', return_value=self.history()):
-                app = self.queried(f'render_reissue_tab(usd_jpy_rate={rate!r})')
-                self.run_editor_event(app, edits)
-                self.assertTrue(any('native-info-label">JPY</span><span class="native-info-value">' + expected in x.value for x in app.markdown))
-                self.assertEqual(any('保留來源預設值' in x.value for x in app.warning), rate is None)
-                app.checkbox(key='reissue_new_tracking').check()
-                self.run_editor_event(app, edits)
-                app.button(key='reissue_review').click()
-                self.run_editor_event(app, edits)
-                plan = app.session_state['reissue_reviewed_plan']
-                self.assertEqual(plan['payload']['訂單合計申告金額(JPY)'], expected)
-                self.assertEqual(plan['shipments'][0]['total_usd'], '12.00' if edit else '5.00')
-
-    def test_native_editor_transport_retains_value_and_identity_through_confirmation(self):
-        history = self.history()
-        history['row'].update({'申告金額1':'15.00','數量1':'2','訂單合計申告金額(JPY)':'4500'})
-        edits = {'0':{'Value':'20.00'}}
-        with patch('bot.shipment_service.lookup_history', return_value=history):
-            app = self.queried('render_reissue_tab(usd_jpy_rate=150)')
-            editor_id = app.dataframe[0].proto.id
-            self.run_editor_event(app, edits)
-            self.assertTrue(any('40.00' in x.value for x in app.markdown))
-            self.assertTrue(any('6000' in x.value for x in app.markdown))
-            app.checkbox(key='reissue_new_tracking').check()
-            self.run_editor_event(app, edits)
-            self.assertEqual(app.dataframe[0].proto.id, editor_id)
-            app.button(key='reissue_review').click()
-            self.run_editor_event(app, edits)
-            self.assertFalse(app.exception)
-            self.assertEqual(app.dataframe[0].proto.id, editor_id)
-            plan = app.session_state['reissue_reviewed_plan']
-            self.assertEqual(plan['payload']['申告金額1'], '20.00')
-            self.assertEqual(plan['shipments'][0]['total_usd'], '40.00')
-            self.assertEqual(plan['payload']['訂單合計申告金額(JPY)'], '6000')
 
     def test_resume_immediately_replaces_planned_with_unknown_and_keeps_safe_error(self):
         import copy
@@ -367,6 +170,7 @@ class WorkbenchAppTests(unittest.TestCase):
             self.assertFalse(any('PRIVATE_INTERNAL_ERROR' in x.value for x in app.warning))
             self.assertEqual(lookup.call_count, 2)
             execute.assert_called_once()
+
 
     def test_resume_completed_and_refresh_failure_redraw_immediately_with_results_or_warning(self):
         record = {'plan':{'plan_id':'saved','order_id':'imy2099999'},
@@ -390,6 +194,7 @@ class WorkbenchAppTests(unittest.TestCase):
                 self.assertEqual(lookup.call_count, 2)
                 execute.assert_called_once()
 
+
     def test_resume_callback_revalidates_login_and_rejects_captured_old_identity(self):
         record = {'plan':{'plan_id':'saved','order_id':'imy2099999'},
                   'shipments':[{'shipment_id':'s1','status':'uploaded','tracking':'new-one'}]}
@@ -408,3 +213,285 @@ class WorkbenchAppTests(unittest.TestCase):
                 for key in ('reissue_history','reissue_reviewed_plan','reissue_results'):
                     self.assertNotIn(key, app.session_state)
                 self.assertIn('重新', app.session_state['reissue_resume_warning'])
+
+
+    def setUp(self):
+        self.pdf_patch = patch('bot.drive.resolve_original_label_urls', return_value={}, create=True)
+        self.pdf = self.pdf_patch.start()
+        self.addCleanup(self.pdf_patch.stop)
+
+    def finish_commit_fence(self, app, edited_rows=None):
+        # AppTest does not run browser auto-rerun timers. Model only the server
+        # state after the separately tested true fragment acknowledgment.
+        # Editor values still enter via the browser's native WidgetStates JSON.
+        if 'reissue_intent' in app.session_state:
+            intent=dict(app.session_state['reissue_intent'])
+            if intent.get('stage') == 'waiting':
+                intent['stage']='ready'
+                app.session_state['reissue_intent']=intent
+                return app.run() if edited_rows is None else self.run_editor_event(app,edited_rows)
+        return app
+
+    def submit(self, app):
+        app.button(key='reissue_execute').click().run()
+        return self.finish_commit_fence(app)
+
+    def test_single_button_direct_submit_uses_current_native_widget_values(self):
+        history = self.history()
+        history['row'].update({'內容物3':'C','申告金額3':'3','數量3':'4','HSCode3':'333333'})
+        with patch('bot.shipment_service.lookup_history', return_value=history), patch('bot.shipment_service.execute_plan', return_value=[]) as execute:
+            app = self.queried('render_reissue_tab(usd_jpy_rate=150)')
+            self.assertFalse(any(x.key in {'reissue_new_tracking','reissue_review'} for group in (app.checkbox,app.button) for x in group))
+            self.assertEqual(app.button(key='reissue_execute').label, '開始製作補單')
+            app.text_input(key='reissue_name').set_value('Latest Recipient')
+            app.text_input(key='reissue_Shipping Street').set_value('Latest Street')
+            app.selectbox(key='reissue_method').select('EMS')
+            app.button(key='reissue_execute').click()
+            self.run_editor_event(app, {'1':{'Description':'Changed C','Value':'4.00','Quantity':'2','HSCode':'444444'}})
+            self.finish_commit_fence(app, {'1':{'Description':'Changed C','Value':'4.00','Quantity':'2','HSCode':'444444'}})
+            self.assertFalse(app.exception)
+            execute.assert_called_once()
+            plan = execute.call_args.args[0]
+            self.assertEqual(plan['payload']['Shipping Name'], 'Latest Recipient')
+            self.assertEqual(plan['payload']['Shipping Street'], 'Latest Street')
+            self.assertEqual(plan['payload']['內容物3'], 'Changed C')
+            self.assertEqual(plan['payload']['HSCode3'], '444444')
+            self.assertEqual(plan['payload']['數量3'], '2')
+            self.assertEqual(plan['shipments'][0]['total_usd'], '13.00')
+            self.assertEqual(plan['payload']['訂單合計申告金額(JPY)'], '1950')
+            self.assertEqual(plan['shipments'][0]['method'], 'EMS')
+            self.assertEqual(plan['source_kind'],history['source_kind'])
+            self.assertEqual(plan['source_time'],history['source_time'])
+            self.assertEqual(plan['source_snapshot']['Shipping Name'],'Recipient')
+            self.assertEqual(execute.call_args.kwargs, {'requested_by':'staff@tkrjm.co.jp','tracking_baseline':['EL000000001JP'],'confirmed_new_tracking':True})
+
+    def test_attempt_freezes_plan_nonce_actor_and_blocks_double_submission(self):
+        for outcome in ([], [{'order_id':'imy2099999','tracking':'new','status':'completed'}], [{'order_id':'imy2099999','tracking':'new','status':'backfill_failed'}], RuntimeError('private')):
+            with self.subTest(outcome=str(outcome)), patch('bot.shipment_service.lookup_history', return_value=self.history()) as lookup, patch('bot.shipment_service.execute_plan', side_effect=outcome if isinstance(outcome,Exception) else None, return_value=outcome) as execute:
+                app = self.queried()
+                nonce = app.session_state['reissue_nonce']
+                self.submit(app)
+                self.assertFalse(app.exception)
+                self.assertEqual(execute.call_count,1)
+                frozen = app.session_state['reissue_submission']
+                self.assertEqual(frozen['verified_actor'], 'staff@tkrjm.co.jp')
+                self.assertEqual(frozen['plan']['nonce'], nonce)
+                app.run()
+                self.assertTrue(app.button(key='reissue_execute').disabled)
+                app.text_input(key='reissue_name').set_value('Changed After Attempt').run()
+                self.submit(app)
+                self.assertEqual(execute.call_count,1)
+                self.assertEqual(app.session_state['reissue_nonce'], nonce)
+                self.assertEqual(app.session_state['reissue_submission'],frozen)
+                self.assertEqual(lookup.call_count,2)
+
+    def test_validation_failure_is_editable_then_directly_submittable(self):
+        history=self.history(); history['row']['Shipping Street']=''
+        with patch('bot.shipment_service.lookup_history',return_value=history), patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried()
+            self.submit(app)
+            execute.assert_not_called()
+            self.assertNotIn('reissue_submission',app.session_state)
+            self.assertTrue(app.error)
+            app.text_input(key='reissue_Shipping Street').set_value('Fixed Street').run()
+            self.submit(app)
+            execute.assert_called_once()
+
+    def test_query_actor_change_requires_fresh_lookup_and_hides_pdf(self):
+        self.pdf.return_value={'EL000000001JP':'https://drive.google.com/file/d/found/view'}
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()), patch('bot.shipment_service.execute_plan') as execute:
+            app=self.queried()
+            app.session_state['user_email']='other@tkrjm.co.jp'; app.session_state['_verified_auth_email']='other@tkrjm.co.jp'
+            self.submit(app)
+            execute.assert_not_called()
+            self.assertFalse(app.get('link_button'))
+            self.assertFalse(any(x.key=='reissue_name' for x in app.text_input))
+
+    def test_split_default_two_empty_package_live_message_and_single_unit_hide(self):
+        app=self.authenticate(self.app("render_split_planner(row, source_row=row, key='test')"))
+        next(x for x in app.toggle if x.key=='test_enabled').set_value(True).run()
+        self.assertEqual(app.number_input(key='test_count').value,2)
+        self.assertTrue(any('包裹2中至少要有一項數量為1以上' in x.value for x in app.warning))
+        self.assertTrue(app.button(key='test_review').disabled)
+        body="row['數量1']='1'; row['內容物2']=''; render_split_planner(row, source_row=row, key='test')"
+        app=self.authenticate(self.app(body)); app.session_state['test_enabled']=True; app.session_state['test_reviewed_plan']={'old':True}; app.run()
+        self.assertFalse(app.toggle)
+        self.assertFalse(app.session_state['test_enabled'])
+        self.assertNotIn('test_reviewed_plan',app.session_state)
+
+    def test_reissue_split_header_toggle_and_quantities_match_pending(self):
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried()
+            app.toggle(key='reissue_split_enabled').set_value(True).run()
+            self.assertEqual(app.number_input(key='reissue_split_count').value,2)
+            self.assertTrue(app.button(key='reissue_execute').disabled)
+            app.number_input(key='reissue_split_qty_0_1').set_value(1).run()
+            app.number_input(key='reissue_split_qty_1_1').set_value(1).run()
+            self.submit(app)
+            plan=execute.call_args.args[0]
+            self.assertEqual(plan['mode'],'reissue')
+            self.assertEqual(plan['plan_version'],1)
+            self.assertEqual([s['items'][0]['quantity'] for s in plan['shipments']],[1,1])
+
+    def test_reissue_item_quantity_change_hides_toggle_and_clears_stale_split(self):
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried()
+            app.toggle(key='reissue_split_enabled').set_value(True).run()
+            self.run_editor_event(app,{'0':{'Quantity':'1'}})
+            self.assertFalse(app.exception)
+            self.assertFalse(app.toggle)
+            self.assertFalse(app.session_state['reissue_split_enabled'])
+            app.button(key='reissue_execute').click()
+            self.run_editor_event(app,{'0':{'Quantity':'1'}})
+            self.finish_commit_fence(app,{'0':{'Quantity':'1'}})
+            self.assertEqual(execute.call_args.args[0]['shipments'][0]['items'][0]['quantity'],1)
+
+    def test_reissue_additional_is_whole_order_deduplicates_method_and_excludes_split(self):
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried()
+            app.selectbox(key='reissue_extra_method').select('EMS').run()
+            app.toggle(key='reissue_split_enabled').set_value(True).run()
+            self.assertTrue(app.button(key='reissue_execute').disabled)
+            self.assertTrue(any('追加' in x.value for x in app.error))
+            app.toggle(key='reissue_split_enabled').set_value(False).run()
+            self.submit(app)
+            plan=execute.call_args.args[0]
+            self.assertEqual(plan['plan_version'],2)
+            self.assertEqual([s['method'] for s in plan['shipments']],['ePacket','EMS'])
+            self.assertEqual([s['items'][0]['quantity'] for s in plan['shipments']],[2,2])
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried(); app.selectbox(key='reissue_extra_method').select('ePacket').run()
+            self.submit(app)
+            self.assertEqual(len(execute.call_args.args[0]['shipments']),1)
+            self.assertEqual(execute.call_args.args[0]['plan_version'],1)
+
+    def test_original_pdf_header_only_found_and_query_cached(self):
+        for found in ({},{'old-one':'https://drive.google.com/file/d/found/view'}):
+            self.pdf.reset_mock(); self.pdf.return_value=found
+            with self.subTest(found=bool(found)),patch('bot.shipment_service.lookup_history',return_value=self.history(tracking=['old-one','old-two'])):
+                app=self.queried()
+                self.assertFalse(any(x.key=='reissue_find_pdf' for x in app.button))
+                self.assertFalse(any('重印' in x.label for x in app.expander))
+                self.assertEqual(len(app.get('link_button')),int(bool(found)))
+                if found:
+                    self.assertEqual(app.get('link_button')[0].label,'開啟原運單')
+                app.text_input(key='reissue_name').set_value('Changed').run()
+                app.selectbox(key='reissue_original_tracking').select('old-two').run()
+                self.assertFalse(app.get('link_button'))
+                app.run(); self.pdf.assert_called_once()
+
+    def test_post_execution_refresh_failure_preserves_submission_and_results(self):
+        with patch('bot.shipment_service.lookup_history',side_effect=[self.history(),RuntimeError('private')]),patch('bot.shipment_service.execute_plan',return_value=[]):
+            app=self.queried(); self.submit(app)
+            self.assertFalse(app.exception)
+            self.assertNotIn('reissue_history',app.session_state)
+            self.assertIn('reissue_submission',app.session_state)
+            app._run()  # No historical widgets remain after failed lookup.
+            self.assertFalse(any(x.key=='reissue_execute' for x in app.button))
+            self.assertTrue(any('重新查詢原訂單' in x.value for x in app.warning))
+
+    def test_new_explicit_query_starts_fresh_draft_after_completed_attempt(self):
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried(); first=app.session_state['reissue_nonce']
+            self.submit(app)
+            app.session_state['reissue_last_query']=0
+            app.button(key='reissue_query').click().run()
+            self.assertNotEqual(app.session_state['reissue_nonce'],first)
+            self.assertNotIn('reissue_submission',app.session_state)
+            self.submit(app)
+            self.assertEqual(execute.call_count,2)
+            self.assertNotEqual(execute.call_args_list[0].args[0]['plan_id'],execute.call_args_list[1].args[0]['plan_id'])
+
+    def test_direct_unknown_and_partial_refresh_keep_recovery_and_never_new_submit(self):
+        for status in ('unknown','writeback_pending'):
+            record={'plan':{'plan_id':'saved','order_id':'imy2099999'},'shipments':[{'shipment_id':'s','status':status,'tracking':'new'}]}
+            with self.subTest(status=status),patch('bot.shipment_service.lookup_history',side_effect=[self.history(),self.history(unfinished=[record])]),patch('bot.shipment_service.execute_plan',side_effect=RuntimeError('private')) as execute:
+                app=self.queried(); nonce=app.session_state['reissue_nonce']
+                self.submit(app); app.run()
+                self.assertTrue(app.button(key='reissue_execute').disabled)
+                self.assertEqual(app.button(key='resume_saved').disabled,status=='unknown')
+                self.assertEqual(app.session_state['reissue_nonce'],nonce)
+                execute.assert_called_once()
+
+    def test_button_waits_for_browser_fence_and_uses_later_native_editor_delta(self):
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried('render_reissue_tab(usd_jpy_rate=150)')
+            app.button(key='reissue_execute').click().run()
+            execute.assert_not_called()
+            self.assertEqual(app.session_state['reissue_intent']['stage'],'waiting')
+            app.run()  # Full rerenders, including editor callbacks, are not browser acknowledgments.
+            execute.assert_not_called()
+            intent=dict(app.session_state['reissue_intent']); intent['stage']='ready'; app.session_state['reissue_intent']=intent
+            self.run_editor_event(app,{'0':{'Value':'21.00'}})
+            execute.assert_called_once()
+            self.assertEqual(execute.call_args.args[0]['shipments'][0]['total_usd'],'42.00')
+            self.assertTrue(app.button(key='reissue_execute').disabled)
+
+    def test_submission_error_remains_visible_on_every_rerender(self):
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',side_effect=RuntimeError('PRIVATE')):
+            app=self.queried(); app.button(key='reissue_execute').click().run()
+            if 'reissue_intent' in app.session_state:
+                intent=dict(app.session_state['reissue_intent']);intent['stage']='ready';app.session_state['reissue_intent']=intent;app.run()
+            self.assertTrue(app.button(key='reissue_execute').disabled)
+            self.assertTrue(any('工作已停止' in x.value for x in app.error))
+            app.run()
+            self.assertTrue(any('工作已停止' in x.value for x in app.error))
+            self.assertFalse(any('PRIVATE' in x.value for x in app.error))
+
+    def test_late_invalid_editor_input_cancels_intent_and_correction_requires_new_click(self):
+        for field,bad in (('Quantity','illegal'),('Quantity','NaN'),('Quantity','Inf'),('Quantity','1.5'),('Quantity',''),('Value','illegal'),('Value','NaN'),('Value','Inf')):
+            with self.subTest(field=field,bad=bad),patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+                app=self.queried('render_reissue_tab(usd_jpy_rate=150)')
+                app.button(key='reissue_execute').click().run()
+                old=dict(app.session_state['reissue_intent'])
+                self.run_editor_event(app,{'0':{field:bad}})
+                self.assertFalse(app.exception)
+                self.assertTrue(app.error)
+                self.assertNotIn('reissue_intent',app.session_state)
+                self.assertNotIn('reissue_submission',app.session_state)
+                self.assertTrue(app.button(key='reissue_execute').disabled)
+                execute.assert_not_called()
+                fixed='2' if field=='Quantity' else '2.50'
+                self.run_editor_event(app,{'0':{field:fixed}})
+                self.assertFalse(app.exception)
+                self.assertNotIn('reissue_intent',app.session_state)
+                self.assertFalse(app.button(key='reissue_execute').disabled)
+                app.run()
+                execute.assert_not_called()
+                # Even a captured true fragment tick from the discarded click cannot revive it.
+                from types import SimpleNamespace
+                from features import shipment_workbench as workbench
+                with patch.object(workbench,'st',SimpleNamespace(session_state=dict(app.session_state._state.filtered_state))),patch.object(workbench,'verified_email',return_value='staff@tkrjm.co.jp'):
+                    self.assertFalse(workbench._accept_reissue_commit_ack(old['actor'],old['nonce'],old['token'],context=SimpleNamespace(current_fragment_id='old',fragment_ids_this_run=['old'])))
+                self.submit(app)
+                execute.assert_called_once()
+
+    def test_late_invalid_input_while_split_enabled_clears_safely_without_revival(self):
+        for field,bad in (('Quantity','illegal'),('Value','NaN')):
+            with self.subTest(field=field),patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+                app=self.queried('render_reissue_tab(usd_jpy_rate=150)')
+                app.toggle(key='reissue_split_enabled').set_value(True).run()
+                app.number_input(key='reissue_split_qty_0_1').set_value(1).run()
+                app.number_input(key='reissue_split_qty_1_1').set_value(1).run()
+                app.button(key='reissue_execute').click().run()
+                self.run_editor_event(app,{'0':{field:bad}})
+                self.assertFalse(app.exception)
+                self.assertNotIn('reissue_intent',app.session_state)
+                self.assertFalse(app.session_state['reissue_split_enabled'])
+                self.run_editor_event(app,{'0':{field:'2' if field=='Quantity' else '2.50'}})
+                app.run()
+                execute.assert_not_called()
+                self.assertNotIn('reissue_intent',app.session_state)
+
+    def test_invalid_edits_after_execution_keep_frozen_submission(self):
+        with patch('bot.shipment_service.lookup_history',return_value=self.history()),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
+            app=self.queried();self.submit(app)
+            frozen=dict(app.session_state['reissue_submission'])
+            self.run_editor_event(app,{'0':{'Quantity':'illegal'}})
+            self.assertFalse(app.exception)
+            self.assertEqual(app.session_state['reissue_submission'],frozen)
+            self.assertTrue(app.button(key='reissue_execute').disabled)
+            self.run_editor_event(app,{'0':{'Quantity':'2'}})
+            app.run()
+            self.assertEqual(app.session_state['reissue_submission'],frozen)
+            execute.assert_called_once()

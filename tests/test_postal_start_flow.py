@@ -391,15 +391,15 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertIn('                                "寄送方式",', app_source)
         self.assertIn('"追加製作",\n                                options=extra_options,', app_source)
         self.assertIn(
-            '[.58, 1.75, 2.45, .86, .86, 1.0],',
+            'st.columns(SUMMARY_COLUMN_WIDTHS,',
             app_source,
         )
         self.assertIn(
-            '[1.2, 1.8, 1.8, 1.1, 1.2, .7],',
+            'st.columns(action_column_widths(kind),',
             app_source,
         )
         self.assertIn(
-            '[1.42, 1.8, 1.8, 1.25, .9],',
+            'action_column_widths',
             app_source,
         )
         self.assertIn(
