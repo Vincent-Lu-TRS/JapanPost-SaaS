@@ -170,6 +170,25 @@ def _invalidate_reissue_review():
 
 REISSUE_CARD_CSS = """
 <style>
+.st-key-reissue_query_bar [data-testid="stTextInput"] {
+    grid-template-columns: max-content minmax(0, 1fr);
+}
+.st-key-reissue_query_bar [data-testid="stTextInput"] label {
+    white-space: nowrap;
+}
+.st-key-reissue_query_bar [data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap;
+}
+.st-key-reissue_query_bar [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {
+    flex: 1 1 0%;
+    width: 0;
+    min-width: 0;
+}
+.st-key-reissue_query_bar [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child {
+    flex: 0 0 88px;
+    width: 88px;
+    min-width: 0;
+}
 :is(.st-key-pending_workbench, .st-key-reissue_workbench) {
     container-name: shipment-workbench;
     container-type: inline-size;
@@ -181,6 +200,13 @@ REISSUE_CARD_CSS = """
 .st-key-reissue_actions {
     min-width: 0;
     overflow-wrap: anywhere;
+}
+.st-key-reissue_actions .postal-v2-panel-heading {
+    margin-bottom: 8px;
+    font-weight: 750;
+}
+.st-key-reissue_actions .postal-v2-panel-heading strong {
+    font-weight: inherit;
 }
 @container shipment-workbench (max-width: 900px) {
     :is(.st-key-pending_workbench, .st-key-reissue_workbench) > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] {
@@ -277,7 +303,7 @@ def _edit_history_row(history, *, disabled=False, usd_jpy_rate=None):
             st.error(message)
             summary_row = {'Country':country, 'TotalValue(USD)':'—', 'TotalValue(JPY)':'—'}
         with summary_slot.container():
-            columns = st.columns(SUMMARY_COLUMN_WIDTHS, gap='small', vertical_alignment='center')
+            columns = st.columns(SUMMARY_COLUMN_WIDTHS[1:], gap='small', vertical_alignment='center')
             with columns[-1]:
                 if applied is None:
                     # The header widget has not been instantiated in this run.
@@ -286,7 +312,7 @@ def _edit_history_row(history, *, disabled=False, usd_jpy_rate=None):
                     split_active = False
                 else:
                     split_active = render_split_toggle(applied, key='reissue_split', disabled=disabled)
-            for area, label, value in zip(columns[1:5],
+            for area, label, value in zip(columns[:4],
                     ('Order No.', 'Country', 'USD', 'JPY'),
                     (history['order_id'], summary_row['Country'], summary_row['TotalValue(USD)'], summary_row['TotalValue(JPY)'])):
                 style = 'order' if label == 'Order No.' else 'country' if label == 'Country' else 'standard'
@@ -419,11 +445,13 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
     if not email:
         st.caption('請先登入授權帳號')
         return
-    query = st.columns([3, 1], gap='small', vertical_alignment='bottom')
-    with query[0]:
-        order = st.text_input('完整訂單編號', key='reissue_order_query', max_chars=80, disabled=disabled)
-    with query[1]:
-        search = st.button('查詢歷史訂單', key='reissue_query', disabled=disabled)
+    st.markdown(REISSUE_CARD_CSS, unsafe_allow_html=True)
+    with st.container(key='reissue_query_bar', width=440):
+        query = st.columns([4, 1], gap='small', vertical_alignment='center')
+        with query[0]:
+            order = st.text_input('完整訂單編號', key='reissue_order_query', max_chars=80, disabled=disabled)
+        with query[1]:
+            search = st.button('查詢訂單', key='reissue_query', disabled=disabled)
     if search:
         last = float(st.session_state.get('reissue_last_query', 0))
         if time.monotonic() - last < 2:
@@ -458,7 +486,6 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
         _show_results([r for r in st.session_state.get('reissue_results', [])
                        if r['order_id'] == order.strip()])
         return
-    st.markdown(REISSUE_CARD_CSS, unsafe_allow_html=True)
     with st.container(key='reissue_workbench'):
         left_panel, right_panel = st.columns([3.05, 1.2], gap='medium', vertical_alignment='top')
         with left_panel:
@@ -473,23 +500,27 @@ def render_reissue_tab(*, disabled=False, usd_jpy_rate=None):
             with st.container(border=True, key='reissue_actions'):
                 st.markdown('<span class="postal-v2-operation-panel"></span>', unsafe_allow_html=True)
                 if history['tracking_baseline']:
-                    if len(history['tracking_baseline']) == 1:
-                        original_tracking = history['tracking_baseline'][0]
-                    else:
-                        original_tracking = st.session_state.get('reissue_original_tracking', history['tracking_baseline'][0])
-                    title, link = st.columns([1.2,1], gap='small', vertical_alignment='center')
-                    with title:
-                        st.markdown('<div class="postal-v2-panel-heading">補單操作</div>', unsafe_allow_html=True)
+                    baseline = history['tracking_baseline']
+                    original_tracking = st.session_state.get('reissue_original_tracking', baseline[0])
+                    if original_tracking not in baseline:
+                        original_tracking = baseline[0]
                     cached = st.session_state.get('reissue_pdf_cache', {})
-                    url = cached.get('urls', {}).get(original_tracking) if cached.get('actor') == email and cached.get('order_id') == history['order_id'] else None
-                    if url:
-                        with link:
-                            st.link_button('開啟原運單', url)
-                    if len(history['tracking_baseline']) == 1:
-                        st.caption('關聯原運單：' + original_tracking)
-                    else:
-                        original_tracking = st.selectbox('關聯原運單', history['tracking_baseline'],
-                                                          key='reissue_original_tracking', disabled=disabled)
+                    urls = (cached.get('urls', {}) if cached.get('actor') == email
+                            and cached.get('order_id') == history['order_id'] else {})
+                    available = [tracking for tracking in baseline if urls.get(tracking)]
+                    if available and original_tracking not in available:
+                        original_tracking = available[0]
+                    # Preserve the current association when no PDF control is
+                    # rendered; the complete safety baseline is never filtered.
+                    st.session_state['reissue_original_tracking'] = original_tracking
+                    if available:
+                        if len(available) == 1:
+                            st.caption('關聯原運單：' + original_tracking)
+                        else:
+                            original_tracking = st.selectbox('關聯原運單', available,
+                                                              key='reissue_original_tracking', disabled=disabled)
+                        st.link_button('開啟原運單', urls[original_tracking])
+                    st.markdown('<div class="postal-v2-panel-heading"><strong>補單操作</strong></div>', unsafe_allow_html=True)
                     split_invalid = row is None
                     if split_active:
                         try:

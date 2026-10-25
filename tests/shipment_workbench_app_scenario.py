@@ -365,20 +365,34 @@ class WorkbenchAppTests(unittest.TestCase):
             self.assertEqual(len(execute.call_args.args[0]['shipments']),1)
             self.assertEqual(execute.call_args.args[0]['plan_version'],1)
 
-    def test_original_pdf_header_only_found_and_query_cached(self):
-        for found in ({},{'old-one':'https://drive.google.com/file/d/found/view'}):
+    def test_original_pdf_controls_follow_safe_cache_and_keep_full_baseline(self):
+        first='https://drive.google.com/file/d/first/view'
+        second='https://drive.google.com/file/d/second/view'
+        for found,expected in (({},'old-one'),({'old-one':first},'old-one'),
+                               ({'old-two':second},'old-two'),({'old-one':first,'old-two':second},'old-two')):
             self.pdf.reset_mock(); self.pdf.return_value=found
-            with self.subTest(found=bool(found)),patch('bot.shipment_service.lookup_history',return_value=self.history(tracking=['old-one','old-two'])):
+            with self.subTest(found=list(found)),patch('bot.shipment_service.lookup_history',return_value=self.history(tracking=['old-one','old-two'])),patch('bot.shipment_service.execute_plan',return_value=[]) as execute:
                 app=self.queried()
+                self.assertEqual(app.button(key='reissue_query').label,'查詢訂單')
                 self.assertFalse(any(x.key=='reissue_find_pdf' for x in app.button))
                 self.assertFalse(any('重印' in x.label for x in app.expander))
-                self.assertEqual(len(app.get('link_button')),int(bool(found)))
+                if len(found)>1:
+                    self.assertEqual(app.selectbox(key='reissue_original_tracking').options,['old-one','old-two'])
+                    app.selectbox(key='reissue_original_tracking').select('old-two').run()
+                else:
+                    self.assertFalse(any(x.key=='reissue_original_tracking' for x in app.selectbox))
+                    self.assertEqual(any('關聯原運單：' in x.value for x in app.caption),bool(found))
+                links=app.get('link_button')
+                self.assertEqual(len(links),int(bool(found)))
                 if found:
-                    self.assertEqual(app.get('link_button')[0].label,'開啟原運單')
+                    self.assertEqual(links[0].label,'開啟原運單')
+                    self.assertEqual(links[0].proto.url,found[expected])
                 app.text_input(key='reissue_name').set_value('Changed').run()
-                app.selectbox(key='reissue_original_tracking').select('old-two').run()
-                self.assertFalse(app.get('link_button'))
                 app.run(); self.pdf.assert_called_once()
+                self.submit(app)
+                execute.assert_called_once()
+                self.assertEqual(execute.call_args.args[0]['original_tracking'],expected)
+                self.assertEqual(execute.call_args.kwargs['tracking_baseline'],['old-one','old-two'])
 
     def test_post_execution_refresh_failure_preserves_submission_and_results(self):
         with patch('bot.shipment_service.lookup_history',side_effect=[self.history(),RuntimeError('private')]),patch('bot.shipment_service.execute_plan',return_value=[]):
