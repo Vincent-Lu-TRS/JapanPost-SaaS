@@ -477,6 +477,121 @@ def apply_writeback_outcome(
     return terminal_status
 
 
+def _verified_writeback_result(result: Mapping[str, Any]) -> bool:
+    return (
+        result.get("status") == "completed"
+        and result.get("backfill_status") in {"written", "already_present"}
+        and bool(str(result.get("tracking") or "").strip())
+    )
+
+
+def job_result_view(job: dict[str, Any] | None) -> tuple[list[dict[str, Any]], str]:
+    """Conservatively display legacy error bookkeeping without mutating jobs.
+
+    Old outer catches emitted rows with no package identity. These rows are not
+    additional parcels. Use submitted package states for missing outcomes, keep
+    all actual package rows/artifacts, and never infer verified writeback.
+    """
+    rows = [dict(row) for row in (job or {}).get("results") or []]
+
+    def legacy_bookkeeping(row):
+        return (row.get("status") == "failed" and row.get("reason_code") == "job_exception"
+                and not _row_value(row, TRANS_TYPE_COLUMNS))
+
+    if (job or {}).get("status") != "error" or not any(
+        legacy_bookkeeping(row) or row.get("status") == "success" for row in rows
+    ):
+        return rows, ""
+
+    def package_key(row):
+        try:
+            return shipment_package_key(row)
+        except (TypeError, ValueError):
+            return None
+
+    legacy_ids = {_row_value(row, ORDER_ID_COLUMNS) for row in rows if legacy_bookkeeping(row)}
+    projected = [row for row in rows if not legacy_bookkeeping(row)]
+    for row in projected:
+        if row.get("status") == "success" and not _verified_writeback_result(row):
+            row.update(status="backfill_failed" if row.get("tracking") else "failed",
+                       reason_code="job_exception", reason_text="既有批次結果尚未確認回填狀態，請核對完成紀錄，勿重新製單。")
+    physical_fields = ("plan_id", "package_id", "shipment_id", "_package_id", "_shipment_id", "shipment_index")
+    for order in (job or {}).get("orders") or []:
+        if _row_value(order, ORDER_ID_COLUMNS) not in legacy_ids:
+            continue
+        key = package_key(order)
+        if key is None or not key[0] or not key[1]:
+            continue
+        if any(package_key(row) == key and all(
+            row.get(field) == order[field] for field in physical_fields
+            if field in order and order[field] is not None and str(order[field]) != ""
+        ) for row in projected):
+            continue
+        missing = {"order_id": key[0], "trans_type": key[1], "shipment_role": key[2],
+                   "status": "failed", "reason_code": "job_exception",
+                   "reason_text": "既有批次的包裹結果不完整，請核對運單與回填紀錄。"}
+        missing.update({field: order[field] for field in physical_fields if field in order})
+        projected.append(missing)
+    return projected, "這是更新前保留的批次狀態；已產生的運單須依完成紀錄核對，請勿重新製單。"
+
+
+def reconcile_job_exception(job: dict[str, Any], reason_code: str, reason_text: str) -> None:
+    """Keep one outcome per known package without turning labels into success.
+
+    This is the normal worker's error boundary, not a global result deduplicator.
+    Physical package IDs narrow matches when available. Ambiguous candidates
+    retain every row/artifact; none is chosen or collapsed by order ID alone.
+    """
+    results = job.setdefault("results", [])
+    physical_fields = ("plan_id", "package_id", "shipment_id", "_package_id", "_shipment_id", "shipment_index")
+
+    def key(row):
+        try:
+            return shipment_package_key(row)
+        except (TypeError, ValueError):
+            return None
+
+    verified = _verified_writeback_result
+
+    for order in job.get("orders") or []:
+        if order.get("status") not in {"queued", "running"}:
+            continue
+        package_key = key(order)
+        matches = [result for result in results if package_key is not None and key(result) == package_key
+                   and all(result.get(field) == order[field] for field in physical_fields
+                           if field in order and order[field] is not None and str(order[field]) != "")]
+        if matches and all(verified(result) for result in matches):
+            order.update(status="success", stage="已完成", message="")
+            if len(matches) == 1:
+                order["tracking_no"] = matches[0]["tracking"]
+            continue
+        if not matches:
+            identity = {"order_id": _row_value(order, ORDER_ID_COLUMNS),
+                        "trans_type": _row_value(order, TRANS_TYPE_COLUMNS),
+                        "shipment_role": _row_value(order, SHIPMENT_ROLE_COLUMNS, "primary")}
+            identity.update({field: order[field] for field in physical_fields if field in order})
+            matches = [identity]
+            results.append(identity)
+        for result in matches:
+            if verified(result):
+                continue
+            if str(result.get("status") or "") not in {"failed", "backfill_failed", "error", "blocked", "skipped"}:
+                result.update(
+                    status="backfill_failed" if result.get("tracking") else "failed",
+                    reason_code=reason_code, reason_text=reason_text, message=reason_text,
+                )
+        order.update(status="failed", stage="需排查", message=reason_text)
+        if len(matches) == 1 and matches[0].get("tracking") and not str(order.get("tracking_no") or "").strip():
+            order["tracking_no"] = matches[0]["tracking"]
+
+    if any(verified(result) for result in results):
+        job["postprocess_error_message"] = (
+            "運單與回填已確認完成，但後續狀態核對發生錯誤。請保留運單並由管理員檢查，勿重新製單。"
+            if all(verified(result) for result in results)
+            else "已完成的運單與回填結果已保留；其餘結果仍需核對。請勿重新製作已完成運單。"
+        )
+
+
 def writeback_retry_candidates(results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """Return writeback failures that retain tracking evidence for a safe retry."""
     return [

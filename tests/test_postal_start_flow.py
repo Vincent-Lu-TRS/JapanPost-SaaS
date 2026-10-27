@@ -164,7 +164,7 @@ class PostalStartFlowTests(unittest.TestCase):
             app_source.index("def _render_login_page(")
         ]
 
-        self.assertIn("from safe_logging import", app_source)
+        self.assertTrue('_safe_logging = load_current_source_module("safe_logging")' in app_source)
         self.assertIn("redact_operational_log", app_source)
         self.assertIn("safe_message = redact_operational_log", start_body)
         self.assertIn('job["logs"].append(entry)', start_body)

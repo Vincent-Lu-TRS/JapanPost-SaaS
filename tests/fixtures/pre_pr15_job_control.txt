@@ -1,0 +1,87 @@
+# Exact function definitions from public commit 4eaab649; synthetic tests only.
+
+def apply_writeback_outcome(
+    job: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    outcome: dict[str, Any] | None,
+) -> str:
+    """Map each Sheets writeback item to its submitted package result."""
+    success_statuses = {"written", "already_present"}
+    reason_by_status = {
+        "manual_review": "writeback_manual_review",
+        "conflict": "writeback_tracking_conflict",
+        "partial_write": "writeback_partial",
+        "write_failed": "writeback_failed",
+    }
+    completed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    seen_indexes: set[int] = set()
+    for item in (outcome or {}).get("items") or []:
+        try:
+            index = int(item["input_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if index < 0 or index >= len(candidates) or index in seen_indexes:
+            continue
+        seen_indexes.add(index)
+        result = candidates[index]
+        item_status = str(item.get("status") or "write_failed").strip().lower()
+        result["backfill_status"] = item_status
+        result["backfill_row"] = item.get("row")
+        if item_status in success_statuses:
+            result.update(
+                {
+                    "status": "completed",
+                    "reason_code": "",
+                    "reason_text": "",
+                    "message": "",
+                }
+            )
+            completed.append(result)
+        else:
+            reason_code = reason_by_status.get(item_status, "writeback_failed")
+            result.update(
+                {
+                    "status": "backfill_failed",
+                    "reason_code": reason_code,
+                    "reason_text": "運單已產生，但資料回填未完成",
+                    "message": "運單已產生，但資料回填未完成",
+                }
+            )
+            failed.append(result)
+
+    for index, result in enumerate(candidates):
+        if index in seen_indexes:
+            continue
+        result.update(
+            {
+                "status": "backfill_failed",
+                "backfill_status": "write_failed",
+                "reason_code": "writeback_failed",
+                "reason_text": "運單已產生，但資料回填未完成",
+                "message": "運單已產生，但資料回填未完成",
+            }
+        )
+        failed.append(result)
+
+    mark_results_completed(job, completed)
+    mark_results_failed(job, failed)
+    job["backfill_outcome"] = outcome
+    summary = summarize_job_results(job.get("results"))
+    submitted_orders = list(job.get("orders") or [])
+    all_submitted_packages_completed = bool(submitted_orders) and all(
+        str(order.get("status") or "").strip().lower() in {"success", "completed"}
+        for order in submitted_orders
+    )
+    terminal_status = (
+        "completed"
+        if (
+            summary["total"] > 0
+            and summary["completed"] == summary["total"]
+            and all_submitted_packages_completed
+        )
+        else "partial_failure"
+    )
+    job["status"] = terminal_status
+    job["pending_refresh_needed"] = terminal_status == "completed"
+    return terminal_status

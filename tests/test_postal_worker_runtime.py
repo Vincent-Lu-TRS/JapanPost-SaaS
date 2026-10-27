@@ -12,6 +12,7 @@ from bot.browser_runtime import ensure_browser_runtime
 from bot.shipment_ledger import GlobalShipmentLock, LedgerUnavailable, NormalShipmentSafety, LEDGER_TITLE
 from test_shipment_ledger import MemoryBook, MemorySheet
 from job_control import apply_writeback_outcome as real_apply_writeback_outcome
+from job_control import reconcile_job_exception
 from safe_logging import log_runtime_failure, redact_operational_log, safe_log_event
 
 
@@ -185,6 +186,7 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
             "mark_results_completed": mark_completed,
             "mark_results_failed": mark_failed,
             "apply_writeback_outcome": apply_writeback,
+            "reconcile_job_exception": reconcile_job_exception,
             "summarize_job_results": lambda results: {
                 "completed": sum(result.get("status") == "completed" for result in results),
                 "total": len(results),
