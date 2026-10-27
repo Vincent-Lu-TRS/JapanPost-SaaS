@@ -80,6 +80,7 @@ from features.picking_labels import apply_picking_payload, load_picking_payload
 from local_time import JST, format_jst
 from bot.browser_bootstrap import RuntimeSetupError
 from bot.browser_runtime import ensure_browser_runtime, probe_browser_runtime_fresh
+from bot.shipment_ledger import LedgerUnavailable
 
 
 # Streamlit can rerun app.py in an existing Python process after a Cloud
@@ -208,13 +209,14 @@ def _reset_preflight_job_view(job: dict | None) -> None:
 
 
 def _should_show_safe_diagnostic(job: dict | None, batch_summary: dict) -> bool:
-    """Keep safe runtime-startup diagnostics available even without results."""
+    """Keep safe failure/review diagnostics available even after verified results."""
 
     return bool(
         job
         and job.get("logs")
         and (
             job.get("runtime_setup_message")
+            or job.get("safety_review_required")
             or batch_summary.get("failure_alerts")
         )
     )
@@ -1302,7 +1304,10 @@ def _render_postal_pending_v2(
                     st.caption(f"目前可編輯前 {editable_count} 筆；其餘訂單會保留來源表資料。")
 
         if job and job.get('safety_review_required') and not is_busy:
-            st.error('部分郵政結果需核對，已停止後續製單。請保留已產生的運單並由管理員依操作手冊恢復。')
+            if job.get('safety_lock_message'):
+                st.warning(job['safety_lock_message'])
+            else:
+                st.error('部分郵政結果需核對，已停止後續製單。請保留已產生的運單並由管理員依操作手冊恢復。')
         if job and job.get("runtime_setup_message") and not is_busy:
             st.error(job["runtime_setup_message"])
 
@@ -1455,6 +1460,8 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
     def _run():
         writer = None
         safety = None
+        failure_stage = "job_setup"
+        finish_status = "error"
 
         def _log(msg: str):
             try:
@@ -1488,18 +1495,41 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     error_type="StatusEventError",
                 )
 
+        def _record_writer_review(reason, error_type="LedgerUnavailable", *, release_only=False):
+            results = job.get("results") or []
+            release_only = (
+                release_only
+                and finish_status == "completed"
+                and not job.get("safety_review_required")
+                and results
+                and all(result.get("status") == "completed" and result.get("backfill_status") in {"written", "already_present"}
+                        for result in results)
+            )
+            job["safety_review_required"] = True
+            job["safety_lock_generation"] = writer.sheet_id
+            if release_only:
+                job["safety_lock_message"] = (
+                    "運單結果已保留，但執行鎖尚未確認釋放，需管理員檢查；請勿重送。"
+                )
+            try:
+                safe_log_event(_log, "job_exception", error_type=error_type,
+                               stage="writer_release", reason=reason)
+            except Exception:
+                pass
+
         def _stop_for_runtime_setup(error):
+            nonlocal finish_status
             message = "製單環境暫時無法啟動，訂單尚未送出，請稍後再試。"
             log_runtime_failure(_log, error)
             _log(message)
             job["runtime_setup_message"] = message
             job["results"] = []
             mark_unfinished_orders(job, "failed", "未送出", message)
-            _JOB_REGISTRY.finish(job, "error")
-            _clear_job_lock(email)
+            finish_status = "error"
 
         try:
             rows_for_run = df if max_rows is None else df.head(max_rows)
+            failure_stage = "runtime_setup"
             _log("🧰 正在準備郵便製單環境...")
             try:
                 runtime_handle = ensure_browser_runtime()
@@ -1514,10 +1544,13 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             )
 
             from bot.shipment_ledger import global_writer_lock, NormalShipmentSafety
+            failure_stage = "writer_lock"
             writer = global_writer_lock()
             writer.acquire()
+            failure_stage = "safety_initialize"
             safety = NormalShipmentSafety(writer)
             _log("🔐 製單前重新確認 Google Sheets 完成狀態與來源快照...")
+            failure_stage = "completion_preflight"
             try:
                 completion_authority = read_completion_authority()
             except Exception as preflight_error:
@@ -1545,10 +1578,10 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     "preflight_blocked",
                     error_type=type(preflight_error).__name__,
                 )
-                _JOB_REGISTRY.finish(job, "error")
-                _clear_job_lock(email)
+                finish_status = "error"
                 return
 
+            failure_stage = "source_preflight"
             latest_pending_df = get_pending_orders(
                 log_cb=_log,
                 strict=True,
@@ -1615,25 +1648,25 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 # duplicates the same batch-level stop reason in the UI.
                 job["batch_preflight_blocked_count"] = len(aborted_results)
                 mark_results_failed(job, aborted_results)
-                _JOB_REGISTRY.finish(job, "error")
-                _clear_job_lock(email)
+                finish_status = "error"
                 return
             if ready_rows.empty:
                 terminal_status = (
                     "completed" if preflight_completed_results and not preflight_blocked_results
                     else "partial_failure"
                 )
-                _JOB_REGISTRY.finish(job, terminal_status)
+                finish_status = terminal_status
                 if preflight_completed_results:
                     job["pending_refresh_needed"] = True
-                _clear_job_lock(email)
                 return
 
             rows_for_run = ready_rows
+            failure_stage = "safety_preflight"
             safety.assert_clear(rows_for_run)
             _log(f"✅ 本批 {len(rows_for_run)} 筆通過製單前檢查，準備執行。")
 
             _log("🚀 任務啟動，正在載入模組...")
+            failure_stage = "automation_prepare"
             from bot.automation import AUTOMATION_BUILD_ID, _prepare_batch_hs_codes, run_automation
             automation_module = _load_current_automation_module()
             AUTOMATION_BUILD_ID = automation_module.AUTOMATION_BUILD_ID
@@ -1655,6 +1688,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                         f"{idx}:{code}" for idx, code in sorted(codes.items(), key=lambda pair: int(pair[0]))
                     )
             _log("✅ 模組載入成功，開始 Playwright 自動化...")
+            failure_stage = "automation_run"
             try:
                 results = run_automation(
                     rows_for_run,
@@ -1723,16 +1757,19 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 for result in successful_results:
                     _status({"event": "writeback_pending", **result})
                 _log(f"📋 正在回填 {len(writeback_candidates)} 筆至 Google Sheets...")
+                failure_stage = "writeback"
                 backfill_outcome = backfill_results(writeback_candidates, log_cb=_log) or {
                     "ok": False,
                     "written": 0,
                     "failed": [str(result.get("order_id") or "") for result in writeback_candidates],
                     "error": "回填函式沒有回傳驗證結果",
                 }
+                failure_stage = "writeback_verify"
                 terminal_status = apply_writeback_outcome(
                     job,
                     writeback_candidates,
                     backfill_outcome,
+                    finalize_job=False,
                 )
                 safety.mark_verified(writeback_candidates)
                 verified_results = [
@@ -1752,35 +1789,61 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     and result_summary["total"] > 0
                 ) else "partial_failure"
                 job["pending_refresh_needed"] = terminal_status == "completed"
-            _JOB_REGISTRY.finish(job, terminal_status)
-            _clear_job_lock(email)
+            failure_stage = "job_finalize"
+            finish_status = terminal_status
         except BaseException as e:
             if isinstance(e, RuntimeSetupError):
                 try:
                     _stop_for_runtime_setup(e)
                 except Exception:
-                    _clear_job_lock(email)
+                    finish_status = "error"
                 return
             print(
                 f"[BOT_ERROR] {type(e).__name__}",
                 file=sys.stderr,
                 flush=True,
             )
+            # Only fixed internal safety codes may leave this exception boundary.
+            # Never stringify exceptions: API responses can contain credentials or PII.
+            failure_messages = {
+                "shipment_writer_busy_or_unknown": "製單執行鎖仍被占用或狀態未明，請先核對前次任務，勿重送。",
+                "shipment_lock_ownership_lost": "無法確認製單執行鎖的擁有權，請先核對任務狀態，勿重送。",
+                "shipment_lock_not_held": "無法確認製單執行鎖狀態，請先核對任務狀態，勿重送。",
+                "shipment_lock_readback_failed": "製單執行鎖讀回驗證失敗，請先核對任務狀態，勿重送。",
+                "shipment_lock_requires_review": "製單執行鎖需要人工核對，請先核對運單與回填狀態，勿重送。",
+                "shipment_lock_release_unknown": "製單執行鎖釋放狀態未明，請先核對運單與回填狀態，勿重送。",
+                "shipment_encryption_not_configured": "內部製單紀錄的加密設定無法使用，請由管理員確認設定。",
+                "shipment_ledger_unreadable": "無法安全讀取內部製單紀錄，請由管理員核對紀錄與加密設定，勿重送。",
+                "shipment_snapshot_too_large": "製單快照超出內部紀錄容量，請由管理員核對，勿重送。",
+                "shipment_ledger_readback_failed": "內部製單紀錄讀回驗證失敗，請先核對運單與回填狀態，勿重送。",
+                "shipment_guards_unreadable": "無法安全讀取防重製紀錄，請由管理員核對，勿重送。",
+                "shipment_previous_submission_requires_review": "偵測到前次提交紀錄，請先核對運單與回填狀態，勿重送。",
+                "shipment_existing_plan_requires_resume": "此訂單已有未完成製單計畫，請先核對或恢復原計畫，勿另開製單。",
+                "shipment_guard_readback_failed": "防重製紀錄讀回驗證失敗，請先核對運單與回填狀態，勿重送。",
+            }
+            failure_code = getattr(e, "reason_code", "") if isinstance(e, LedgerUnavailable) else ""
+            if type(failure_code) is not str or failure_code not in failure_messages:
+                failure_code = "job_exception"
+            reason_text = failure_messages.get(
+                failure_code,
+                "製單流程發生錯誤，再次製單前請先核對運單與回填狀態。",
+            ) + "請展開「詳細除錯日誌」協助排查。"
             try:
                 safe_log_event(
                     _log,
                     "job_exception",
                     error_type=type(e).__name__,
+                    stage=failure_stage,
+                    reason=failure_code,
                 )
             except Exception:
                 pass
             try:
-                reason_text = "製單流程發生錯誤，請查看安全診斷。"
                 unfinished_results = [
                     {
                         "order_id": str(order.get("order_id") or "").strip(),
                         "status": "failed",
-                        "reason_code": "job_exception",
+                        "reason_code": failure_code,
                         "reason_text": reason_text,
                         "message": reason_text,
                     }
@@ -1790,21 +1853,39 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 job.setdefault("results", []).extend(unfinished_results)
                 mark_results_failed(job, unfinished_results)
                 mark_unfinished_orders(job, "failed", "發生例外", reason_text)
-                _JOB_REGISTRY.finish(job, "error")
+                finish_status = "error"
             except Exception:
                 pass
-            _clear_job_lock(email)
         finally:
-            if writer is not None and writer.held:
-                if safety is not None and not safety.safe_to_release():
+            try:
+                if writer is not None and writer.held:
+                    if safety is not None and not safety.safe_to_release():
+                        writer.retain = True
+                    if writer.retain:
+                        _record_writer_review("shipment_lock_requires_review")
+                    else:
+                        try:
+                            writer.release()
+                        except Exception as release_error:
+                            release_code = getattr(release_error, "reason_code", "") if isinstance(release_error, LedgerUnavailable) else ""
+                            if type(release_code) is not str or release_code not in {
+                                "shipment_lock_ownership_lost", "shipment_lock_not_held",
+                                "shipment_lock_requires_review", "shipment_lock_release_unknown",
+                            }:
+                                release_code = "shipment_lock_release_unknown"
+                            _record_writer_review(release_code, type(release_error).__name__, release_only=True)
+            except Exception as cleanup_error:
+                # A local cleanup failure cannot make an uncertain writer safe.
+                if writer is not None:
                     writer.retain = True
-                    job['safety_review_required'] = True
-                    job['safety_lock_generation'] = writer.sheet_id
-                if not writer.retain:
-                    try:
-                        writer.release()
-                    except Exception:
-                        job['safety_review_required'] = True
+                    _record_writer_review("shipment_lock_requires_review", type(cleanup_error).__name__)
+            finally:
+                # Publish completion only after the shared writer's cleanup outcome
+                # is known, so terminal UI includes any reconciliation warning.
+                try:
+                    _JOB_REGISTRY.finish(job, finish_status)
+                finally:
+                    _clear_job_lock(email)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
