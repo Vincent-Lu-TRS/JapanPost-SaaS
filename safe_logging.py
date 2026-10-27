@@ -92,6 +92,24 @@ _SAFE_REASONS = {
     "invalid_writeback_identity",
 }
 
+_SAFE_JOB_STAGES = {
+    "job_setup", "runtime_setup", "writer_lock", "safety_initialize",
+    "completion_preflight", "source_preflight", "safety_preflight",
+    "automation_prepare", "automation_run", "writeback", "writeback_verify",
+    "job_finalize", "writer_release",
+}
+
+_SAFE_JOB_REASONS = {
+    "job_exception",
+    "shipment_writer_busy_or_unknown", "shipment_lock_ownership_lost",
+    "shipment_lock_not_held", "shipment_lock_readback_failed",
+    "shipment_lock_requires_review", "shipment_lock_release_unknown",
+    "shipment_encryption_not_configured", "shipment_ledger_unreadable",
+    "shipment_snapshot_too_large", "shipment_ledger_readback_failed",
+    "shipment_guards_unreadable", "shipment_previous_submission_requires_review",
+    "shipment_existing_plan_requires_resume", "shipment_guard_readback_failed",
+}
+
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,63}$")
 _PLATFORM_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
@@ -111,7 +129,7 @@ _IDENTIFIER_FIELD_RE = re.compile(
 )
 
 
-def _safe_field_value(field: str, value: object) -> str:
+def _safe_field_value(field: str, value: object, *, event: str = "") -> str:
     if field in {"count", "first_row", "last_row"}:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"unsafe field value: {field}")
@@ -124,7 +142,8 @@ def _safe_field_value(field: str, value: object) -> str:
             raise ValueError("unsafe field value: seconds")
         return str(value)
     if field == "reason":
-        if not isinstance(value, str) or value not in _SAFE_REASONS:
+        allowed = _SAFE_JOB_REASONS if event == "job_exception" else _SAFE_REASONS
+        if not isinstance(value, str) or value not in allowed:
             raise ValueError("unsafe field value: reason")
         return value
     if field == "error_type":
@@ -132,7 +151,8 @@ def _safe_field_value(field: str, value: object) -> str:
             raise ValueError("unsafe field value: error_type")
         return value
     if field == "stage":
-        if not isinstance(value, str) or value not in _SAFE_RUNTIME_STAGES:
+        allowed = _SAFE_JOB_STAGES if event == "job_exception" else _SAFE_RUNTIME_STAGES
+        if not isinstance(value, str) or value not in allowed:
             raise ValueError("unsafe field value: stage")
         return value
     if field == "code":
@@ -177,7 +197,7 @@ def safe_log_event(
         raise ValueError("browser runtime profile requires the safe environment fingerprint")
     parts = [event]
     for field, value in fields.items():
-        parts.append(f"{field}={_safe_field_value(field, value)}")
+        parts.append(f"{field}={_safe_field_value(field, value, event=event)}")
     if log_cb is not None:
         log_cb(" ".join(parts))
 

@@ -517,7 +517,8 @@ class PostalStartFlowTests(unittest.TestCase):
         self.assertLess(blocker_gate, ready_assignment)
         self.assertLess(blocker_gate, automation_start)
         blocker_body = start_body[blocker_gate:ready_assignment]
-        self.assertIn('_JOB_REGISTRY.finish(job, "error")', blocker_body)
+        self.assertIn('finish_status = "error"', blocker_body)
+        self.assertEqual(start_body.count("_JOB_REGISTRY.finish(job,"), 1)
         self.assertIn("return", blocker_body)
 
     def test_preflight_abort_does_not_duplicate_ready_rows_as_failure_results(self):

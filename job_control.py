@@ -391,8 +391,10 @@ def apply_writeback_outcome(
     job: dict[str, Any],
     candidates: list[dict[str, Any]],
     outcome: dict[str, Any] | None,
+    *,
+    finalize_job: bool = True,
 ) -> str:
-    """Map each Sheets writeback item to its submitted package result."""
+    """Map writeback items; workers may defer terminal publication until cleanup."""
     success_statuses = {"written", "already_present"}
     reason_by_status = {
         "manual_review": "writeback_manual_review",
@@ -469,7 +471,8 @@ def apply_writeback_outcome(
         )
         else "partial_failure"
     )
-    job["status"] = terminal_status
+    if finalize_job:
+        job["status"] = terminal_status
     job["pending_refresh_needed"] = terminal_status == "completed"
     return terminal_status
 

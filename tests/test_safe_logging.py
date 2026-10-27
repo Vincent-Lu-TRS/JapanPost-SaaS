@@ -11,6 +11,22 @@ from safe_logging import (
 
 
 class SafeLoggingTests(unittest.TestCase):
+    def test_job_exception_logs_only_fixed_stage_and_shipment_safety_reason(self):
+        logs = []
+        safe_log_event(logs.append, "job_exception", error_type="LedgerUnavailable",
+                       stage="writer_lock", reason="shipment_writer_busy_or_unknown")
+        self.assertEqual(logs, ["job_exception error_type=LedgerUnavailable stage=writer_lock reason=shipment_writer_busy_or_unknown"])
+        for stage, reason in (("person@example.invalid", "shipment_ledger_unreadable"),
+                              ("safety_preflight", "token=SECRET")):
+            with self.subTest(stage=stage, reason=reason), self.assertRaises(ValueError):
+                safe_log_event(logs.append, "job_exception", stage=stage, reason=reason)
+        self.assertEqual(len(logs), 1)
+
+    def test_job_stages_are_not_accepted_as_browser_runtime_stages(self):
+        with self.assertRaises(ValueError):
+            safe_log_event(None, "browser_runtime_failed", stage="writer_lock",
+                           code="bootstrap_unknown", retryable=False)
+
     def test_browser_runtime_environment_log_contains_only_allowlisted_fingerprint(self):
         logs = []
         log_runtime_environment(
