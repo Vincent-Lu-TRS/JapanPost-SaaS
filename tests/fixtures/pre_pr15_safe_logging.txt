@@ -1,0 +1,70 @@
+# Exact function definitions from public commit 4eaab649; synthetic tests only.
+
+def _safe_field_value(field: str, value: object) -> str:
+    if field in {"count", "first_row", "last_row"}:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"unsafe field value: {field}")
+        return str(value)
+    if field == "seconds":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("unsafe field value: seconds")
+        number = float(value)
+        if not math.isfinite(number) or number < 0:
+            raise ValueError("unsafe field value: seconds")
+        return str(value)
+    if field == "reason":
+        if not isinstance(value, str) or value not in _SAFE_REASONS:
+            raise ValueError("unsafe field value: reason")
+        return value
+    if field == "error_type":
+        if not isinstance(value, str) or not _ERROR_TYPE_RE.fullmatch(value):
+            raise ValueError("unsafe field value: error_type")
+        return value
+    if field == "stage":
+        if not isinstance(value, str) or value not in _SAFE_RUNTIME_STAGES:
+            raise ValueError("unsafe field value: stage")
+        return value
+    if field == "code":
+        if not isinstance(value, str) or value not in _SAFE_RUNTIME_CODES:
+            raise ValueError("unsafe field value: code")
+        return value
+    if field == "retryable":
+        if not isinstance(value, bool):
+            raise ValueError("unsafe field value: retryable")
+        return "true" if value else "false"
+    if field == "attempts":
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3:
+            raise ValueError("unsafe field value: attempts")
+        return str(value)
+    if field == "http_status":
+        if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 599:
+            raise ValueError("unsafe field value: http_status")
+        return str(value)
+    if field in {"system", "os_id", "os_version", "machine", "python_minor", "libc_name", "libc_version"}:
+        if not isinstance(value, str) or not _PLATFORM_VALUE_RE.fullmatch(value):
+            raise ValueError(f"unsafe field value: {field}")
+        return value
+    raise ValueError(f"unknown log field: {field}")
+
+def safe_log_event(
+    log_cb: Callable[[str], object] | None,
+    event: str,
+    **fields: object,
+) -> None:
+    """Emit one allowlisted event containing aggregate-safe fields only."""
+    if event not in _ALLOWED_EVENTS:
+        raise ValueError("unknown log event")
+    unknown = set(fields) - _ALLOWED_FIELDS
+    if unknown:
+        raise ValueError("unknown log field")
+    if event == "browser_runtime_failed" and not {"stage", "code", "retryable"}.issubset(fields):
+        raise ValueError("browser runtime event requires safe classification fields")
+    if event == "browser_runtime_profile" and set(fields) != {
+        "system", "os_id", "os_version", "machine", "python_minor", "libc_name", "libc_version"
+    }:
+        raise ValueError("browser runtime profile requires the safe environment fingerprint")
+    parts = [event]
+    for field, value in fields.items():
+        parts.append(f"{field}={_safe_field_value(field, value)}")
+    if log_cb is not None:
+        log_cb(" ".join(parts))

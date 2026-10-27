@@ -19,11 +19,14 @@ import tempfile
 import streamlit as st
 import pandas as pd
 from app_imports import import_module_with_retry
+from current_source_modules import load_current_source_module
 from bot.sheets import backfill_results
 
-_job_control = import_module_with_retry("job_control")
+_job_control = load_current_source_module("job_control")
 BatchJobRegistry = _job_control.BatchJobRegistry
 apply_writeback_outcome = _job_control.apply_writeback_outcome
+reconcile_job_exception = _job_control.reconcile_job_exception
+job_result_view = _job_control.job_result_view
 mark_results_completed = _job_control.mark_results_completed
 mark_results_failed = _job_control.mark_results_failed
 mark_unfinished_orders = _job_control.mark_unfinished_orders
@@ -75,7 +78,10 @@ from refresh_payloads import (
     copy_pending_payload,
     copy_picking_payload,
 )
-from safe_logging import log_runtime_failure, redact_operational_log, safe_log_event
+_safe_logging = load_current_source_module("safe_logging")
+log_runtime_failure = _safe_logging.log_runtime_failure
+redact_operational_log = _safe_logging.redact_operational_log
+safe_log_event = _safe_logging.safe_log_event
 from features.picking_labels import apply_picking_payload, load_picking_payload
 from local_time import JST, format_jst
 from bot.browser_bootstrap import RuntimeSetupError
@@ -217,6 +223,7 @@ def _should_show_safe_diagnostic(job: dict | None, batch_summary: dict) -> bool:
         and (
             job.get("runtime_setup_message")
             or job.get("safety_review_required")
+            or job.get("postprocess_error_message")
             or batch_summary.get("failure_alerts")
         )
     )
@@ -852,6 +859,10 @@ def _render_postal_pending_v2(
     batch_summary: dict,
 ) -> None:
     """Render the isolated v2 postal page using the existing job pipeline."""
+    display_results, legacy_result_notice = job_result_view(job)
+    if not is_busy and job:
+        batch_summary = summarize_batch_results(display_results)
+        done = int(batch_summary["completed_count"])
     st.markdown('<span class="postal-v2-page-marker"></span>', unsafe_allow_html=True)
     editable_count = min(len(df_pending), 20)
     if not is_busy and not df_pending.empty:
@@ -1308,6 +1319,10 @@ def _render_postal_pending_v2(
                 st.warning(job['safety_lock_message'])
             else:
                 st.error('部分郵政結果需核對，已停止後續製單。請保留已產生的運單並由管理員依操作手冊恢復。')
+        if job and job.get("postprocess_error_message") and not is_busy:
+            st.warning(job["postprocess_error_message"])
+        if legacy_result_notice and not is_busy:
+            st.warning(legacy_result_notice)
         if job and job.get("runtime_setup_message") and not is_busy:
             st.error(job["runtime_setup_message"])
 
@@ -1839,20 +1854,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             except Exception:
                 pass
             try:
-                unfinished_results = [
-                    {
-                        "order_id": str(order.get("order_id") or "").strip(),
-                        "status": "failed",
-                        "reason_code": failure_code,
-                        "reason_text": reason_text,
-                        "message": reason_text,
-                    }
-                    for order in (job.get("orders") or [])
-                    if order.get("status") in {"queued", "running"}
-                ]
-                job.setdefault("results", []).extend(unfinished_results)
-                mark_results_failed(job, unfinished_results)
-                mark_unfinished_orders(job, "failed", "發生例外", reason_text)
+                reconcile_job_exception(job, failure_code, reason_text)
                 finish_status = "error"
             except Exception:
                 pass
@@ -2997,7 +2999,7 @@ def _render_main_app():
 
     pending_count = len(df_pending)
     rate, rate_date, _ = _load_usd_jpy_rate()
-    batch_summary = summarize_batch_results((job or {}).get("results") or [])
+    batch_summary = summarize_batch_results(job_result_view(job)[0])
     done = (
         int(summarize_job_progress(job)["done"])
         if is_busy and job
