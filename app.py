@@ -830,16 +830,62 @@ def _retry_writeback_results(job):
         writer.acquire()
     except Exception:
         return {'ok': False, 'message': '全域製單鎖正在使用或需管理員核對；未重製運單。'}
+    safety = NormalShipmentSafety(writer)
+    outcome = None
+    terminal_status = 'partial_failure'
+    message = '回填結果未能確認；已保留既有運單，請核對後勿重製。'
+    processing_failed = False
     try:
+        safety.prepare_writeback(candidates)
         outcome = backfill_results(candidates)
         terminal_status = apply_writeback_outcome(job, candidates, outcome)
-        NormalShipmentSafety(writer).mark_verified(candidates)
+        safety.mark_verified(candidates)
+        message = '回填已完成' if bool(outcome and outcome.get('ok')) else '仍有資料需要確認'
+    except Exception:
+        # The postal labels already exist. Keep their tracking/PDF evidence and
+        # leave per-order guards nonterminal so the same order cannot be issued
+        # again while this backfill outcome is being reconciled.
+        processing_failed = True
+        terminal_status = 'partial_failure'
+        job['postprocess_error_message'] = (
+            '運單已保留，但回填結果未能確認；請核對 Google Sheets 後勿重新製單。'
+        )
     finally:
-        writer.release()
-    _JOB_REGISTRY.finish(job, terminal_status)
+        if writer.held and writer.retain:
+            # The synchronous retry worker has stopped. A fresh exact owner
+            # check can clear a transient read uncertainty, never a foreign or
+            # missing lock generation.
+            writer.revalidate_after_worker_stopped()
+        if writer.held and not writer.retain:
+            try:
+                # This retry worker has stopped. Keep order-level guards for
+                # unresolved rows, then terminalize and release the global lock.
+                writer.stage('completed', worker_finished=True)
+            except Exception:
+                if writer.retain:
+                    processing_failed = True
+                    job['postprocess_error_message'] = (
+                        '回填結果已保留，但執行鎖終態未能確認；請勿重製此批運單。'
+                    )
+            if not writer.retain:
+                try:
+                    writer.release()
+                except Exception:
+                    processing_failed = True
+                    job['postprocess_error_message'] = (
+                        '回填結果已保留，但執行鎖釋放狀態未明；請勿重製此批運單。'
+                    )
+        elif writer.retain:
+            processing_failed = True
+            job['postprocess_error_message'] = (
+                '回填結果已保留，但執行鎖仍需核對；請勿重製此批運單。'
+            )
+        _JOB_REGISTRY.finish(job, terminal_status)
+    if processing_failed:
+        message = job.get('postprocess_error_message') or message
     return {
-        "ok": outcome["ok"],
-        "message": "回填已完成" if outcome["ok"] else "仍有資料需要確認",
+        "ok": bool(outcome and outcome.get('ok')) and not processing_failed,
+        "message": message,
     }
 
 
@@ -1769,6 +1815,7 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
             mark_results_failed(job, failed_results)
             if successful_results:
                 writeback_candidates = successful_results
+                safety.prepare_writeback(successful_results)
                 for result in successful_results:
                     _status({"event": "writeback_pending", **result})
                 _log(f"📋 正在回填 {len(writeback_candidates)} 筆至 Google Sheets...")
@@ -1831,7 +1878,9 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                 "shipment_ledger_unreadable": "無法安全讀取內部製單紀錄，請由管理員核對紀錄與加密設定，勿重送。",
                 "shipment_snapshot_too_large": "製單快照超出內部紀錄容量，請由管理員核對，勿重送。",
                 "shipment_ledger_readback_failed": "內部製單紀錄讀回驗證失敗，請先核對運單與回填狀態，勿重送。",
+                "shipment_ledger_write_unknown": "內部製單紀錄寫入結果未能確認，請先核對運單與回填狀態，勿重送。",
                 "shipment_guards_unreadable": "無法安全讀取防重製紀錄，請由管理員核對，勿重送。",
+                "shipment_guard_write_unknown": "防重製紀錄寫入結果未能確認，請先核對運單與回填狀態，勿重送。",
                 "shipment_previous_submission_requires_review": "偵測到前次提交紀錄，請先核對運單與回填狀態，勿重送。",
                 "shipment_existing_plan_requires_resume": "此訂單已有未完成製單計畫，請先核對或恢復原計畫，勿另開製單。",
                 "shipment_guard_readback_failed": "防重製紀錄讀回驗證失敗，請先核對運單與回填狀態，勿重送。",
@@ -1864,18 +1913,38 @@ def _start_job(email: str, df: pd.DataFrame, max_rows: int | None) -> tuple[bool
                     if safety is not None and not safety.safe_to_release():
                         writer.retain = True
                     if writer.retain:
+                        # This worker has stopped. Retry only the read-only
+                        # canonical owner check; a different/missing generation
+                        # remains fail-closed.
+                        writer.revalidate_after_worker_stopped()
+                    if writer.retain:
                         _record_writer_review("shipment_lock_requires_review")
                     else:
                         try:
-                            writer.release()
-                        except Exception as release_error:
-                            release_code = getattr(release_error, "reason_code", "") if isinstance(release_error, LedgerUnavailable) else ""
-                            if type(release_code) is not str or release_code not in {
-                                "shipment_lock_ownership_lost", "shipment_lock_not_held",
-                                "shipment_lock_requires_review", "shipment_lock_release_unknown",
-                            }:
-                                release_code = "shipment_lock_release_unknown"
-                            _record_writer_review(release_code, type(release_error).__name__, release_only=True)
+                            # The worker is now stopped. Every started order has
+                            # a durable per-order guard (including ambiguous USPS
+                            # outcomes), so finish the global lifecycle before
+                            # releasing its generation. That terminal marker lets
+                            # a later acquire reconcile a lost delete response.
+                            writer.stage("completed", worker_finished=True)
+                        except Exception as stage_error:
+                            if writer.retain:
+                                _record_writer_review(
+                                    "shipment_lock_requires_review", type(stage_error).__name__
+                                )
+                            else:
+                                _log("⚠️ 終態標記未提交，但持有者已確認；嘗試釋放已停止工作的鎖。")
+                        if not writer.retain:
+                            try:
+                                writer.release()
+                            except Exception as release_error:
+                                release_code = getattr(release_error, "reason_code", "") if isinstance(release_error, LedgerUnavailable) else ""
+                                if type(release_code) is not str or release_code not in {
+                                    "shipment_lock_ownership_lost", "shipment_lock_not_held",
+                                    "shipment_lock_requires_review", "shipment_lock_release_unknown",
+                                }:
+                                    release_code = "shipment_lock_release_unknown"
+                                _record_writer_review(release_code, type(release_error).__name__, release_only=True)
             except Exception as cleanup_error:
                 # A local cleanup failure cannot make an uncertain writer safe.
                 if writer is not None:

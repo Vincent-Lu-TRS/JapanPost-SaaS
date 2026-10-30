@@ -911,16 +911,6 @@ def backfill_results(
                         },
                     ]
                 )
-            # Free text may begin with '='; RAW preserves it without executing
-            # a spreadsheet formula or dropping tracking number leading zeros.
-            worksheet.batch_update(updates, value_input_option="RAW")
-            verified = _verify_writeback_rows(
-                worksheet,
-                expected_by_row,
-                attempts=readback_attempts,
-                delay_seconds=readback_delay_seconds,
-                sleep_fn=sleep_fn,
-            )
         except Exception as exc:
             safe_code = _safe_sheet_error_code(exc)
             safe_log_event(
@@ -933,6 +923,60 @@ def backfill_results(
                 row_number: safe_code
                 for row_number in expected_by_row
             }
+        else:
+            # Free text may begin with '='; RAW preserves it without executing
+            # a spreadsheet formula or dropping tracking number leading zeros.
+            try:
+                worksheet.batch_update(updates, value_input_option="RAW")
+            except Exception as write_error:
+                safe_code = _safe_sheet_error_code(write_error)
+                # A lost API response can follow a committed write. Read the
+                # exact planned rows before classifying the result; never resend
+                # the mutation just because its response was ambiguous.
+                try:
+                    readback = _verify_writeback_rows(
+                        worksheet,
+                        expected_by_row,
+                        attempts=readback_attempts,
+                        delay_seconds=readback_delay_seconds,
+                        sleep_fn=sleep_fn,
+                    )
+                except Exception:
+                    readback = {row_number: 'writeback_readback_failed'
+                                for row_number in expected_by_row}
+                verified = {
+                    row_number: (
+                        reason if reason in {'verified', 'partial_write'} else safe_code
+                    )
+                    for row_number, reason in readback.items()
+                }
+                safe_log_event(
+                    log_cb or (lambda message: logging.error("%s", message)),
+                    "writeback_batch_finished",
+                    count=len(expected_by_row),
+                    reason=safe_code,
+                )
+            else:
+                try:
+                    verified = _verify_writeback_rows(
+                        worksheet,
+                        expected_by_row,
+                        attempts=readback_attempts,
+                        delay_seconds=readback_delay_seconds,
+                        sleep_fn=sleep_fn,
+                    )
+                except Exception as exc:
+                    safe_code = _safe_sheet_error_code(exc)
+                    safe_log_event(
+                        log_cb or (lambda message: logging.error("%s", message)),
+                        "writeback_batch_finished",
+                        count=len(expected_by_row),
+                        reason=safe_code,
+                    )
+                    verified = {
+                        row_number: safe_code
+                        for row_number in expected_by_row
+                    }
 
     items = list(immediate_items)
     for candidate in classified:

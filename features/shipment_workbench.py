@@ -44,6 +44,10 @@ def _preview(plan, *, compact=False):
 
 
 def _show_results(results):
+    release_warnings = {result.get('writer_release_warning') for result in results
+                        if result.get('writer_release_warning')}
+    for warning in release_warnings:
+        st.warning(warning)
     for result in results:
         st.write(f"{result['order_id']}｜{result.get('tracking','')}｜{result['status']}")
         file_id = result.get('drive_file_id', '')
@@ -61,6 +65,10 @@ def _show_reissue_results(results):
         st.warning('運單結果需要人工核對，請勿重新製單。')
     else:
         st.warning('補單尚有未完成的回填，請恢復原計畫；不要重新製單。')
+    release_warnings = {result.get('writer_release_warning') for result in results
+                        if result.get('writer_release_warning')}
+    for warning in release_warnings:
+        st.warning(warning)
     for index, result in enumerate(results, 1):
         if result.get('status') != 'completed' and result.get('tracking'):
             st.caption('追蹤號碼：' + str(result['tracking']))

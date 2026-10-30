@@ -350,6 +350,52 @@ class SheetsHelperTests(unittest.TestCase):
             {"partial_write", "write_failed"},
         )
 
+    def test_batch_write_commit_then_timeout_is_confirmed_by_readback_without_retry(self):
+        client = self.make_client([], row_count=2)
+        worksheet = client.worksheet
+        original = worksheet.batch_update
+        calls = []
+
+        def commit_then_timeout(batch, value_input_option=None):
+            calls.append(1)
+            original(batch, value_input_option=value_input_option)
+            raise TimeoutError('synthetic response lost after commit')
+
+        worksheet.batch_update = commit_then_timeout
+        outcome = backfill_results(
+            [result('ORDER-COMMIT', 'TRACK-COMMIT')],
+            client=client,
+            readback_attempts=1,
+            readback_delay_seconds=0,
+        )
+
+        self.assertEqual(calls, [1])
+        self.assertTrue(outcome['ok'])
+        self.assertEqual(outcome['items'][0]['status'], 'written')
+        self.assertEqual(worksheet.rows[1][2:4], ['ORDER-COMMIT', 'TRACK-COMMIT'])
+
+    def test_batch_write_timeout_before_commit_returns_safe_retryable_failure(self):
+        client = self.make_client([], row_count=2)
+        worksheet = client.worksheet
+        calls = []
+
+        def fail_before_commit(batch, value_input_option=None):
+            calls.append(1)
+            raise TimeoutError('synthetic no-commit')
+
+        worksheet.batch_update = fail_before_commit
+        outcome = backfill_results(
+            [result('ORDER-NOCOMMIT', 'TRACK-NOCOMMIT')],
+            client=client,
+            readback_attempts=1,
+            readback_delay_seconds=0,
+        )
+
+        self.assertEqual(calls, [1])
+        self.assertFalse(outcome['ok'])
+        self.assertEqual(outcome['items'][0]['status'], 'write_failed')
+        self.assertEqual(outcome['items'][0]['reason_code'], 'writeback_network_error')
+
     def test_initial_sheet_read_failure_returns_item_outcomes(self):
         client = self.make_client([], row_count=2)
         client.worksheet.col_values = lambda column: (_ for _ in ()).throw(
