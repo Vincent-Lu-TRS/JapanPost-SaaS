@@ -1,4 +1,5 @@
 import ast
+import json
 import sys
 import threading
 import time
@@ -13,6 +14,7 @@ from bot.shipment_ledger import GlobalShipmentLock, LedgerUnavailable, NormalShi
 from test_shipment_ledger import MemoryBook, MemorySheet
 from job_control import apply_writeback_outcome as real_apply_writeback_outcome
 from job_control import reconcile_job_exception
+from job_control import writeback_retry_candidates
 from safe_logging import log_runtime_failure, redact_operational_log, safe_log_event
 
 
@@ -35,6 +37,30 @@ class FakeFrame:
 
 
 class PostalWorkerRuntimeTests(unittest.TestCase):
+    def _invoke_retry_writeback(self, job, *, writer, backfill):
+        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        node = next(item for item in tree.body if isinstance(item, ast.FunctionDef)
+                    and item.name == "_retry_writeback_results")
+        function = compile(ast.Module(body=[node], type_ignores=[]), str(ROOT / "app.py"), "exec")
+        calls = []
+
+        class Registry:
+            def finish(self, _job, status):
+                calls.append(("finish", status))
+                _job["status"] = status
+
+        namespace = {
+            "writeback_retry_candidates": writeback_retry_candidates,
+            "backfill_results": backfill,
+            "apply_writeback_outcome": real_apply_writeback_outcome,
+            "_JOB_REGISTRY": Registry(),
+        }
+        with patch("bot.shipment_ledger.global_writer_lock", return_value=writer):
+            exec(function, namespace)
+            result = namespace["_retry_writeback_results"](job)
+        return result, calls
+
     def _invoke_start_job(self, *, runtime_error=None, scenario="normal", automation_results=None,
                           real_writer=None, safety_error=None, automation_error=None, backfill_error=None,
                           lifecycle=False, lifecycle_stop_at=None, release_observer=None,
@@ -207,6 +233,8 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
                 if safety_error is not None:
                     raise safety_error
             def lifecycle(self, *args, **kwargs): pass
+            def prepare_writeback(self, results):
+                calls.append(('prepare_writeback', len(results)))
             def mark_verified(self, results): pass
             def safe_to_release(self):
                 if safety_cleanup_error is not None:
@@ -217,6 +245,7 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
             retain = False
             sheet_id = 123
             def acquire(self): self.held = True
+            def stage(self, *args, **kwargs): pass
             def release(self): self.held = False
         selected_writer = real_writer or Writer()
         if release_observer is not None:
@@ -321,7 +350,147 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
         self.assertTrue(writer.held)
         self.assertTrue(writer.retain)
 
-    def test_retained_writer_after_completed_guard_readback_failure_is_visible(self):
+    def test_normal_batch_marks_terminal_after_verified_writeback_and_releases_lock(self):
+        class RecordingLock(GlobalShipmentLock):
+            def __init__(self, book):
+                super().__init__(book)
+                self.stages = []
+
+            def stage(self, stage, **fields):
+                self.stages.append(stage)
+                return super().stage(stage, **fields)
+
+        writer = RecordingLock(MemoryBook())
+        _, job, calls, _ = self._invoke_start_job(real_writer=writer, lifecycle=True,
+            automation_results=[{"order_id": "ORDER-MOCK-01", "trans_type": "ePacket",
+                                 "shipment_role": "primary", "status": "success", "tracking": "LX123456789JP"}])
+
+        self.assertEqual(job["results"][0]["status"], "completed")
+        self.assertIn("writeback_pending", writer.stages)
+        self.assertEqual(writer.stages[-1], "completed")
+        self.assertFalse(writer.held)
+        self.assertFalse(any(sheet.title == "_jppost_exclusive_writer_v1" for sheet in writer.book.worksheets()))
+        self.assertEqual(sum(call[0] == "automation" for call in calls), 1)
+        self.assertEqual(sum(call[0] == "backfill" for call in calls), 1)
+
+    def test_writeback_retry_marks_pending_and_terminal_before_releasing_writer(self):
+        book = MemoryBook()
+        writer = GlobalShipmentLock(book)
+        candidate = {"order_id": "ORDER-RETRY-01", "trans_type": "ePacket",
+                     "shipment_role": "primary", "tracking": "LX123456789JP",
+                     "drive_file_id": "synthetic-pdf", "status": "backfill_failed",
+                     "backfill_status": "write_failed"}
+        job = {"orders": [{"order_id": candidate["order_id"], "trans_type": "ePacket",
+                            "shipment_role": "primary", "status": "failed"}],
+               "results": [candidate]}
+        calls = []
+
+        def backfill(results):
+            calls.append(("backfill", writer.marker()["stage"]))
+            return {"ok": True, "items": [{"input_index": 0, "status": "written", "row": 7}]}
+
+        result, finished = self._invoke_retry_writeback(job, writer=writer, backfill=backfill)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [("backfill", "writeback_pending")])
+        self.assertEqual(finished, [("finish", "completed")])
+        self.assertEqual(candidate["status"], "completed")
+        self.assertEqual(dict(NormalShipmentSafety(writer).records())[
+            NormalShipmentSafety.identity(candidate)[0]]["stage"], "completed")
+        self.assertFalse(writer.held)
+        self.assertFalse(any(sheet.title == "_jppost_exclusive_writer_v1" for sheet in book.worksheets()))
+
+    def test_writeback_retry_failure_preserves_label_and_releases_known_terminal_worker(self):
+        book = MemoryBook()
+        writer = GlobalShipmentLock(book)
+        candidate = {"order_id": "ORDER-RETRY-02", "trans_type": "ePacket",
+                     "shipment_role": "primary", "tracking": "LX123456780JP",
+                     "drive_file_id": "synthetic-pdf", "status": "backfill_failed",
+                     "backfill_status": "write_failed"}
+        job = {"orders": [{"order_id": candidate["order_id"], "trans_type": "ePacket",
+                            "shipment_role": "primary", "status": "failed"}],
+               "results": [candidate]}
+
+        def backfill(_results):
+            raise RuntimeError("synthetic API failure")
+
+        result, finished = self._invoke_retry_writeback(job, writer=writer, backfill=backfill)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(candidate["status"], "backfill_failed")
+        self.assertEqual(candidate["tracking"], "LX123456780JP")
+        self.assertEqual(candidate["drive_file_id"], "synthetic-pdf")
+        guard = dict(NormalShipmentSafety(writer).records())[NormalShipmentSafety.identity(candidate)[0]]
+        self.assertEqual(guard['stage'], 'writeback_pending')
+        self.assertEqual(finished, [("finish", "partial_failure")])
+        self.assertFalse(writer.held)
+        self.assertFalse(any(sheet.title == "_jppost_exclusive_writer_v1" for sheet in book.worksheets()))
+
+    def test_writeback_retry_release_warning_preserves_completed_tracking_and_pdf(self):
+        class ReleaseFailureLock(GlobalShipmentLock):
+            def release(self):
+                raise LedgerUnavailable('shipment_lock_release_unknown')
+
+        book = MemoryBook()
+        writer = ReleaseFailureLock(book)
+        candidate = {"order_id": "ORDER-RETRY-03", "trans_type": "ePacket",
+                     "shipment_role": "primary", "tracking": "LX123456781JP",
+                     "drive_file_id": "synthetic-pdf", "status": "backfill_failed",
+                     "backfill_status": "write_failed"}
+        job = {"orders": [{"order_id": candidate["order_id"], "trans_type": "ePacket",
+                            "shipment_role": "primary", "status": "failed"}],
+               "results": [candidate]}
+
+        def backfill(_results):
+            return {"ok": True, "items": [{"input_index": 0, "status": "written", "row": 8}]}
+
+        result, finished = self._invoke_retry_writeback(job, writer=writer, backfill=backfill)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("釋放狀態未明", result["message"])
+        self.assertEqual(candidate["status"], "completed")
+        self.assertEqual(candidate["tracking"], "LX123456781JP")
+        self.assertEqual(candidate["drive_file_id"], "synthetic-pdf")
+        self.assertEqual(finished, [("finish", "completed")])
+        self.assertEqual(writer.marker()["stage"], "completed")
+
+    def test_writeback_retry_releases_when_terminal_write_is_confirmed_uncommitted(self):
+        book = MemoryBook()
+        writer = GlobalShipmentLock(book)
+        candidate = {"order_id": "ORDER-RETRY-04", "trans_type": "ePacket",
+                     "shipment_role": "primary", "tracking": "LX123456782JP",
+                     "drive_file_id": "synthetic-pdf", "status": "backfill_failed",
+                     "backfill_status": "write_failed"}
+        job = {"orders": [{"order_id": candidate["order_id"], "trans_type": "ePacket",
+                            "shipment_role": "primary", "status": "failed"}],
+               "results": [candidate]}
+        real_batch_update = book.batch_update
+
+        def fail_terminal_before_commit(body):
+            for request in body.get("requests", []):
+                update = request.get("updateCells") or {}
+                try:
+                    value = update["rows"][0]["values"][0]["userEnteredValue"]["stringValue"]
+                    if json.loads(value).get("stage") == "completed":
+                        raise TimeoutError("synthetic terminal write did not commit")
+                except (KeyError, IndexError, TypeError, ValueError):
+                    pass
+            return real_batch_update(body)
+
+        book.batch_update = fail_terminal_before_commit
+        def backfill(_results):
+            return {"ok": True, "items": [{"input_index": 0, "status": "written", "row": 9}]}
+
+        result, finished = self._invoke_retry_writeback(job, writer=writer, backfill=backfill)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["message"], "回填已完成")
+        self.assertEqual(candidate["status"], "completed")
+        self.assertEqual(finished, [("finish", "completed")])
+        self.assertFalse(writer.held)
+        self.assertFalse(any(sheet.title == "_jppost_exclusive_writer_v1" for sheet in book.worksheets()))
+
+    def test_ambiguous_completed_guard_write_keeps_order_review_but_releases_global_writer(self):
         book = MemoryBook()
         writer = GlobalShipmentLock(book)
         original_by_id = book.get_worksheet_by_id
@@ -330,12 +499,20 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
             sheet = original_by_id(sheet_id)
             if sheet.title == NormalShipmentSafety.title and not getattr(sheet, "instrumented", False):
                 sheet.instrumented = True
+                original_update = sheet.update
                 original_get = sheet.get
+
+                def commit_then_timeout_on_completed(values, **kwargs):
+                    result = original_update(values, **kwargs)
+                    if "completed" in str(values):
+                        raise TimeoutError("synthetic response loss after completed guard write")
+                    return result
 
                 def bad_completed_readback(a1):
                     rows = original_get(a1)
                     return [] if "completed" in str(rows) else rows
 
+                sheet.update = commit_then_timeout_on_completed
                 sheet.get = bad_completed_readback
             return sheet
 
@@ -345,24 +522,50 @@ class PostalWorkerRuntimeTests(unittest.TestCase):
                                  "shipment_role": "primary", "status": "success", "tracking": "LX123456789JP"}])
         self.assertEqual(job["results"][0]["status"], "completed")
         self.assertEqual(job["status"], "error")
-        self.assertTrue(writer.retain)
-        self.assertTrue(job.get("safety_review_required"))
-        self.assertEqual(job.get("safety_lock_generation"), writer.sheet_id)
+        self.assertFalse(writer.retain)
+        self.assertFalse(writer.held)
+        self.assertFalse(any(sheet.title == "_jppost_exclusive_writer_v1" for sheet in book.worksheets()))
+        self.assertNotIn("safety_lock_generation", job)
         self.assertNotIn("safety_lock_message", job)
-        self.assertTrue(any("stage=writer_release reason=shipment_lock_requires_review" in line for line in job["logs"]))
         self.assertEqual(sum(call[0] == "automation" for call in calls), 1)
         self.assertEqual(sum(call[0] == "backfill" for call in calls), 1)
 
-    def test_unknown_issuing_result_keeps_critical_warning_instead_of_release_only_copy(self):
+    def test_unknown_issuing_result_keeps_order_warning_but_releases_global_writer(self):
         writer = GlobalShipmentLock(MemoryBook())
         _, job, calls, _ = self._invoke_start_job(real_writer=writer, lifecycle=True, lifecycle_stop_at="issuing")
         self.assertTrue(job.get("safety_review_required"))
-        self.assertTrue(writer.retain)
+        self.assertFalse(writer.retain)
+        self.assertFalse(writer.held)
+        self.assertFalse(any(sheet.title == "_jppost_exclusive_writer_v1" for sheet in writer.book.worksheets()))
         self.assertNotIn("safety_lock_message", job)
         self.assertNotIn("運單結果已保留", str(job))
-        self.assertEqual(job.get("safety_lock_generation"), writer.sheet_id)
         self.assertNotIn("backfill", [call[0] for call in calls])
         self.assertNotIn("private lifecycle failure", str(job))
+
+    def test_transient_issue_gate_read_is_rechecked_after_worker_stops(self):
+        writer = GlobalShipmentLock(MemoryBook())
+        original_values_get = writer.book.values_get
+        reads = []
+
+        def fail_once(range_name, params=None):
+            reads.append(range_name)
+            if len(reads) == 3:
+                raise TimeoutError('synthetic transient marker read failure')
+            return original_values_get(range_name, params=params)
+
+        writer.book.values_get = fail_once
+        _, job, calls, _ = self._invoke_start_job(real_writer=writer, lifecycle=True,
+            automation_results=[{"order_id": "ORDER-MOCK-01", "trans_type": "ePacket",
+                                 "shipment_role": "primary", "status": "success",
+                                 "tracking": "LX123456789JP"}])
+
+        self.assertEqual(len(reads), 6)
+        self.assertEqual(job['status'], 'error')
+        self.assertFalse(writer.retain)
+        self.assertFalse(writer.held)
+        self.assertFalse(any(sheet.title == '_jppost_exclusive_writer_v1'
+                             for sheet in writer.book.worksheets()))
+        self.assertNotIn('backfill', [call[0] for call in calls])
 
     def test_terminal_status_and_local_unlock_wait_for_writer_cleanup(self):
         for scenario, fail_release in (("normal", False), ("normal", True),

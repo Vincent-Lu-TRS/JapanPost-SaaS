@@ -87,7 +87,7 @@ class ServiceTests(unittest.TestCase):
         return {'ok': True, 'items': [{'input_index': i, 'status': 'written'} for i in range(len(results))]}
 
     def execute(self, plan=None, **kwargs):
-        lock = GlobalShipmentLock(self.book)
+        lock = kwargs.pop('lock', GlobalShipmentLock(self.book))
         ledger = ShipmentLedger(self.book, 'x' * 40, lock)
         return execute_plan(plan or self.plan, requested_by='staff@tkrjm.co.jp', lock=lock, ledger=ledger,
                             source_loader=lambda order: self.row, completion_reader=self.completion,
@@ -99,11 +99,15 @@ class ServiceTests(unittest.TestCase):
         plan = build_plan(self.row, [{'method':method,'quantities':quantities} for method in ('ePacket','EMS')],
                           mode='reissue',original_tracking='OLD000000001JP',nonce='copy',copy_type='whole_order')
         seen = []
+        batches = []
         def backfill(results, **kwargs):
             seen.extend(copy.deepcopy(results))
+            batches.append(copy.deepcopy(results))
             return self.backfill(results,**kwargs)
         result = self.execute(plan,backfill=backfill,tracking_baseline={'OLD000000001JP'},confirmed_new_tracking=True)
         self.assertEqual(len(self.calls),2)
+        self.assertEqual(len(batches),1)
+        self.assertEqual(len(batches[0]),2)
         self.assertEqual(len({r['tracking'] for r in seen}),2)
         self.assertEqual([r['order_id'] for r in seen],['imy2099999']*2)
         self.assertEqual([r['shipment_role'] for r in seen],['additional']*2)
@@ -111,13 +115,95 @@ class ServiceTests(unittest.TestCase):
         self.execute(plan)
         self.assertEqual(len(self.calls),2)
 
+    def test_prior_uploaded_package_is_batched_backfill_if_later_package_fails(self):
+        backfill_batches = []
+
+        def fails_second(frame, *, lifecycle_cb, **kwargs):
+            self.calls.append(frame.iloc[0]['_shipment_id'])
+            if len(self.calls) == 2:
+                lifecycle_cb('issuing', frame.iloc[0])
+                raise RuntimeError('synthetic failure after issue began')
+            lifecycle_cb('issuing', frame.iloc[0])
+            lifecycle_cb('label_created', frame.iloc[0], tracking='EL000000001JP')
+            lifecycle_cb('uploaded', frame.iloc[0], tracking='EL000000001JP', drive_file_id='pdf-first')
+            return [{'status': 'success', 'tracking': 'EL000000001JP'}]
+
+        def observe_backfill(results, **kwargs):
+            backfill_batches.append(copy.deepcopy(results))
+            return self.backfill(results, **kwargs)
+
+        with self.assertRaises(LedgerUnavailable):
+            self.execute(runner=fails_second, backfill=observe_backfill)
+
+        self.assertEqual(len(backfill_batches), 1)
+        self.assertEqual(len(backfill_batches[0]), 1)
+        self.assertEqual(len(self.pairs), 1)
+        record = ShipmentLedger(self.book, 'x' * 40).records()[0][1]
+        self.assertEqual(sum(s['status'] == 'completed' for s in record['shipments']), 1)
+        self.assertEqual(sum(s['status'] == 'unknown' for s in record['shipments']), 1)
+
     def test_two_packages_keep_original_order_and_retry_after_restart_never_reissues(self):
         results = self.execute()
         self.assertEqual(len(self.calls), 2)
+
+    def test_split_and_reissue_mirror_each_durable_stage_to_global_writer(self):
+        class RecordingLock(GlobalShipmentLock):
+            def __init__(self, book):
+                super().__init__(book)
+                self.stages = []
+
+            def stage(self, stage, **fields):
+                self.stages.append(stage)
+                return super().stage(stage, **fields)
+
+        lock = RecordingLock(self.book)
+        results = self.execute(lock=lock)
+
+        self.assertTrue(all(result['status'] == 'completed' for result in results))
+        for stage in ('issuing', 'label_created', 'uploaded', 'writeback_pending', 'completed'):
+            self.assertIn(stage, lock.stages)
+        self.assertFalse(any(sheet.title == '_jppost_exclusive_writer_v1' for sheet in self.book.worksheets()))
+
+    def test_release_failure_preserves_completed_results_and_adds_safe_warning(self):
+        class ReleaseFailureLock(GlobalShipmentLock):
+            def release(self):
+                raise LedgerUnavailable('shipment_lock_release_unknown')
+
+        lock = ReleaseFailureLock(self.book)
+        results = self.execute(lock=lock)
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result['status'] == 'completed' for result in results))
+        self.assertTrue(all(result['tracking'] for result in results))
+        self.assertTrue(all(result.get('writer_release_warning') for result in results))
+        self.assertEqual(lock.marker()['stage'], 'completed')
         self.assertEqual({r['order_id'] for r in results}, {'imy2099999'})
         self.assertEqual(len(self.pairs), 2)
         self.assertEqual([r['status'] for r in self.execute()], ['completed', 'completed'])
         self.assertEqual(len(self.calls), 2)
+
+    def test_transient_issue_gate_read_is_rechecked_after_split_worker_stops(self):
+        lock = GlobalShipmentLock(self.book)
+        original_values_get = self.book.values_get
+        reads = []
+
+        def fail_once(range_name, params=None):
+            reads.append(range_name)
+            if len(reads) == 3:
+                raise TimeoutError('synthetic transient marker read failure')
+            return original_values_get(range_name, params=params)
+
+        self.book.values_get = fail_once
+        with self.assertRaises(LedgerUnavailable):
+            self.execute(lock=lock)
+
+        self.assertGreaterEqual(len(reads), 6)
+        self.assertFalse(lock.retain)
+        self.assertFalse(lock.held)
+        self.assertFalse(any(sheet.title == '_jppost_exclusive_writer_v1'
+                             for sheet in self.book.worksheets()))
+        record = ShipmentLedger(self.book, 'x' * 40).records()[0][1]
+        self.assertEqual(record['shipments'][0]['status'], 'unknown')
 
     def test_completed_replay_ignores_deleted_source_and_later_legal_tracking(self):
         self.execute()
@@ -216,13 +302,13 @@ class ServiceTests(unittest.TestCase):
             self.execute()
         self.assertFalse(self.calls)
 
-    def test_register_unknown_retains_lock_and_never_automatically_reissues(self):
+    def test_register_unknown_keeps_order_tombstone_but_releases_global_writer(self):
         def crash(frame, *, lifecycle_cb, **kwargs):
             lifecycle_cb('issuing', frame.iloc[0])
             raise TimeoutError()
         with self.assertRaises(LedgerUnavailable):
             self.execute(runner=crash)
-        self.assertTrue(any(s.title == '_jppost_exclusive_writer_v1' for s in self.book.worksheets()))
+        self.assertFalse(any(s.title == '_jppost_exclusive_writer_v1' for s in self.book.worksheets()))
         with self.assertRaises(LedgerUnavailable):
             self.execute()
         self.assertFalse(self.calls)

@@ -101,6 +101,8 @@ def execute_plan(plan, *, requested_by, tracking_baseline=None, confirmed_new_tr
     ledger = ledger or configured_ledger(lock)
     lock.acquire()
     record = None
+    results = []
+    pending_writebacks = []
     try:
         from .shipment_ledger import NormalShipmentSafety
         from shipment_plans import digest
@@ -110,7 +112,8 @@ def execute_plan(plan, *, requested_by, tracking_baseline=None, confirmed_new_tr
         existing_records = ledger.records()
         record = ledger.get(plan['plan_id'])
         if record and record['plan'] == plan and all(sh['status'] == 'completed' for sh in record['shipments']):
-            return [_result(plan, sh) for sh in record['shipments']]
+            results = [_result(plan, sh) for sh in record['shipments']]
+            return results
         if record and record['plan'] != plan:
             raise ValueError('已保存的計畫不可變更')
         for _, other in existing_records:
@@ -153,79 +156,174 @@ def execute_plan(plan, *, requested_by, tracking_baseline=None, confirmed_new_tr
                                      'payload': row.to_dict(), 'tracking': '', 'drive_file_id': ''}
                                     for _, row in frame.iterrows()]}
             ledger.save(plan['plan_id'], record)
-        results = []
-        for shipment in record['shipments']:
-            lock.assert_owned()
-            status = shipment['status']
-            if status in {'issuing', 'unknown'}:
-                lock.retain = True
-                raise LedgerUnavailable('shipment_unknown_requires_review')
-            if status == 'label_created':
-                raise LedgerUnavailable('shipment_pdf_requires_manual_recovery')
+        def flush_writebacks():
+            if not pending_writebacks:
+                return
+            candidates = [result for _shipment, result in pending_writebacks]
+            for shipment, _result_row in pending_writebacks:
+                shipment['status'] = 'writeback_pending'
+            try:
+                ledger.save(plan['plan_id'], record)
+            except Exception:
+                raise LedgerUnavailable('shipment_persistence_unknown') from None
+            # Each order/shipment is durably guarded before the shared writer
+            # enters the target-sheet phase. One batch marker avoids a pair of
+            # ownership reads for every package in a split/reissue plan.
+            lock.stage('writeback_pending', shipment_count=len(candidates),
+                       pending_count=len(candidates))
+            try:
+                outcome = backfill(candidates, log_cb=log_cb)
+            except Exception:
+                outcome = None
+            outcome_items = {
+                item.get('input_index'): item
+                for item in (outcome or {}).get('items', [])
+                if isinstance(item, dict) and isinstance(item.get('input_index'), int)
+            }
+            for index, (shipment, result_row) in enumerate(pending_writebacks):
+                item = outcome_items.get(index)
+                verified = bool(item and item.get('status') in {'written', 'already_present'})
+                if item:
+                    # Real backfill results always carry these identities. Keep
+                    # compatibility with small injected adapters that omit them,
+                    # but reject any explicit mismatch before marking complete.
+                    for key, expected in (
+                        ('order_id', result_row['order_id']),
+                        ('tracking', result_row['tracking']),
+                        ('trans_type', result_row['trans_type']),
+                        ('shipment_role', result_row['shipment_role']),
+                    ):
+                        actual = item.get(key)
+                        if actual not in (None, '') and str(actual) != str(expected):
+                            verified = False
+                            break
+                if verified:
+                    shipment['status'] = result_row['status'] = 'completed'
+                else:
+                    shipment['status'] = 'writeback_pending'
+                    result_row['status'] = 'backfill_failed'
+            try:
+                ledger.save(plan['plan_id'], record)
+            except Exception:
+                raise LedgerUnavailable('shipment_persistence_unknown') from None
+            pending_writebacks.clear()
 
-            def persist(stage, row, **fields):
-                if row.get('_shipment_id') != shipment['shipment_id']:
-                    raise LedgerUnavailable('shipment_identity_mismatch')
-                if shipment['status'] == stage and all(shipment.get(k) == v for k,v in fields.items()):
-                    return
-                allowed = {'planned': {'issuing'}, 'issuing': {'label_created'},
-                           'label_created': {'label_created', 'uploaded'}}
-                if stage not in allowed.get(shipment['status'], set()):
-                    raise LedgerUnavailable('shipment_invalid_transition')
-                if stage in {'label_created', 'uploaded'} and not fields.get('tracking'):
-                    raise LedgerUnavailable('shipment_tracking_missing')
-                if stage == 'label_created' and (fields.get('tracking') in baseline or any(
-                    other is not shipment and other.get('tracking') == fields.get('tracking') for other in record['shipments'])):
-                    raise LedgerUnavailable('shipment_tracking_not_new')
-                if shipment.get('tracking') and fields.get('tracking') != shipment['tracking']:
-                    raise LedgerUnavailable('shipment_tracking_changed')
-                if stage == 'uploaded' and not fields.get('drive_file_id'):
-                    raise LedgerUnavailable('shipment_pdf_missing')
-                if stage == 'issuing' and fields.get('hs_codes'):
-                    for index, code in fields['hs_codes'].items():
-                        shipment['payload'][f'HSCode{index}'] = str(code)
-                shipment.update(status=stage, updated_at=utc_now(), **fields)
-                try:
-                    ledger.save(plan['plan_id'], record)
-                except Exception:
-                    lock.retain = True
-                    raise LedgerUnavailable('shipment_persistence_unknown') from None
+        def execute_shipments():
+            for shipment in record['shipments']:
+                status = shipment['status']
+                if status in {'issuing', 'unknown'}:
+                    raise LedgerUnavailable('shipment_unknown_requires_review')
+                if status == 'label_created':
+                    raise LedgerUnavailable('shipment_pdf_requires_manual_recovery')
 
-            if status == 'planned':
-                try:
-                    produced = runner(pd.DataFrame([shipment['payload']]), headless=True,
-                                      lifecycle_cb=persist, log_cb=log_cb, status_cb=status_cb,
-                                      runtime_handle=runtime_handle)
-                except BaseException:
+                def persist(stage, row, **fields):
+                    if row.get('_shipment_id') != shipment['shipment_id']:
+                        raise LedgerUnavailable('shipment_identity_mismatch')
+                    if shipment['status'] == stage and all(shipment.get(k) == v for k,v in fields.items()):
+                        return
+                    allowed = {'planned': {'issuing'}, 'issuing': {'label_created'},
+                               'label_created': {'label_created', 'uploaded'}}
+                    if stage not in allowed.get(shipment['status'], set()):
+                        raise LedgerUnavailable('shipment_invalid_transition')
+                    if stage in {'label_created', 'uploaded'} and not fields.get('tracking'):
+                        raise LedgerUnavailable('shipment_tracking_missing')
+                    if stage == 'label_created' and (fields.get('tracking') in baseline or any(
+                        other is not shipment and other.get('tracking') == fields.get('tracking') for other in record['shipments'])):
+                        raise LedgerUnavailable('shipment_tracking_not_new')
+                    if shipment.get('tracking') and fields.get('tracking') != shipment['tracking']:
+                        raise LedgerUnavailable('shipment_tracking_changed')
+                    if stage == 'uploaded' and not fields.get('drive_file_id'):
+                        raise LedgerUnavailable('shipment_pdf_missing')
+                    if stage == 'issuing' and fields.get('hs_codes'):
+                        for index, code in fields['hs_codes'].items():
+                            shipment['payload'][f'HSCode{index}'] = str(code)
+                    shipment.update(status=stage, updated_at=utc_now(), **fields)
+                    try:
+                        ledger.save(plan['plan_id'], record)
+                    except Exception:
+                        raise LedgerUnavailable('shipment_persistence_unknown') from None
+                    lock.stage(stage, package_key=shipment['shipment_id'],
+                               tracking=shipment.get('tracking', ''))
+
+                if status == 'planned':
+                    try:
+                        runner(pd.DataFrame([shipment['payload']]), headless=True,
+                               lifecycle_cb=persist, log_cb=log_cb, status_cb=status_cb,
+                               runtime_handle=runtime_handle)
+                    except BaseException:
+                        if shipment['status'] == 'issuing':
+                            shipment['status'] = 'unknown'
+                            try:
+                                ledger.save(plan['plan_id'], record)
+                            except Exception:
+                                raise LedgerUnavailable('shipment_persistence_unknown') from None
+                        raise LedgerUnavailable('shipment_execution_stopped') from None
                     if shipment['status'] == 'issuing':
                         shipment['status'] = 'unknown'
-                        lock.retain = True
-                        ledger.save(plan['plan_id'], record)
-                    raise LedgerUnavailable('shipment_execution_stopped') from None
-                if shipment['status'] == 'issuing':
-                    shipment['status'] = 'unknown'
-                    lock.retain = True
-                    ledger.save(plan['plan_id'], record)
-                    raise LedgerUnavailable('shipment_unknown_requires_review')
-                if shipment['status'] != 'uploaded':
-                    # No Register was attempted: safely keep planned. A known
-                    # tracking with missing PDF is visible for manual recovery.
-                    raise LedgerUnavailable('shipment_not_fully_uploaded')
-            result = _result(plan, shipment)
-            if shipment['status'] != 'completed':
-                shipment['status'] = 'writeback_pending'
-                ledger.save(plan['plan_id'], record)
-                try:
-                    outcome = backfill([result], log_cb=log_cb)
-                    verified = bool(outcome and outcome.get('ok') and len(outcome.get('items', [])) == 1
-                                    and outcome['items'][0].get('status') in {'written', 'already_present'})
-                except Exception:
-                    verified = False
-                if verified:
-                    shipment['status'] = result['status'] = 'completed'
-                ledger.save(plan['plan_id'], record)
-            results.append(result)
+                        try:
+                            ledger.save(plan['plan_id'], record)
+                        except Exception:
+                            raise LedgerUnavailable('shipment_persistence_unknown') from None
+                        raise LedgerUnavailable('shipment_unknown_requires_review')
+                    if shipment['status'] != 'uploaded':
+                        # No Register was attempted: safely keep planned. A known
+                        # tracking with missing PDF is visible for manual recovery.
+                        raise LedgerUnavailable('shipment_not_fully_uploaded')
+                result_row = _result(plan, shipment)
+                if shipment['status'] != 'completed':
+                    pending_writebacks.append((shipment, result_row))
+                results.append(result_row)
+
+        try:
+            execute_shipments()
+        except BaseException:
+            # Preserve the former per-package behavior: labels already uploaded
+            # before a later package fails are still backfilled as one batch.
+            try:
+                flush_writebacks()
+            except BaseException:
+                pass
+            raise
+        flush_writebacks()
         return results
     finally:
+        if lock.held and lock.retain:
+            # All postal/backfill calls in execute_plan have stopped. Only a
+            # fresh exact owner read may clear transient uncertainty.
+            lock.revalidate_after_worker_stopped()
         if lock.held and not lock.retain:
-            lock.release()
+            try:
+                # Reaching this point means this worker has stopped all external
+                # requests. Per-order nonterminal states remain in the encrypted
+                # ledger and continue to block reissue of that shipment.
+                if record is not None:
+                    lock.stage('completed', shipment_count=len(record['shipments']),
+                               pending_count=sum(sh.get('status') != 'completed' for sh in record['shipments']))
+                else:
+                    lock.stage('completed', shipment_count=0, pending_count=0)
+            except Exception:
+                if lock.retain:
+                    warning = '補單結果已保留，但執行鎖終態確認未完成；請勿重製相同訂單。'
+                    for result in results:
+                        result['writer_release_warning'] = warning
+                elif log_cb:
+                    try:
+                        log_cb('⚠️ 終態標記未提交，但持有者已確認；嘗試釋放已停止工作的鎖。')
+                    except Exception:
+                        pass
+            if not lock.retain:
+                try:
+                    lock.release()
+                except Exception:
+                    warning = '補單結果已保留，但執行鎖釋放狀態未明；請勿重製相同訂單。'
+                    for result in results:
+                        result['writer_release_warning'] = warning
+                    if log_cb:
+                        try:
+                            log_cb('⚠️ 補製結果已保留；執行鎖釋放狀態未明。')
+                        except Exception:
+                            pass
+            elif results and not any(result.get('writer_release_warning') for result in results):
+                warning = '補單結果已保留，但執行鎖仍需核對；請勿重製相同訂單。'
+                for result in results:
+                    result['writer_release_warning'] = warning

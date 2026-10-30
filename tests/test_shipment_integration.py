@@ -16,4 +16,8 @@ class IntegrationTests(unittest.TestCase):
         retry = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_retry_writeback_results')
         text = ast.get_source_segment(source,retry)
         self.assertIn('writer.acquire()', text)
+        self.assertIn('safety.prepare_writeback(candidates)', text)
+        self.assertIn("writer.stage('completed', worker_finished=True)", text)
         self.assertIn('writer.release()', text)
+        worker = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_start_job')
+        self.assertIn('safety.prepare_writeback(successful_results)', ast.get_source_segment(source, worker))
