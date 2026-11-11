@@ -24,7 +24,7 @@ def picking_ui_for_test():
     spec = importlib.util.spec_from_file_location("features._picking_security_test", ROOT / "features/picking_labels.py")
     module = importlib.util.module_from_spec(spec)
     original_drive = sys.modules.get("bot.drive")
-    sys.modules["bot.drive"] = SimpleNamespace(list_drive_files=Mock(), upload_file_to_drive=Mock())
+    sys.modules["bot.drive"] = SimpleNamespace(list_drive_files=Mock(), reserve_picking_file_id=Mock(), upload_reserved_picking_pdf=Mock(), get_reserved_picking_pdf=Mock())
     try:
         spec.loader.exec_module(module)
     finally:
@@ -255,7 +255,7 @@ class RenderingSecurityTests(unittest.TestCase):
         recorder.spinner.return_value.__exit__ = Mock(return_value=False)
         order = SimpleNamespace(source_row_number=2)
         with patch.object(picking, "st", recorder), patch.object(
-            picking, "load_sheet_values", side_effect=RuntimeError("PRIVATE-SHEET-RESPONSE")
+            picking, "global_writer_lock", side_effect=ValueError("PRIVATE-SHEET-RESPONSE")
         ):
             self.assertFalse(picking._generate_and_upload([order]))
         self.assertNotIn("PRIVATE-SHEET-RESPONSE", str(recorder.error.call_args_list))

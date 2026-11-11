@@ -1074,3 +1074,55 @@ def batch_mark_picking_done(spreadsheet_id: str, sheet_name: str, row_numbers: l
     ws = sh.worksheet(sheet_name)
     updates = build_picking_done_updates(row_numbers, checked_value=checked_value)
     ws.batch_update(updates, value_input_option="USER_ENTERED")
+
+
+def mark_picking_done_verified(orders, *, source_loader, write_rows, source_binding=None):
+    """Write only validated identities, then verify every key + payload + L.
+
+    A timeout can follow a committed mutation. Always read back once and never
+    repeat an uncertain write in this operation. Never roll back anyone's L.
+    """
+    from .picking_labels import PICKING_SOURCE_BINDING, picking_order_key, picking_render_fingerprint
+    from .picking_journal import picking_source_snapshot, validate_selected_orders
+    source_binding = source_binding or PICKING_SOURCE_BINDING
+    def read_snapshot():
+        loaded = source_loader()
+        return loaded if isinstance(loaded, dict) else picking_source_snapshot(loaded, source_binding=source_binding)
+    before = read_snapshot()
+    fresh = validate_selected_orders(orders, before, source_binding)
+    keys = [picking_order_key(order, source_binding) for order in fresh]
+    rows = [before[key]['row'] for key in keys if before[key]['done'] == 'NOT_DONE']
+    if any(before[key]['done'] not in {'DONE', 'NOT_DONE'} for key in keys):
+        raise ValueError('L 欄狀態無法辨識，已停止補標。')
+    if rows:
+        try:
+            write_rows(rows)
+        except Exception:
+            pass
+    try:
+        after = read_snapshot()
+    except Exception:
+        return {key: {'status': 'failed', 'reason': '讀回失敗'} for key in keys}
+    outcomes = {}
+    for key in keys:
+        entry = after.get(key)
+        if (not entry or entry.get('review') or entry['fingerprint'] != before[key]['fingerprint']
+                or entry['row'] != before[key]['row']):
+            outcomes[key] = {'status': 'review', 'reason': '來源身份或品項已變動'}
+        elif entry['done'] == 'DONE':
+            outcomes[key] = {'status': 'verified', 'row': entry['row']}
+        else:
+            outcomes[key] = {'status': 'failed', 'reason': 'L 欄尚未讀回已製單'}
+    return outcomes
+
+
+def load_picking_sheet_values(spreadsheet_id, worksheet_id=866944434):
+    """Bind picking reads to the immutable worksheet ID, never a renamed title."""
+    book = _get_gspread_client().open_by_key(spreadsheet_id)
+    return book.get_worksheet_by_id(int(worksheet_id)).get_all_values()
+
+
+def mark_picking_sheet_rows(spreadsheet_id, row_numbers, worksheet_id=866944434):
+    book = _get_gspread_client().open_by_key(spreadsheet_id)
+    worksheet = book.get_worksheet_by_id(int(worksheet_id))
+    worksheet.batch_update(build_picking_done_updates(row_numbers), value_input_option='USER_ENTERED')

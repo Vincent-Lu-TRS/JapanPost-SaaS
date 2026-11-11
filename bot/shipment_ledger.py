@@ -515,7 +515,7 @@ class NormalShipmentSafety:
                for key,r in self.records()):
             raise LedgerUnavailable('shipment_previous_submission_requires_review')
         if any(s.title == LEDGER_TITLE for s in _quota_call(self.lock.book.worksheets)):
-            for _, record in configured_ledger(self.lock).records():
+            for _, record in postal_ledger_records(configured_ledger(self.lock)):
                 if digest(record['plan']['order_id']) in orders and any(s['status'] != 'completed' for s in record['shipments']):
                     raise LedgerUnavailable('shipment_existing_plan_requires_resume')
 
@@ -606,3 +606,20 @@ class NormalShipmentSafety:
         safe_stages = {'planned', 'issuing', 'unknown', 'label_created', 'uploaded',
                        'writeback_pending', 'completed'}
         return all(record.get('stage') in safe_stages for record in self.active.values())
+
+
+def postal_ledger_records(ledger):
+    """Keep ledger indexing complete; filter only validated picking envelopes."""
+    from .picking_journal import is_picking_record, validate_picking_documents
+    records = ledger.records()
+    validate_picking_documents(dict(records))
+    result = []
+    for key, record in records:
+        if is_picking_record(key, record):
+            continue
+        if (not isinstance(record, dict) or not isinstance(record.get('plan'), dict)
+                or not isinstance(record['plan'].get('order_id'), str)
+                or not isinstance(record.get('shipments'), list)):
+            raise LedgerUnavailable('shipment_ledger_unknown_record')
+        result.append((key, record))
+    return result
