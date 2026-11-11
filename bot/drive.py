@@ -349,3 +349,37 @@ def upload_file_to_drive(local_path: str, folder_id: str, mime_type: str = "appl
         )
         .execute()
     )
+
+
+_PICKING_PDF_METADATA = 'id,name,mimeType,parents,trashed,shortcutDetails,appProperties,md5Checksum,sha256Checksum,size'
+
+
+def reserve_picking_file_id() -> str:
+    """Allocate a binary-file ID before the durable upload_started checkpoint."""
+    response = _get_drive_service().files().generateIds(count=1, space='drive', type='files').execute()
+    ids = response.get('ids', [])
+    if len(ids) != 1 or not _valid_drive_file_id(ids[0]):
+        raise ValueError('picking_drive_id_unavailable')
+    return ids[0]
+
+
+def upload_reserved_picking_pdf(local_path: str, folder_id: str, record: dict) -> dict:
+    """Create exactly the durable ID. Never overwrite/update or choose a new ID."""
+    if not _valid_drive_file_id(record.get('file_id')):
+        raise ValueError('picking_drive_id_invalid')
+    with open(local_path, 'rb') as source:
+        media = MediaIoBaseUpload(io.BytesIO(source.read()), mimetype='application/pdf', resumable=False)
+    return _get_drive_service().files().create(
+        body={'id': record['file_id'], 'name': record['filename'], 'parents': [folder_id],
+              'mimeType': 'application/pdf',
+              'appProperties': {'picking_tx': record['txid'], 'picking_manifest': record['manifest_hash']}},
+        media_body=media, fields=_PICKING_PDF_METADATA, supportsAllDrives=True,
+    ).execute()
+
+
+def get_reserved_picking_pdf(record: dict) -> dict:
+    if not _valid_drive_file_id(record.get('file_id')):
+        raise ValueError('picking_drive_id_invalid')
+    return _get_drive_service().files().get(
+        fileId=record['file_id'], fields=_PICKING_PDF_METADATA, supportsAllDrives=True,
+    ).execute()

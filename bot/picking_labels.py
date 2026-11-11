@@ -1,11 +1,13 @@
 """Cross-border picking label parsing and pagination."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from math import ceil
 from pathlib import Path
 import re
+import hashlib
+import json
 from typing import Any
 
 PICKING_SOURCE_SPREADSHEET_ID = "1KiyftkJveKrhd54a7yWvl-a1UuLJbzo7c5zJVquVa0s"
@@ -13,6 +15,8 @@ PICKING_SOURCE_SHEET_NAME = "南巽出貨Label"
 PICKING_OUTPUT_DRIVE_FOLDER_ID = "1_JYIwmtpKQ7FjWY2zplofLGe0GHaEMvw"
 SHIPPING_STATUS_SPREADSHEET_ID = "1QJFFW7aWGpYX3W5nPW_HgUnVWk9AtggFvYow14BRW8U"
 SHIPPING_STATUS_SHEET_NAME = "南巽出貨狀態一覽"
+PICKING_SOURCE_WORKSHEET_ID = 866944434
+PICKING_SOURCE_BINDING = (PICKING_SOURCE_SPREADSHEET_ID, PICKING_SOURCE_WORKSHEET_ID)
 ITEMS_PER_PAGE = 10
 STATUS_COL = 10
 DONE_COL = 11
@@ -233,7 +237,7 @@ def _anchored_item_groups(header: list[Any]) -> dict[int, dict[str, int]]:
         ("progress", "入荷進捗{idx}"),
     ]
     groups: dict[int, dict[str, int]] = {}
-    for item_index in range(1, ITEMS_PER_PAGE + 1):
+    for item_index in range(1, max(_find_item_groups(header), default=ITEMS_PER_PAGE) + 1):
         start = ITEM_START_COL + (item_index - 1) * ITEM_GROUP_WIDTH
         group: dict[str, int] = {}
         for offset, (field, template) in enumerate(fields):
@@ -400,40 +404,27 @@ def filter_orders_by_rows(orders: list[PickingOrder], row_numbers: set[int]) -> 
     return [order for order in orders if order.source_row_number in row_numbers]
 
 
+def picking_order_key(order: PickingOrder, source_binding=PICKING_SOURCE_BINDING) -> str:
+    """Stable identity. A source row is only a locator, never an order identity."""
+    if (not order.order_no.strip() or not order.order_source.strip()
+            or not isinstance(source_binding, (tuple, list)) or len(source_binding) != 2):
+        raise ValueError("來源缺少訂單來源或注文番号，請先核對。")
+    payload = [str(source_binding[0]), int(source_binding[1]), order.order_source.strip(), order.order_no.strip()]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def picking_render_fingerprint(order: PickingOrder) -> str:
+    payload = asdict(order)
+    payload.pop("source_row_number")
+    payload["qr_content"] = order.qr_content or order.order_no
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def resolve_picking_done_row_numbers(values: list[list[Any]], orders: list[PickingOrder]) -> list[int]:
-    """Resolve source rows for writeback, revalidating row numbers by order number."""
-    if not orders:
-        return []
-    if len(values) < 2:
-        raise ValueError("來源表沒有可供回寫的資料列。")
-
-    schema = _build_picking_source_schema(values[0])
-    order_no_idx = schema.order_no_idx
-    row_by_order_no: dict[str, int] = {}
-    for row_number, row in enumerate(values[1:], start=2):
-        order_no = _cell(row, order_no_idx)
-        if order_no and order_no not in row_by_order_no:
-            row_by_order_no[order_no] = row_number
-
-    resolved: list[int] = []
-    missing: list[str] = []
-    for order in orders:
-        fast_path_order_no = ""
-        fast_path_index = order.source_row_number - 1
-        if 0 < fast_path_index < len(values):
-            fast_path_order_no = _cell(values[fast_path_index], order_no_idx)
-        if fast_path_order_no == order.order_no:
-            resolved.append(order.source_row_number)
-            continue
-        fallback_row = row_by_order_no.get(order.order_no)
-        if fallback_row:
-            resolved.append(fallback_row)
-        else:
-            missing.append(order.order_no)
-
-    if missing:
-        raise ValueError(f"找不到以下注文番号的來源列，已中止 L 欄回寫：{', '.join(missing)}")
-    return sorted(set(resolved))
+    """Resolve by seller + order identity; reject duplicates and payload drift."""
+    from .picking_journal import picking_source_snapshot, validate_selected_orders
+    snapshot = picking_source_snapshot(values)
+    return sorted(o.source_row_number for o in validate_selected_orders(orders, snapshot))
 
 
 def build_picking_source_diagnostics(
@@ -638,7 +629,7 @@ def generate_picking_labels_transaction(
     mark_done,
     now: str | None = None,
 ) -> PickingTransactionResult:
-    """Render, upload, then mark source rows after upload succeeds."""
+    """Legacy callback adapter. Production UI uses durable execute_picking_batch."""
     from bot.drive import choose_safe_picking_filename
     from bot.picking_pdf import render_picking_labels_pdf
 
@@ -658,6 +649,8 @@ def generate_picking_labels_transaction(
 
     try:
         drive_file = upload_file(str(output_path))
+        if not isinstance(drive_file, dict) or not drive_file.get("id"):
+            raise ValueError("PDF 上傳結果未確認。")
     except Exception as exc:
         return PickingTransactionResult(
             success=False,
@@ -670,6 +663,8 @@ def generate_picking_labels_transaction(
     rows = [order.source_row_number for order in orders]
     try:
         marked_rows = mark_done(rows)
+        if not isinstance(marked_rows, list) or len(marked_rows) != len(rows):
+            raise ValueError("來源標記結果未確認。")
     except Exception as exc:
         return PickingTransactionResult(
             success=False,
@@ -683,6 +678,6 @@ def generate_picking_labels_transaction(
         success=True,
         local_path=str(output_path),
         filename=candidate,
-        marked_rows=marked_rows if isinstance(marked_rows, list) else rows,
+        marked_rows=marked_rows,
         drive_file=drive_file,
     )

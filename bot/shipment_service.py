@@ -5,7 +5,7 @@ import re
 import pandas as pd
 
 from shipment_plans import ORDER, plan_frame, source_fingerprint, utc_now, validate_plan
-from .shipment_ledger import LedgerUnavailable, configured_ledger, global_writer_lock
+from .shipment_ledger import LedgerUnavailable, configured_ledger, global_writer_lock, postal_ledger_records
 
 
 def _defaults():
@@ -48,7 +48,7 @@ def lookup_history(order_id, *, ledger=None, source_loader=None, completion_read
     ledger = ledger or configured_ledger()
     authority = completion_reader()
     tracking = sorted(t for o, t in authority.exact_pairs if o == order_id)
-    records = [r for _, r in ledger.records() if r.get('plan', {}).get('order_id') == order_id]
+    records = [r for _, r in postal_ledger_records(ledger) if r.get('plan', {}).get('order_id') == order_id]
     records.sort(key=lambda r: r.get('created_at', ''), reverse=True)
     shipments = []
     for record in records:
@@ -109,7 +109,7 @@ def execute_plan(plan, *, requested_by, tracking_baseline=None, confirmed_new_tr
         if any(r.get('order_key') == digest(plan['order_id']) and r.get('stage') != 'completed'
                for _,r in NormalShipmentSafety(lock).records()):
             raise ValueError('此訂單有一般製單尚未回填，請恢復原運單')
-        existing_records = ledger.records()
+        existing_records = postal_ledger_records(ledger)
         record = ledger.get(plan['plan_id'])
         if record and record['plan'] == plan and all(sh['status'] == 'completed' for sh in record['shipments']):
             results = [_result(plan, sh) for sh in record['shipments']]

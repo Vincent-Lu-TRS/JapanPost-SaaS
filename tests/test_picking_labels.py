@@ -393,6 +393,8 @@ class PickingLabelParsingTests(unittest.TestCase):
         ]
         order = PickingOrder(2, "2026/06/27", "imy Shop", "imy-selected", "郵便局", [PickingItem("SKU", "商品", "", "1", "")])
 
+        order = parse_picking_label_candidates(values)[0][-1]
+        order.source_row_number = 2
         self.assertEqual(resolve_picking_done_row_numbers(values, [order]), [3])
 
     def test_diagnostics_reports_ignored_and_used_duplicate_header_columns(self):
@@ -576,44 +578,25 @@ class PickingPayloadTests(unittest.TestCase):
         self._set_session_state(session_state)
         expected_orders = _picking_payload_for_rows(3, 8).orders
         source_values = [["source"]]
-        status_values = [["status"]]
-
         with (
-            patch.object(
-                picking_labels,
-                "load_sheet_values",
-                side_effect=[source_values, status_values],
-            ) as load_sheet_values,
-            patch.object(
-                picking_labels,
-                "parse_picking_label_candidates",
-                return_value=(list(expected_orders), ["警告"]),
-            ) as parse_candidates,
-            patch.object(
-                picking_labels,
-                "build_picking_source_diagnostics",
-                return_value={"candidate_order_count": 2},
-            ),
-            patch.object(
-                picking_labels,
-                "get_registered_cjk_font_info",
-                return_value={"normal_font": "test-font"},
-            ),
+            patch.object(picking_labels, "_source_snapshot", return_value=(source_values, {})) as read_source,
+            patch.object(picking_labels, "configured_ledger", return_value=object()),
+            patch.object(picking_labels, "classify_picking_snapshot", return_value={
+                "pending": [{"order": order} for order in expected_orders], "mirror_pending": [], "review": []}),
+            patch.object(picking_labels, "parse_picking_label_candidates", return_value=(list(expected_orders), ["警告"])),
+            patch.object(picking_labels, "build_picking_source_diagnostics", return_value={"candidate_order_count": 2}),
+            patch.object(picking_labels, "get_registered_cjk_font_info", return_value={"normal_font": "test-font"}),
         ):
             payload = picking_labels.load_picking_payload()
-
         self.assertIs(picking_labels.st.session_state, session_state)
-        self.assertEqual(picking_labels.st.session_state, session_state)
         self.assertEqual(payload.orders, expected_orders)
         self.assertIsInstance(payload.orders, tuple)
-        self.assertEqual(load_sheet_values.call_count, 2)
-        parse_candidates.assert_called_once_with(
-            source_values,
-            shipping_deadlines=build_shipping_deadline_lookup(status_values),
-        )
+        read_source.assert_called_once_with()
 
     def test_apply_picking_payload_preserves_only_valid_selected_rows(self):
-        self._set_session_state({"picking_selected_rows": {3, 8, 99}})
+        self._set_session_state({})
+        previous = _picking_payload_for_rows(3, 8)
+        picking_labels.apply_picking_payload(previous, preserve_selection=False)
         payload = _picking_payload_for_rows(3, 8, 10)
 
         picking_labels.apply_picking_payload(payload, preserve_selection=True)
@@ -757,6 +740,8 @@ class PickingLabelUiTests(unittest.TestCase):
         ]
         status_values = [["A", "B", "訂單編號", "D", "E", "F", "G", "H", "I", "J", "発送期限"]]
         original_load = picking_ui.load_sheet_values
+        original_source = picking_ui._source_snapshot
+        original_ledger = picking_ui.configured_ledger
         original_session = picking_ui.st.session_state
         try:
             picking_ui.st.session_state = {}
@@ -764,6 +749,9 @@ class PickingLabelUiTests(unittest.TestCase):
                 status_values if sheet_name == "南巽出貨狀態一覽" else source_values
             )
 
+            from bot.picking_journal import picking_source_snapshot
+            picking_ui._source_snapshot = lambda: (source_values, picking_source_snapshot(source_values))
+            picking_ui.configured_ledger = lambda: types.SimpleNamespace(records=lambda: [])
             picking_ui._load_orders()
 
             orders = picking_ui.st.session_state["picking_orders"]
@@ -774,6 +762,8 @@ class PickingLabelUiTests(unittest.TestCase):
             )
         finally:
             picking_ui.load_sheet_values = original_load
+            picking_ui._source_snapshot = original_source
+            picking_ui.configured_ledger = original_ledger
             picking_ui.st.session_state = original_session
 
 
@@ -787,7 +777,7 @@ class PickingLabelTransactionTests(unittest.TestCase):
             output_dir=str(ROOT / "tmp"),
             list_files=lambda prefix: [],
             upload_file=lambda path: (_ for _ in ()).throw(RuntimeError("upload failed")),
-            mark_done=lambda rows: calls["mark"].append(rows),
+            mark_done=lambda rows: calls["mark"].append(rows) or rows,
             now="2026-06-27 14:59:01",
         )
 
@@ -806,7 +796,7 @@ class PickingLabelTransactionTests(unittest.TestCase):
             output_dir=str(ROOT / "tmp"),
             list_files=lambda prefix: [],
             upload_file=lambda path: {"id": "file-id", "name": Path(path).name},
-            mark_done=lambda rows: calls["mark"].append(rows),
+            mark_done=lambda rows: calls["mark"].append(rows) or rows,
             now="2026-06-27 14:59:01",
         )
 
@@ -840,6 +830,8 @@ class PickingLabelTransactionTests(unittest.TestCase):
         ]
         order = PickingOrder(2, "6/27/2026", "imy Shop", "imy-selected", "郵便局", [PickingItem("SKU", "商品", "", "1", "")])
 
+        order = parse_picking_label_candidates(values)[0][-1]
+        order.source_row_number = 2
         self.assertEqual(resolve_picking_done_row_numbers(values, [order]), [3])
 
     def test_done_writeback_updates_use_custom_checked_value(self):
