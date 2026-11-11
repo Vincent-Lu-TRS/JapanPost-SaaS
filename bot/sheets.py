@@ -1000,6 +1000,51 @@ def backfill_results(
     return summarize(items)
 
 
+def _legacy_fragment_history_representative(rows):
+    """Resolve only per-item legacy mirrors of one identical complete indexed order."""
+    from decimal import Decimal, InvalidOperation
+    from shipment_plans import business_snapshot, digest, integer, source_items
+    legacy = {'郵局內容物', '郵局申告金額(USD)', '数量'}
+    snapshots = [business_snapshot(row) for row in rows]
+    if len({digest({key: value for key, value in snapshot.items() if key not in legacy})
+            for snapshot in snapshots}) != 1:
+        return None
+    candidates = []
+    try:
+        for row, snapshot in zip(rows, snapshots):
+            indexes = [index for index in range(1, 11) if any(
+                snapshot[f'{prefix}{index}'] for prefix in ('內容物', '申告金額', '數量', 'HSCode'))]
+            if not 2 <= len(indexes) <= 10 or indexes != list(range(1, len(indexes) + 1)):
+                return None
+            if any(not all(snapshot[f'{prefix}{index}'] for prefix in ('內容物', '申告金額', '數量'))
+                   for index in indexes):
+                return None
+            indexed = dict(row)
+            for key in legacy:
+                indexed[key] = ''
+            items = source_items(indexed)
+            if len(items) != len(indexes):
+                return None
+            collection = snapshot['數量集合']
+            if not collection or [integer(token) for token in collection.split(',')] != [item['quantity'] for item in items]:
+                return None
+            price = Decimal(snapshot['郵局申告金額(USD)'].replace(',', ''))
+            if not price.is_finite() or price <= 0:
+                return None
+            fragment = (snapshot['郵局內容物'], price, integer(snapshot['数量']))
+            complete = [(item['description'], Decimal(item['value']), item['quantity']) for item in items]
+            if fragment not in complete:
+                return None
+            if fragment == complete[0]:
+                # Return an original strict-compatible row. Do not rewrite legacy
+                # fields or choose a row by source position/shipping priority.
+                source_items(row)
+                candidates.append((digest(snapshot), row))
+    except (ValueError, InvalidOperation):
+        return None
+    return min(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
+
+
 def get_history_order(order_id: str, *, client=None) -> dict:
     """Exact, server-side historical lookup without pending/status filters.
 
@@ -1045,6 +1090,9 @@ def get_history_order(order_id: str, *, client=None) -> dict:
     if not matches:
         raise ValueError('找不到此訂單的完整歷史資料；不可由追蹤號猜測收件資料')
     if len({digest(business_snapshot(row)) for row in matches}) != 1:
+        representative = _legacy_fragment_history_representative(matches)
+        if representative is not None:
+            return representative
         raise ValueError('此訂單存在互相矛盾的來源版本，請先核對來源資料')
     return matches[0]
 
