@@ -1073,5 +1073,117 @@ class SheetsHelperTests(unittest.TestCase):
         self.assertTrue(any("關注訂單診斷" in line and "PASS=12" in line for line in logs))
 
 
+
+class HistoryLegacyFragmentTests(unittest.TestCase):
+    def fragments(self):
+        from shipment_plans import ORDER
+        from pending_editor import SHIPPING_COL
+        base = {ORDER: 'synthetic-history', 'Shipping Name': 'Synthetic',
+                'Shipping Street': 'Synthetic street', '收件人國家': 'GERMANY', SHIPPING_COL: 'ePacket',
+                '內容物1': 'Item A', '申告金額1': '2.50', '數量1': '2',
+                '內容物2': 'Item B', '申告金額2': '3.00', '數量2': '3', '數量集合': '2,3'}
+        return [dict(base, **{'郵局內容物': 'Item A', '郵局申告金額(USD)': '2.50', '数量': '2'}),
+                dict(base, **{'郵局內容物': 'Item B', '郵局申告金額(USD)': '3.00', '数量': '3'})]
+
+    def client(self, rows):
+        from shipment_plans import BUSINESS_COLUMNS
+        from types import SimpleNamespace
+        columns = list(BUSINESS_COLUMNS) + sorted(set().union(*(set(row) for row in rows)) - set(BUSINESS_COLUMNS))
+        worksheet = SimpleNamespace(id=605188303, get_all_values=lambda: [columns] + [
+            [row.get(column, '') for column in columns] for row in rows])
+        book = SimpleNamespace(get_worksheet_by_id=lambda gid: worksheet)
+        return SimpleNamespace(open_by_key=lambda key: book)
+
+    def load(self, rows):
+        return sheets_module.get_history_order('synthetic-history', client=self.client(rows))
+
+    def accepted(self, rows):
+        try:
+            return self.load(rows)
+        except ValueError:
+            self.fail('Equivalent complete indexed rows must accept validated legacy item fragments')
+
+    def test_legacy_item_fragments_select_strict_complete_representative_in_both_row_orders(self):
+        from shipment_plans import source_items, business_snapshot
+        from pending_editor import build_pending_item_frame
+        rows = self.fragments(); selected = []
+        for ordered in (rows, list(reversed(rows))):
+            row = self.accepted(ordered); selected.append(business_snapshot(row))
+            self.assertEqual(row['郵局內容物'], 'Item A')
+            items = source_items(row)
+            self.assertEqual([(i['description'], i['value'], i['quantity']) for i in items], [('Item A', '2.50', 2), ('Item B', '3.00', 3)])
+            frame = build_pending_item_frame(pd.Series(row))
+            self.assertEqual(frame[['Description', 'Value', 'Quantity']].values.tolist(), [['Item A', '2.50', '2'], ['Item B', '3.00', '3']])
+        self.assertEqual(selected[0], selected[1])
+
+    def test_multiple_strict_representatives_are_stable_without_row_priority(self):
+        from shipment_plans import business_snapshot, digest
+        first, second = self.fragments()
+        alternate = dict(first, **{'郵局申告金額(USD)': '2.5'})
+        expected = min((first, alternate), key=lambda row: digest(business_snapshot(row)))
+        for ordered in ([first, alternate, second], [second, alternate, first], [alternate, first, second]):
+            self.assertEqual(business_snapshot(self.accepted(ordered)), business_snapshot(expected))
+
+    def test_exact_duplicates_and_status_only_differences_keep_original_contract(self):
+        from shipment_plans import business_snapshot
+        row = self.fragments()[0]; other = dict(row)
+        other.update({'製單檢核': 'TRUE', '製單上傳狀態(請用[未打單]檢視模式)': '已打單'})
+        self.assertEqual(business_snapshot(self.load([row, other])), business_snapshot(row))
+        self.assertEqual(business_snapshot(self.load([row, dict(row)])), business_snapshot(row))
+
+    def test_real_business_conflicts_and_invalid_fragments_remain_rejected(self):
+        from pending_editor import SHIPPING_COL
+        changes = [('Shipping Street', 'other street'), ('內容物2', 'other item'), ('申告金額2', '30'),
+                   (SHIPPING_COL, 'EMS'), ('郵局內容物', 'unknown'), ('郵局申告金額(USD)', '30'), ('数量', '30')]
+        for field, value in changes:
+            with self.subTest(field=field):
+                rows = self.fragments(); rows[1][field] = value
+                with self.assertRaisesRegex(ValueError, '互相矛盾'): self.load(rows)
+        mutations = [lambda row: row.update({'數量2': ''}), lambda row: row.update({'申告金額2': 'NaN'}),
+                     lambda row: row.update({'申告金額2': '0'}), lambda row: row.update({'申告金額2': 'Infinity'}),
+                     lambda row: row.update({'數量2': '1.5'}), lambda row: row.update({'內容物2': ''}),
+                     lambda row: row.update({'數量集合': '2,4'}), lambda row: row.update({'數量集合': ''}),
+                     lambda row: row.update({'內容物1': '', '申告金額1': '', '數量1': '',
+                                             '內容物2': '', '申告金額2': '', '數量2': ''})]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                rows = self.fragments()
+                for row in rows: mutate(row)
+                with self.assertRaisesRegex(ValueError, '互相矛盾'): self.load(rows)
+        rows = self.fragments()
+        for row in rows: row['內容物11'] = 'overflow'
+        with self.assertRaisesRegex(ValueError, '超過10項'): self.load(rows)
+        rows = [self.fragments()[1], dict(self.fragments()[1], **{'郵局申告金額(USD)': '3.0'})]
+        with self.assertRaisesRegex(ValueError, '互相矛盾'): self.load(rows)
+
+    def test_accepted_history_can_build_and_execute_guarded_reissue_without_live_registry(self):
+        from bot.shipment_service import lookup_history, execute_plan
+        from bot.shipment_ledger import GlobalShipmentLock, ShipmentLedger
+        from test_shipment_ledger import MemoryBook
+        from shipment_plans import build_plan, source_items
+        from pending_editor import build_pending_item_frame
+        rows = self.fragments(); book = MemoryBook(); calls = []
+        authority = CompletionAuthority(frozenset({'synthetic-history'}), frozenset({('synthetic-history', 'OLD-SYNTHETIC')}))
+        loader = lambda order: self.accepted(rows)
+        history = lookup_history('synthetic-history', ledger=ShipmentLedger(book, 'x' * 40),
+                                 source_loader=loader, completion_reader=lambda: authority)
+        items = source_items(history['row'])
+        plan = build_plan(history['row'], [{'method': 'ePacket', 'quantities': {i['id']: i['quantity'] for i in items}}],
+                          mode='reissue', original_tracking='OLD-SYNTHETIC', nonce='synthetic-reissue',
+                          source_kind=history['source_kind'], source_time=history['source_time'])
+        def runner(frame, *, lifecycle_cb, **kwargs):
+            actual = build_pending_item_frame(frame.iloc[0])
+            self.assertEqual(actual[['Description', 'Value', 'Quantity']].values.tolist(), [['Item A', '2.50', '2'], ['Item B', '3.00', '3']])
+            calls.append(frame.copy()); lifecycle_cb('issuing', frame.iloc[0])
+            lifecycle_cb('label_created', frame.iloc[0], tracking='NEW-SYNTHETIC')
+            lifecycle_cb('uploaded', frame.iloc[0], tracking='NEW-SYNTHETIC', drive_file_id='synthetic-pdf')
+            return [{'status': 'success', 'tracking': 'NEW-SYNTHETIC'}]
+        lock = GlobalShipmentLock(book)
+        result = execute_plan(plan, requested_by='staff@tkrjm.co.jp', tracking_baseline=history['tracking_baseline'],
+                              confirmed_new_tracking=True, lock=lock, ledger=ShipmentLedger(book, 'x' * 40, lock),
+                              source_loader=loader, completion_reader=lambda: authority, runner=runner,
+                              backfill=lambda results, **kwargs: {'ok': True, 'items': [{'input_index': 0, 'status': 'written'}]})
+        self.assertEqual(len(calls), 1); self.assertEqual(result[0]['status'], 'completed')
+
 if __name__ == "__main__":
     unittest.main()

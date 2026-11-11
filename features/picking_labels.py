@@ -232,6 +232,12 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
     return True
 
 
+def _is_source_identity_review(item: dict) -> bool:
+    """Keep unaddressable source identity rows in diagnostics, preserving receipts."""
+    order = item['order']
+    return not item.get('file_id') and (not order.order_source.strip() or not order.order_no.strip())
+
+
 def render_picking_label_tab(refresh_source=None) -> None:
     st.info("列印設定：PDF檔尺寸為 100mm × 150mm，請使用對應Label大小輸出。")
 
@@ -362,6 +368,8 @@ def render_picking_label_tab(refresh_source=None) -> None:
     if diagnostics.get("picking_blocked"):
         st.error(diagnostics["picking_blocked"])
     for item in diagnostics.get("picking_review", []):
+        if _is_source_identity_review(item):
+            continue
         st.warning(f"{item['order'].order_source} / {item['order'].order_no}：{item['review']}")
         if item.get('file_id'):
             st.link_button("開啟原 PDF／重印", f"https://drive.google.com/file/d/{item['file_id']}/view", key=f"picking_review_{item['key']}")
@@ -431,6 +439,17 @@ def render_picking_label_diagnostics_panel() -> None:
         "filter condition": diagnostics.get("filter_condition", ""),
     }
     st.json(meta_rows)
+
+    identity_reviews = [item for item in diagnostics.get("picking_review", []) if _is_source_identity_review(item)]
+    if identity_reviews:
+        with st.expander(f"來源身份不完整｜已排除 {len(identity_reviews)} 筆", expanded=False):
+            st.dataframe(pd.DataFrame([
+                {"來源列": item.get('row', item['order'].source_row_number),
+                 "訂單來源": item['order'].order_source,
+                 "注文番号": item['order'].order_no,
+                 "原因": item['review']}
+                for item in identity_reviews
+            ]), hide_index=True, width="stretch")
 
     font_info = diagnostics.get("pdf_cjk_font", {})
     if font_info:
