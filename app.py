@@ -2069,7 +2069,7 @@ def _render_main_app():
     name = st.session_state.get("user_name", email)
     picture = st.session_state.get("user_picture", "")
 
-    col1, col2, col3 = st.columns([5.7, 1.4, 0.65], vertical_alignment="center")
+    col1, col2, col3, col4 = st.columns([5.0, 1.4, 0.65, 1.0], vertical_alignment="center")
     with col1:
         st.markdown('<div class="app-header-title">Cross-Border製單系統</div>', unsafe_allow_html=True)
     with col2:
@@ -2089,6 +2089,9 @@ def _render_main_app():
         if st.button("登出", type="secondary"):
             logout(_cm)
             st.rerun()
+    with col4:
+        from features.writer_lock_panel import render_writer_lock_button
+        render_writer_lock_button()
 
     st.divider()
 
@@ -3076,9 +3079,6 @@ def _render_main_app():
     )
 
     _active_refresh_tick(is_busy=is_busy, job=job)
-
-    from features.writer_lock_panel import render_writer_lock_panel
-    render_writer_lock_panel(disabled=is_busy)
 
     tabs = st.tabs(_main_tab_labels())
     picking_tab, postal_tab, reissue_tab, guide_tab = tabs[:4]

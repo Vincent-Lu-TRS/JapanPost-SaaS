@@ -230,13 +230,35 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
         print(f"[PICKING_ERROR] unexpected type={type(exc).__name__}", file=sys.stderr)
         st.error("揀貨製作未能確認，請重新讀取製作紀錄；已存在的 PDF 只會補標。")
         return False
-    if result.drive_file:
-        st.link_button("開啟原 PDF／重印", result.drive_file["webViewLink"])
     if not result.success:
+        if result.drive_file:
+            st.link_button("開啟原 PDF／重印", result.drive_file["webViewLink"])
         st.error(result.error)
         return False
-    st.success(f"完成：{result.filename}，來源已讀回已製單。")
+    # 成功說明存入 session，讓畫面自動重整（已製單訂單移出清單）後仍保留顯示。
+    st.session_state["picking_last_batch"] = {
+        "filename": result.filename,
+        "link": (result.drive_file or {}).get("webViewLink", ""),
+        "orders": [(o.order_source, o.order_no) for o in selected_orders],
+        "finished_at": datetime.now(JST).strftime("%H:%M:%S"),
+    }
     return True
+
+
+def _render_last_batch() -> None:
+    batch = st.session_state.get("picking_last_batch")
+    if not batch:
+        return
+    count = len(batch["orders"])
+    st.success(
+        f"最近完成批次：{batch['filename']}｜{count} 筆訂單｜{batch['finished_at']}｜"
+        "PDF 已上傳雲端資料夾，來源表已讀回確認為已製單。")
+    if batch.get("link"):
+        st.link_button("開啟原 PDF／重印", batch["link"], key="picking_last_batch_link")
+    with st.expander(f"本批訂單明細（{count} 筆）", expanded=False):
+        st.dataframe(
+            pd.DataFrame([{"訂單來源": src, "注文番号": no} for src, no in batch["orders"]]),
+            hide_index=True, width="stretch")
 
 
 def _is_source_identity_review(item: dict) -> bool:
@@ -350,6 +372,8 @@ def render_picking_label_tab(refresh_source=None) -> None:
     # 按下任一按鈕時才一次送出畫面上最後的勾選狀態（與郵便頁一致）。
     # 製作結果與錯誤訊息顯示在按鈕列上方，避免被長表格擠到畫面外。
     result_slot = st.container()
+    with result_slot:
+        _render_last_batch()
     with st.form("picking_selection_form", border=False):
         action_slot = st.container()
         st.caption("成功上傳雲端資料夾後，才會勾選來源表製單檢核欄。")
@@ -384,20 +408,30 @@ def render_picking_label_tab(refresh_source=None) -> None:
             clear_all_clicked = actions[3].form_submit_button("取消全選", width="stretch", disabled=not orders)
 
     if generate_clicked:
+        st.session_state.pop("picking_last_batch", None)
         with result_slot:
             generated = _generate_and_upload(selected_orders)
         if generated:
-            if refresh_source is None:
-                _load_orders()
-            else:
-                refresh_result = refresh_source("picking", force=True)
-                if refresh_result.data is not None:
-                    apply_picking_payload(
-                        refresh_result.data,
-                        preserve_selection=True,
-                        loaded_at=refresh_result.status.loaded_at,
-                    )
-                    st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
+            # 回讀來源後自動重整：已製單訂單移出清單，只留下未製的揀貨單。
+            refreshed_ok = False
+            try:
+                if refresh_source is None:
+                    _load_orders()
+                else:
+                    refresh_result = refresh_source("picking", force=True)
+                    if refresh_result.data is not None:
+                        apply_picking_payload(
+                            refresh_result.data,
+                            preserve_selection=True,
+                            loaded_at=refresh_result.status.loaded_at,
+                        )
+                        st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
+                refreshed_ok = True
+            except Exception:
+                with result_slot:
+                    st.warning("已製單完成，但自動重新整理失敗，請按「重新讀取」。")
+            if refreshed_ok:
+                st.rerun()
     if reload_clicked:
         try:
             if refresh_source is None:
