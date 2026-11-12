@@ -93,13 +93,13 @@ class ShipmentLedgerTests(unittest.TestCase):
             if len(calls)<3:raise Rejected(429)
             return 'ok'
         self.assertEqual(_quota_call(quota,sleep_fn=waits.append),'ok')
-        self.assertEqual(waits,[1,2])
+        self.assertEqual(waits,[2,5])
         self.assertEqual(len(calls),3)
         for error in (TimeoutError(),Rejected(500),Rejected(429)):
             calls.clear();waits.clear()
             def fail():calls.append(1);raise error
             with self.assertRaises(type(error)):_quota_call(fail,sleep_fn=waits.append)
-            self.assertEqual(len(calls),3 if getattr(error,'response',None) and error.response.status_code==429 else 1)
+            self.assertEqual(len(calls),5 if getattr(error,'response',None) and error.response.status_code==429 else 1)
 
     def test_normal_known_tracking_guard_survives_restart_without_encryption_key(self):
         book = MemoryBook()

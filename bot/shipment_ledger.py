@@ -27,16 +27,24 @@ class LedgerUnavailable(RuntimeError):
         self.reason_code = code
 
 
+_QUOTA_BACKOFF_SECONDS = (2, 5, 10, 20)
+
+
 def _quota_call(operation, *args, sleep_fn=time.sleep, **kwargs):
-    """Retry only a known 429 rejection; timeout/5xx mutations remain unknown."""
-    for attempt in range(3):
+    """Retry only a known 429 rejection; timeout/5xx mutations remain unknown.
+
+    429 代表請求被 Google 拒絕、尚未執行，重試是安全的。Sheets 配額以每分鐘計，
+    因此退避拉長到約 37 秒，避免製單最後一步剛好撞到配額而失敗。
+    """
+    attempts = len(_QUOTA_BACKOFF_SECONDS) + 1
+    for attempt in range(attempts):
         try:
             return operation(*args, **kwargs)
         except Exception as error:
             response=getattr(error, 'response', None)
-            if getattr(response, 'status_code', None) != 429 or attempt == 2:
+            if getattr(response, 'status_code', None) != 429 or attempt == attempts - 1:
                 raise
-            sleep_fn(2 ** attempt)
+            sleep_fn(_QUOTA_BACKOFF_SECONDS[attempt])
 
 
 def _cells(sheet_id, values):
@@ -348,6 +356,81 @@ def open_target_book():
 
 def global_writer_lock():
     return GlobalShipmentLock(open_target_book())
+
+
+LOCK_RETIRED_PREFIX = '_jppost_writer_retired_'
+# 正常製單不會讓鎖停留太久；低於此秒數的鎖可能仍有人在製單，拒絕解除。
+LOCK_RELEASE_MIN_AGE_SECONDS = 180
+
+
+class LockReleaseRefused(RuntimeError):
+    """手動解除共用鎖被拒絕；訊息為給操作人員看的繁體中文說明。"""
+
+
+def _lock_age_seconds(marker, now=None):
+    from datetime import datetime, timezone
+    created = datetime.fromisoformat(str(marker.get('created_at', '')))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return max(0.0, ((now or datetime.now(timezone.utc)) - created).total_seconds())
+
+
+def inspect_writer_lock(book=None, *, now=None):
+    """唯讀檢查共用鎖；沒有鎖回傳 None。只在使用者主動按檢查時呼叫。"""
+    book = book or open_target_book()
+    sheets = [sheet for sheet in _quota_call(book.worksheets) if sheet.title == LOCK_TITLE]
+    if not sheets:
+        return None
+    if len(sheets) != 1:
+        return {'generation': None, 'stage': 'ambiguous', 'age_seconds': None, 'count': len(sheets)}
+    sheet = sheets[0]
+    try:
+        marker = GlobalShipmentLock._decode_marker(sheet)
+        age = _lock_age_seconds(marker, now)
+    except Exception:
+        return {'generation': sheet.id, 'stage': 'unreadable', 'age_seconds': None, 'count': 1}
+    return {'generation': sheet.id, 'stage': str(marker.get('stage', '')),
+            'created_at': str(marker.get('created_at', '')), 'age_seconds': age, 'count': 1}
+
+
+def release_stuck_writer_lock(expected_generation, *, book=None, now=None,
+                              min_age_seconds=LOCK_RELEASE_MIN_AGE_SECONDS):
+    """把卡住的共用鎖「改名封存」，不刪除任何資料。
+
+    只處理使用者剛看到的那一把（generation 必須相符），且鎖建立至少
+    min_age_seconds 秒，避免誤拆仍在製單的鎖。標記內容原封保留，供事後核對。
+    回傳封存後的工作表名稱。
+    """
+    from datetime import datetime, timezone
+    book = book or open_target_book()
+    sheets = [sheet for sheet in _quota_call(book.worksheets) if sheet.title == LOCK_TITLE]
+    if not sheets:
+        raise LockReleaseRefused('目前沒有共用鎖，不需要解除。')
+    if len(sheets) != 1 or sheets[0].id != expected_generation:
+        raise LockReleaseRefused('共用鎖狀態已改變，請重新檢查後再操作。')
+    sheet = sheets[0]
+    try:
+        marker = GlobalShipmentLock._decode_marker(sheet)
+        age = _lock_age_seconds(marker, now)
+    except Exception:
+        raise LockReleaseRefused('共用鎖內容無法判讀，請聯絡系統管理員處理。') from None
+    if age < min_age_seconds:
+        raise LockReleaseRefused(
+            f'此鎖建立僅 {int(age)} 秒，可能仍有人正在製單；請至少等待 {min_age_seconds // 60} 分鐘後再解除。')
+    stamp = (now or datetime.now(timezone.utc)).strftime('%Y%m%dT%H%M%SZ')
+    title = f'{LOCK_RETIRED_PREFIX}{stamp}'
+    if any(other.title == title for other in _quota_call(book.worksheets)):
+        title = f'{title}_{sheet.id}'
+    try:
+        _quota_call(book.batch_update, {'requests': [{'updateSheetProperties': {
+            'properties': {'sheetId': sheet.id, 'title': title, 'hidden': True}, 'fields': 'title,hidden'}}]})
+    except Exception:
+        pass
+    # 改名可能已成功但回應遺失：以工作表 ID 精準讀回，不重送。
+    current = next((other for other in _quota_call(book.worksheets) if other.id == sheet.id), None)
+    if current is None or current.title != title:
+        raise LockReleaseRefused('解除共用鎖未能確認，請重新檢查狀態。')
+    return title
 
 
 class ShipmentLedger:
