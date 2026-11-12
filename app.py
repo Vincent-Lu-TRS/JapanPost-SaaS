@@ -2090,6 +2090,8 @@ def _render_main_app():
             logout(_cm)
             st.rerun()
     with col4:
+        # 與登出鈕共用同一個 marker，套用相同的上方留白，兩顆按鈕才會水平對齊。
+        st.markdown('<span class="logout-button-marker"></span>', unsafe_allow_html=True)
         from features.writer_lock_panel import render_writer_lock_button
         render_writer_lock_button()
 
