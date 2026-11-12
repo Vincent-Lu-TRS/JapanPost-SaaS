@@ -371,8 +371,15 @@ def classify_picking_snapshot(snapshot, journal):
             if previous[key]['fingerprint'] != entry['fingerprint']:
                 item['review'] = '人工已製單紀錄的品項或列印資料與目前來源不同，請核對歷史 PDF，禁止自動重製'
                 result['review'].append(item)
+            elif entry['done'] == 'NOT_DONE':
+                # 曾人工勾「已製單」、之後 L 被取消，且系統沒有任何 PDF 製作紀錄：
+                # 沒有證據顯示實際製作過，不應永久禁止製單（否則訂單無法處理）。
+                # 品項／列印資料未變，視為待製單；仍標記來源供畫面提示。
+                item['provenance'] = 'manual_reset'
+                if entry['eligible']:
+                    result['pending'].append(item)
             elif entry['done'] != 'DONE':
-                item['review'] = '此訂單曾人工勾選已製單，L 已重設；請核對歷史 PDF，禁止自動重製'
+                item['review'] = 'L 欄狀態無法辨識'
                 result['review'].append(item)
             else:
                 result['done'].append(item)

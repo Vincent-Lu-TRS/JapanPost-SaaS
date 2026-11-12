@@ -648,3 +648,44 @@ class PickingManualProofDriftTests(unittest.TestCase):
         state = mod.classify_picking_snapshot(mod.picking_source_snapshot(source), mod.PickingJournal(ShipmentLedger(book, 'x' * 40)))
         self.assertTrue(any(item['order'].order_no == 'manual' for item in state['review']))
         self.assertEqual(source[1][2], '已製單'); self.assertEqual(calls['mark'], [['new'], ['later']])
+
+
+class ManualResetWithoutPdfTests(unittest.TestCase):
+    """人工勾選已製單後 L 被取消、且系統查無 PDF 紀錄：不應永久禁止製單。"""
+
+    def _prepare(self):
+        mod, book, source, drive, calls, run = PickingReliabilityTests().setup_run(values(
+            _row(order_no='manual', done='已製單', max_items=1), _row(order_no='new', max_items=1)))
+        self.assertTrue(run().success)  # 建立人工已製單基線（manual 不在本批）
+        return mod, book, source, drive, calls, run
+
+    def _state(self, mod, book, source):
+        return mod.classify_picking_snapshot(
+            mod.picking_source_snapshot(source), mod.PickingJournal(ShipmentLedger(book, 'x' * 40)))
+
+    def test_unchecked_manual_order_without_receipt_becomes_pending(self):
+        mod, book, source, drive, calls, run = self._prepare()
+        source[1][2] = 'FALSE'
+        state = self._state(mod, book, source)
+        self.assertTrue(any(i['order'].order_no == 'manual' for i in state['pending']))
+        self.assertFalse(any(i['order'].order_no == 'manual' for i in state['review']))
+        self.assertEqual(
+            [i['provenance'] for i in state['pending'] if i['order'].order_no == 'manual'], ['manual_reset'])
+
+    def test_such_order_can_be_generated_once_and_then_stays_done(self):
+        mod, book, source, drive, calls, run = self._prepare()
+        source[1][2] = 'FALSE'
+        manual = [o for o in labels.parse_picking_label_candidates(source)[0] if o.order_no == 'manual']
+        self.assertTrue(run(manual).success)
+        self.assertEqual(calls['mark'][-1], ['manual'])
+        source[1][2] = '已製單'
+        state = self._state(mod, book, source)
+        self.assertTrue(any(i['order'].order_no == 'manual' for i in state['done']))
+        self.assertFalse(any(i['order'].order_no == 'manual' for i in state['pending']))
+
+    def test_changed_content_after_manual_mark_still_needs_review(self):
+        mod, book, source, drive, calls, run = self._prepare()
+        source[1][2] = 'FALSE'; source[1][6] = 'changed'
+        state = self._state(mod, book, source)
+        self.assertTrue(any(i['order'].order_no == 'manual' for i in state['review']))
+        self.assertFalse(any(i['order'].order_no == 'manual' for i in state['pending']))
