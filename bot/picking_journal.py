@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -199,6 +200,7 @@ class PickingJournal:
             _kind, txid = _document_kind(key, self.binding)
             chunk_stem = f'{PREFIX}chunk:{self.binding}:batch:{txid}:{generation}'
         chunks = []
+        pending_chunks = []
         cursor = 0
         while cursor < len(encoded):
             chunk_key = f'{chunk_stem}:{len(chunks)}'
@@ -216,10 +218,16 @@ class PickingJournal:
                     break
                 length //= 2
             cursor += length
-            self.ledger.save(chunk_key, chunk)
-            if self.ledger.get(chunk_key) != chunk:
-                raise LedgerUnavailable('picking_persistence_unconfirmed')
+            pending_chunks.append((chunk_key, chunk))
             chunks.append(chunk_key)
+        if hasattr(self.ledger, 'save_many'):
+            # Few requests, each verified by an exact read-back (quota-safe).
+            self.ledger.save_many(pending_chunks)
+        else:
+            for chunk_key, chunk in pending_chunks:
+                self.ledger.save(chunk_key, chunk)
+                if self.ledger.get(chunk_key) != chunk:
+                    raise LedgerUnavailable('picking_persistence_unconfirmed')
         head = {'type': 'picking:v1', 'kind': kind, 'key': key, 'binding': self.binding,
                 'chunks': chunks, 'digest': _digest(data), 'generation': generation}
         if slot:
@@ -396,6 +404,39 @@ def validate_pdf_receipt(metadata, record, folder_id):
             'webViewLink': f"https://drive.google.com/file/d/{record['file_id']}/view"}
 
 
+def finalize_picking_lock(lock, txid, *, sleep=time.sleep, waits=(0, 3, 10)):
+    """Terminalize and release this worker's own lock after the batch stopped.
+
+    Only the already-verified owner/generation is ever released. A transient
+    read/stage failure is rechecked a bounded number of times (the worker has
+    stopped, so waiting is harmless). If ownership is never re-confirmed the lock
+    stays retained and fail-closed; nothing is reclaimed by age or by guessing.
+    """
+    last_error = None
+    for wait in waits:
+        if wait:
+            sleep(wait)
+        try:
+            if not lock.revalidate_after_worker_stopped():
+                continue
+            try:
+                lock.stage('completed', picking_tx=txid)
+            except LedgerUnavailable:
+                if lock.retain:
+                    continue
+                # Confirmed not committed while still owned: release anyway,
+                # exactly like the postal worker's cleanup.
+            lock.release()
+            return
+        except LedgerUnavailable as error:
+            if not lock.held:
+                return
+            last_error = error
+    if last_error is not None and lock.held:
+        # Same visible outcome as before: the lock stays retained for review.
+        raise last_error
+
+
 def execute_picking_batch(orders, *, output_dir, source_loader, journal, lock, list_files,
                           reserve_file_id, upload_file, get_file, mark_done, render=None,
                           folder_id, now=None):
@@ -482,6 +523,4 @@ def execute_picking_batch(orders, *, output_dir, source_loader, journal, lock, l
     finally:
         # All synchronous work stopped. Durable per-key reservations survive
         # release, including unknown upload outcomes. Ownership loss retains it.
-        if lock.revalidate_after_worker_stopped():
-            lock.stage('completed', picking_tx=(record or {}).get('txid', ''))
-            lock.release()
+        finalize_picking_lock(lock, (record or {}).get('txid', ''))

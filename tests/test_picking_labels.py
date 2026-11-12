@@ -658,6 +658,9 @@ class PickingLabelUiTests(unittest.TestCase):
             def button(self, *args, **kwargs):
                 return False
 
+            def form_submit_button(self, *args, **kwargs):
+                return False
+
         class FakeStreamlit:
             def __init__(self):
                 self.session_state = {}
@@ -681,6 +684,18 @@ class PickingLabelUiTests(unittest.TestCase):
                 return [FakeColumn() for _ in range(count)]
 
             def button(self, *args, **kwargs):
+                return False
+
+            def form(self, *args, **kwargs):
+                return self
+
+            def container(self, *args, **kwargs):
+                return self
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
                 return False
 
             def data_editor(self, df, **kwargs):
