@@ -3077,6 +3077,9 @@ def _render_main_app():
 
     _active_refresh_tick(is_busy=is_busy, job=job)
 
+    from features.writer_lock_panel import render_writer_lock_panel
+    render_writer_lock_panel(disabled=is_busy)
+
     tabs = st.tabs(_main_tab_labels())
     picking_tab, postal_tab, reissue_tab, guide_tab = tabs[:4]
     diagnostics_tab = tabs[4] if len(tabs) > 4 else None

@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 import os
+import sys
 
 import pandas as pd
 import streamlit as st
@@ -214,13 +215,19 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
                 get_file=get_reserved_picking_pdf, mark_done=mark_done,
                 folder_id=_picking_output_drive_folder_id(), now=datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
             )
-    except LedgerUnavailable:
-        st.error("揀貨製作紀錄或共用鎖無法確認，已停止。請管理員確認密鑰與製作紀錄，勿清除 L 或重新產生。")
+    except LedgerUnavailable as exc:
+        code = getattr(exc, "reason_code", "") or "unknown"
+        print(f"[PICKING_ERROR] LedgerUnavailable reason={code}", file=sys.stderr)
+        st.error(
+            f"揀貨製作紀錄或共用鎖無法確認，已停止（代碼：{code}）。"
+            "請先按「重新讀取」確認是否已產生 PDF；已產生者只能補標，勿重新產生。"
+            "若確認無人製單而鎖仍卡住，可展開頁面上方「製單卡住了？」解除共用鎖。")
         return False
     except PickingValidationError as exc:
         st.error(str(exc))
         return False
-    except Exception:
+    except Exception as exc:
+        print(f"[PICKING_ERROR] unexpected type={type(exc).__name__}", file=sys.stderr)
         st.error("揀貨製作未能確認，請重新讀取製作紀錄；已存在的 PDF 只會補標。")
         return False
     if result.drive_file:
