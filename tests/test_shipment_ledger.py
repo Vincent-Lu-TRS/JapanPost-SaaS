@@ -12,14 +12,18 @@ class MemorySheet:
         return copy.deepcopy(self.rows)
 
     def get(self, a1_range):
-        index=int(a1_range.split(':')[0][1:])-1
-        return copy.deepcopy(self.rows[index:index+1])
+        start, _, end = a1_range.partition(':')
+        index = int(start[1:]) - 1
+        last = int(end[1:]) if end else index + 1
+        return copy.deepcopy(self.rows[index:last])
 
     def update(self, values, range_name=None, value_input_option=None):
         index = int(range_name.split(':')[0][1:]) - 1
-        while len(self.rows) <= index:
-            self.rows.append([])
-        self.rows[index] = list(values[0])
+        self.update_calls = getattr(self, 'update_calls', 0) + 1
+        for offset, row in enumerate(values):
+            while len(self.rows) <= index + offset:
+                self.rows.append([])
+            self.rows[index + offset] = list(row)
 
 
 class MemoryBook:

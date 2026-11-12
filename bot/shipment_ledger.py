@@ -447,6 +447,75 @@ class ShipmentLedger:
         cached[key] = copy.deepcopy(record)
         self._record_cache = list(cached.items())
 
+    # One Sheets request should stay well below the ~2 MB recommended payload.
+    _BATCH_PAYLOAD_LIMIT = 1_200_000
+
+    def save_many(self, items):
+        """Persist several records with few Sheets requests (quota-safe).
+
+        Per-record saves cost one write plus one read-back each, which exceeds
+        the 60 requests/minute quota for a large snapshot. Here contiguous rows
+        are written together and verified by one exact read-back per request;
+        a failed or ambiguous write is never repeated.
+        """
+        items = list(items)
+        if not items:
+            return
+        self.lock.assert_owned(fresh=False)
+        tokens = {}
+        for key, record in items:
+            encoded = json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False)
+            token = self.cipher.encrypt(encoded.encode()).decode()
+            if len(token) > 45000:
+                raise LedgerUnavailable('shipment_snapshot_too_large')
+            tokens[key] = token
+        ws = self._worksheet(create=True)
+        self.records()
+        next_position = max(self._positions.values(), default=0) + 1
+        positions = {}
+        for key, _record in items:
+            if key in self._positions:
+                positions[key] = self._positions[key]
+            else:
+                positions[key] = next_position
+                next_position += 1
+        ordered = sorted(positions.items(), key=lambda pair: pair[1])
+        if hasattr(ws, 'row_count') and ordered[-1][1] > ws.row_count:
+            _quota_call(ws.add_rows, ordered[-1][1] - ws.row_count)
+        runs, size = [], 0
+        for key, position in ordered:
+            row_size = len(tokens[key]) + len(key) + 8
+            if (runs and position == runs[-1][-1][1] + 1
+                    and size + row_size <= self._BATCH_PAYLOAD_LIMIT):
+                runs[-1].append((key, position))
+                size += row_size
+            else:
+                runs.append([(key, position)])
+                size = row_size
+        for run in runs:
+            expected = [[key, tokens[key], '1'] for key, _position in run]
+            span = f'A{run[0][1]}:C{run[-1][1]}'
+            try:
+                _quota_call(ws.update, expected, range_name=span, value_input_option='RAW')
+            except Exception:
+                # Never repeat the mutation; one exact read-back decides.
+                try:
+                    if _quota_call(ws.get, span) != expected:
+                        raise ValueError()
+                except Exception:
+                    raise LedgerUnavailable('shipment_ledger_write_unknown') from None
+            else:
+                try:
+                    if _quota_call(ws.get, span) != expected:
+                        raise ValueError()
+                except Exception:
+                    raise LedgerUnavailable('shipment_ledger_write_unknown') from None
+        cached = dict(self._record_cache or [])
+        for key, record in items:
+            self._positions[key] = positions[key]
+            cached[key] = copy.deepcopy(record)
+        self._record_cache = list(cached.items())
+
 
 def configured_ledger(lock=None):
     return ShipmentLedger(lock.book if lock else open_target_book(), encryption_secret(), lock)

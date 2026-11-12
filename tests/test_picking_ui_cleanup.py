@@ -24,6 +24,9 @@ class FakeStreamlit:
     def warning(self, text): self.warnings.append(text)
     def columns(self, *a, **k): return [self] * 4
     def button(self, label, **kwargs): self.buttons.append((label, kwargs)); return False
+    def form_submit_button(self, label, **kwargs): self.buttons.append((label, kwargs)); return False
+    def form(self, *a, **k): return self
+    def container(self, *a, **k): return self
     def link_button(self, label, url, **kwargs): self.links.append((label, url))
     def data_editor(self, frame, **kwargs): self.editors.append(frame.copy()); return frame
     def dataframe(self, frame, **kwargs): self.tables.append(frame.copy())

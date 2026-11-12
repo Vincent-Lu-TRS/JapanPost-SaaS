@@ -316,54 +316,7 @@ def render_picking_label_tab(refresh_source=None) -> None:
         unsafe_allow_html=True,
     )
 
-    has_selection = bool(selected_orders)
-    actions = st.columns([1.35, 1, 1, 1], vertical_alignment="bottom")
-    generate_type = "primary" if has_selection else "secondary"
-    if actions[0].button(
-        "產生揀貨單",
-        type=generate_type,
-        width="stretch",
-        disabled=not has_selection,
-    ):
-        if _generate_and_upload(selected_orders):
-            if refresh_source is None:
-                _load_orders()
-            else:
-                refresh_result = refresh_source("picking", force=True)
-                if refresh_result.data is not None:
-                    apply_picking_payload(
-                        refresh_result.data,
-                        preserve_selection=True,
-                        loaded_at=refresh_result.status.loaded_at,
-                    )
-                    st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
-    if actions[1].button("重新讀取", width="stretch"):
-        try:
-            if refresh_source is None:
-                _load_orders()
-            else:
-                refresh_result = refresh_source("picking", force=True)
-                if refresh_result.data is None:
-                    raise RuntimeError("picking_refresh_failed")
-                apply_picking_payload(
-                    refresh_result.data,
-                    preserve_selection=True,
-                    loaded_at=refresh_result.status.loaded_at,
-                )
-                st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
-            st.rerun()
-        except Exception:
-            st.error("重新讀取失敗，請稍後再試。")
-    if actions[2].button("全選", width="stretch", disabled=not orders):
-        st.session_state["picking_selected_keys"] = {picking_order_key(order) for order in orders}
-        st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
-        st.rerun()
-    if actions[3].button("取消全選", width="stretch", disabled=not orders):
-        st.session_state["picking_selected_keys"] = set()
-        st.session_state["picking_selected_rows"] = set()
-        st.rerun()
-    st.caption("成功上傳雲端資料夾後，才會勾選來源表製單檢核欄。")
-
+    # 警示與補標操作含一般按鈕，不能放進表單，因此放在表單上方。
     diagnostics = st.session_state.get("picking_diagnostics", {})
     if diagnostics.get("picking_blocked"):
         st.error(diagnostics["picking_blocked"])
@@ -386,21 +339,84 @@ def render_picking_label_tab(refresh_source=None) -> None:
                 _load_orders()
                 st.rerun()
 
-    if not has_loaded_orders:
-        st.info("尚未讀取跨境揀貨單資料。請按「重新讀取」取得目前待製單訂單。")
-    elif not orders:
-        st.info("目前沒有符合條件的待製單訂單。")
-    else:
-        df = _orders_to_dataframe(orders, selected_keys)
-        edited_df = st.data_editor(
-            df,
-            hide_index=True,
-            width="stretch",
-            disabled=[col for col in df.columns if col != "選取"],
-            column_config={"選取": st.column_config.CheckboxColumn("選取")},
-            key=f"picking_order_editor_{st.session_state.get('picking_editor_epoch', 0)}",
-        )
-        selected_orders = _selected_orders_from_editor(orders, edited_df)
+    # 勾選與四個按鈕放在同一個表單：勾選變動不會觸發重新整理，
+    # 按下任一按鈕時才一次送出畫面上最後的勾選狀態（與郵便頁一致）。
+    # 製作結果與錯誤訊息顯示在按鈕列上方，避免被長表格擠到畫面外。
+    result_slot = st.container()
+    with st.form("picking_selection_form", border=False):
+        action_slot = st.container()
+        st.caption("成功上傳雲端資料夾後，才會勾選來源表製單檢核欄。")
+        table_slot = st.container()
+        selected_orders: list[PickingOrder] = []
+        with table_slot:
+            if not has_loaded_orders:
+                st.info("尚未讀取跨境揀貨單資料。請按「重新讀取」取得目前待製單訂單。")
+            elif not orders:
+                st.info("目前沒有符合條件的待製單訂單。")
+            else:
+                df = _orders_to_dataframe(orders, selected_keys)
+                edited_df = st.data_editor(
+                    df,
+                    hide_index=True,
+                    width="stretch",
+                    disabled=[col for col in df.columns if col != "選取"],
+                    column_config={"選取": st.column_config.CheckboxColumn("選取")},
+                    key=f"picking_order_editor_{st.session_state.get('picking_editor_epoch', 0)}",
+                )
+                selected_orders = _selected_orders_from_editor(orders, edited_df)
+        with action_slot:
+            actions = st.columns([1.35, 1, 1, 1], vertical_alignment="bottom")
+            generate_clicked = actions[0].form_submit_button(
+                "產生揀貨單",
+                type="primary",
+                width="stretch",
+                disabled=not orders,
+            )
+            reload_clicked = actions[1].form_submit_button("重新讀取", width="stretch")
+            select_all_clicked = actions[2].form_submit_button("全選", width="stretch", disabled=not orders)
+            clear_all_clicked = actions[3].form_submit_button("取消全選", width="stretch", disabled=not orders)
+
+    if generate_clicked:
+        with result_slot:
+            generated = _generate_and_upload(selected_orders)
+        if generated:
+            if refresh_source is None:
+                _load_orders()
+            else:
+                refresh_result = refresh_source("picking", force=True)
+                if refresh_result.data is not None:
+                    apply_picking_payload(
+                        refresh_result.data,
+                        preserve_selection=True,
+                        loaded_at=refresh_result.status.loaded_at,
+                    )
+                    st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
+    if reload_clicked:
+        try:
+            if refresh_source is None:
+                _load_orders()
+            else:
+                refresh_result = refresh_source("picking", force=True)
+                if refresh_result.data is None:
+                    raise RuntimeError("picking_refresh_failed")
+                apply_picking_payload(
+                    refresh_result.data,
+                    preserve_selection=True,
+                    loaded_at=refresh_result.status.loaded_at,
+                )
+                st.session_state["picking_snapshot_loaded_at"] = refresh_result.status.loaded_at
+            st.rerun()
+        except Exception:
+            with result_slot:
+                st.error("重新讀取失敗，請稍後再試。")
+    if select_all_clicked:
+        st.session_state["picking_selected_keys"] = {picking_order_key(order) for order in orders}
+        st.session_state["picking_selected_rows"] = {order.source_row_number for order in orders}
+        st.rerun()
+    if clear_all_clicked:
+        st.session_state["picking_selected_keys"] = set()
+        st.session_state["picking_selected_rows"] = set()
+        st.rerun()
 
 
 def render_picking_label_diagnostics_panel() -> None:

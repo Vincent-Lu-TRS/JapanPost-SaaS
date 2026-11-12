@@ -568,12 +568,20 @@ class PickingProductionRefreshCallbackTests(unittest.TestCase):
         from types import SimpleNamespace
         class Rerun(BaseException): pass
         class Column:
-            def button(self, label, **kwargs): return label == '重新讀取'
+            def form_submit_button(self, label, **kwargs): return label == '重新讀取'
         class Streamlit:
-            def __init__(self): self.session_state = {}
+            def __init__(self):
+                self.session_state = {}
+                self.column_config = SimpleNamespace(CheckboxColumn=lambda *a, **k: None)
             def info(self, *args, **kwargs): pass
             def markdown(self, *args, **kwargs): pass
             def error(self, *args, **kwargs): pass
+            def caption(self, *args, **kwargs): pass
+            def form(self, *args, **kwargs): return self
+            def container(self, *args, **kwargs): return self
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def data_editor(self, frame, **kwargs): return frame
             def columns(self, *args, **kwargs): return [Column() for i in range(4)]
             def rerun(self): raise Rerun()
         for changed_payload in (True, False):
