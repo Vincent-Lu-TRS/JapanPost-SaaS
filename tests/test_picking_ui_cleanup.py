@@ -110,3 +110,15 @@ class QuietReviewTests(unittest.TestCase):
                 ui.render_picking_label_diagnostics_panel()
         text = '\n'.join(frame.to_string(index=False) for frame in fake.tables)
         for n in range(3): self.assertIn('quiet-' + str(n), text)
+
+
+class QuietReceiptMismatchTests(unittest.TestCase):
+    def test_done_receipt_content_mismatch_is_quiet_but_other_receipt_reviews_stay(self):
+        base = mixed_payload().diagnostics['picking_review'][-1]['order']
+        quiet = {'key': 'q', 'row': 40, 'order': base, 'done': 'DONE', 'file_id': 'f',
+                 'review': '已保存 PDF 的品項資料與目前來源不同'}
+        loud = dict(quiet, key='l', done='NOT_DONE')
+        pending_upload = dict(quiet, key='u', review='製作或上傳結果待核對，禁止重新產生')
+        self.assertTrue(ui._is_quiet_review(quiet))
+        self.assertFalse(ui._is_quiet_review(loud))
+        self.assertFalse(ui._is_quiet_review(pending_upload))
