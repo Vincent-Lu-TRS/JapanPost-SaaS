@@ -272,7 +272,12 @@ def _is_quiet_review(item: dict) -> bool:
 
     有 PDF 檔案 ID 的項目仍須在前台提供原檔連結，故不屬於此類。
     """
-    return not item.get('file_id') and not _is_source_identity_review(item)
+    if _is_source_identity_review(item):
+        return False
+    if not item.get('file_id'):
+        return True
+    # 已勾「已製單」且僅是品項資料與已存 PDF 不同：無可操作項目，只列診斷。
+    return item.get('done') == 'DONE' and item.get('review') == '已保存 PDF 的品項資料與目前來源不同'
 
 
 def render_picking_label_tab(refresh_source=None) -> None:
