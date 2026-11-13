@@ -267,6 +267,14 @@ def _is_source_identity_review(item: dict) -> bool:
     return not item.get('file_id') and (not order.order_source.strip() or not order.order_no.strip())
 
 
+def _is_quiet_review(item: dict) -> bool:
+    """無 PDF 紀錄的核對項目不逐筆佔用前台；只在讀取診斷中列出。
+
+    有 PDF 檔案 ID 的項目仍須在前台提供原檔連結，故不屬於此類。
+    """
+    return not item.get('file_id') and not _is_source_identity_review(item)
+
+
 def render_picking_label_tab(refresh_source=None) -> None:
     st.info("列印設定：PDF檔尺寸為 100mm × 150mm，請使用對應Label大小輸出。")
 
@@ -349,8 +357,15 @@ def render_picking_label_tab(refresh_source=None) -> None:
     diagnostics = st.session_state.get("picking_diagnostics", {})
     if diagnostics.get("picking_blocked"):
         st.error(diagnostics["picking_blocked"])
+    quiet_blocked = [
+        item for item in diagnostics.get("picking_review", [])
+        if _is_quiet_review(item) and item.get("done") != "DONE"
+    ]
+    if quiet_blocked:
+        # 只給一行摘要，不逐筆刷版；明細在「讀取診斷」。
+        st.caption(f"另有 {len(quiet_blocked)} 筆未製單訂單因資料與歷史紀錄不一致已排除，明細見「讀取診斷」。")
     for item in diagnostics.get("picking_review", []):
-        if _is_source_identity_review(item):
+        if _is_quiet_review(item) or _is_source_identity_review(item):
             continue
         st.warning(f"{item['order'].order_source} / {item['order'].order_no}：{item['review']}")
         if item.get('file_id'):
@@ -506,6 +521,18 @@ def render_picking_label_diagnostics_panel() -> None:
                  "注文番号": item['order'].order_no,
                  "原因": item['review']}
                 for item in identity_reviews
+            ]), hide_index=True, width="stretch")
+
+    quiet_reviews = [item for item in diagnostics.get("picking_review", []) if _is_quiet_review(item)]
+    if quiet_reviews:
+        with st.expander(f"資料不一致核對｜{len(quiet_reviews)} 筆（已製單者不影響製單）", expanded=False):
+            st.dataframe(pd.DataFrame([
+                {"來源列": item.get('row', item['order'].source_row_number),
+                 "訂單來源": item['order'].order_source,
+                 "注文番号": item['order'].order_no,
+                 "L 狀態": "已製單" if item.get('done') == 'DONE' else "未製單（已排除）",
+                 "原因": item['review']}
+                for item in quiet_reviews
             ]), hide_index=True, width="stretch")
 
     font_info = diagnostics.get("pdf_cjk_font", {})

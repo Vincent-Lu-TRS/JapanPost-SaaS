@@ -83,3 +83,30 @@ class PickingUiCleanupTests(unittest.TestCase):
             ui.render_picking_label_tab()
         self.assertTrue(any('synthetic-10' in text for text in fake.warnings))
         self.assertTrue(any('existing-receipt' in url for label, url in fake.links))
+
+
+class QuietReviewTests(unittest.TestCase):
+    def _payload(self):
+        payload = mixed_payload()
+        base = payload.diagnostics['picking_review'][-1]['order']
+        quiet = []
+        for n, done in enumerate(('DONE', 'DONE', 'NOT_DONE')):
+            order = copy.deepcopy(base); order.order_no = 'quiet-' + str(n); order.source_row_number = 30 + n
+            quiet.append({'key': 'quiet-' + str(n), 'row': 30 + n, 'order': order, 'done': done,
+                          'review': '人工已製單紀錄的品項或列印資料與目前來源不同'})
+        payload.diagnostics['picking_review'].extend(quiet)
+        return payload
+
+    def test_no_receipt_review_is_not_listed_per_order_on_front(self):
+        fake = FakeStreamlit(); captions = []
+        fake.caption = lambda text, *a, **k: captions.append(text)
+        with patch.object(ui, 'st', fake):
+            ui.apply_picking_payload(self._payload(), preserve_selection=False)
+            ui.render_picking_label_tab()
+            self.assertFalse(any('quiet-' in text for text in fake.warnings))
+            self.assertTrue(any('另有 1 筆未製單訂單' in text for text in captions))
+            self.assertTrue(any('人工已製單品項與來源不同' in text for text in fake.warnings))
+            with patch.object(ui.auth, 'can_view_diagnostics', return_value=True):
+                ui.render_picking_label_diagnostics_panel()
+        text = '\n'.join(frame.to_string(index=False) for frame in fake.tables)
+        for n in range(3): self.assertIn('quiet-' + str(n), text)
