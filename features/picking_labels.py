@@ -241,7 +241,7 @@ def _generate_and_upload_locked(selected_orders: list[PickingOrder]) -> bool:
         st.error(
             f"揀貨製作紀錄或共用鎖無法確認，已停止（代碼：{code}）。"
             "請先按「重新讀取」確認是否已產生 PDF；已產生者只能補標，勿重新產生。"
-            "若確認無人製單而鎖仍卡住，可展開頁面上方「製單卡住了？」解除共用鎖。")
+            "若確認無人製單而鎖仍卡住，可按頁面右上角「解除共用鎖」。")
         return False
     except PickingValidationError as exc:
         st.error(str(exc))
