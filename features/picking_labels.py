@@ -6,11 +6,13 @@ from pathlib import Path
 import tempfile
 import os
 import sys
+import time
 
 import pandas as pd
 import streamlit as st
 import auth
 
+from features.shipment_busy_ui import render_running_guard
 from bot.drive import list_drive_files, reserve_picking_file_id, upload_reserved_picking_pdf, get_reserved_picking_pdf
 from bot.picking_labels import (
     PICKING_OUTPUT_DRIVE_FOLDER_ID,
@@ -75,11 +77,15 @@ def _source_snapshot():
 
 
 def load_picking_payload() -> PickingPayload:
+    started = time.monotonic()
     values, snapshot = _source_snapshot()
+    source_done = time.monotonic()
     _candidates, warnings = parse_picking_label_candidates(values)
     diagnostics = build_picking_source_diagnostics(values, _candidates, warnings)
     try:
         classified = classify_picking_snapshot(snapshot, PickingJournal(configured_ledger()))
+        print(f"[PERF] 揀貨讀取：來源表 {source_done - started:.1f}s｜製作紀錄比對 {time.monotonic() - source_done:.1f}s",
+              file=sys.stderr, flush=True)
         orders = [entry['order'] for entry in classified['pending']]
         diagnostics['picking_recovery'] = classified['mirror_pending']
         diagnostics['picking_review'] = classified['review']
@@ -195,6 +201,20 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
     if not selected_orders:
         st.warning("請先選取至少一筆訂單。")
         return False
+    # 製作期間以全畫面遮罩鎖定操作，避免誤按（例如中途解除共用鎖）；
+    # 不論成功或失敗，離開時一定解除。
+    guard = st.empty()
+    render_running_guard(
+        guard, title=f"揀貨單製作中｜{len(selected_orders)} 筆",
+        active_order=str(getattr(selected_orders[0], "order_no", "")), active_stage="產生 PDF、上傳雲端並回寫來源表",
+        total=0)
+    try:
+        return _generate_and_upload_locked(selected_orders)
+    finally:
+        guard.empty()
+
+
+def _generate_and_upload_locked(selected_orders: list[PickingOrder]) -> bool:
     try:
         lock = global_writer_lock()
         journal = PickingJournal(configured_ledger(lock))
@@ -233,6 +253,10 @@ def _generate_and_upload(selected_orders: list[PickingOrder]) -> bool:
     if not result.success:
         if result.drive_file:
             st.link_button("開啟原 PDF／重印", result.drive_file["webViewLink"])
+        if getattr(result, "released", False):
+            # 已解除卡住的預留：重新讀取後這些訂單會回到待製單清單。
+            st.session_state["picking_release_notice"] = result.error
+            return True
         st.error(result.error)
         return False
     # 成功說明存入 session，讓畫面自動重整（已製單訂單移出清單）後仍保留顯示。
@@ -375,18 +399,33 @@ def render_picking_label_tab(refresh_source=None) -> None:
         st.warning(f"{item['order'].order_source} / {item['order'].order_no}：{item['review']}")
         if item.get('file_id'):
             st.link_button("開啟原 PDF／重印", f"https://drive.google.com/file/d/{item['file_id']}/view", key=f"picking_review_{item['key']}")
+    # 同一批 PDF 的卡住訂單合併成一個提示與一個按鈕，避免逐筆刷版。
+    recovery_groups: dict[str, list[dict]] = {}
     for item in diagnostics.get("picking_recovery", []):
-        check_upload = item.get('recovery_kind') == 'check_upload'
-        if check_upload:
-            st.warning(f"{item['order'].order_no}：上傳結果未確認。只會核對原預留檔案；不會重新產生或上傳 PDF。")
+        recovery_groups.setdefault(item.get('txid') or item['key'], []).append(item)
+    for txid, group in recovery_groups.items():
+        kind = group[0].get('recovery_kind')
+        numbers = "、".join(item['order'].order_no for item in group)
+        if kind == 'release':
+            st.warning(f"{numbers}：上次製單未完成，尚未上傳 PDF。")
+            repair_label = f"解除預留並重新製單（{len(group)} 筆）"
+        elif kind == 'check_upload':
+            st.warning(f"{numbers}：上傳結果未確認。按下後會核對雲端預留檔案；"
+                       "若雲端確實沒有檔案，會自動解除預留，讓這批訂單可重新製單。")
+            repair_label = f"核對上傳結果（{len(group)} 筆）"
         else:
-            st.warning(f"{item['order'].order_no}：PDF 已存在。L 未確認或被重設，可開原檔重印；補標不會產生新 PDF。")
-            st.link_button("開啟原 PDF／重印", f"https://drive.google.com/file/d/{item['file_id']}/view", key=f"picking_original_{item['key']}")
-        repair_label = "核對原上傳結果／補標" if check_upload else "只補標此訂單"
-        if st.button(repair_label, key=f"picking_repair_{item['key']}"):
-            if _generate_and_upload([item['order']]):
+            st.warning(f"{numbers}：PDF 已存在。L 未確認或被重設，可開原檔重印；補標不會產生新 PDF。")
+            st.link_button("開啟原 PDF／重印", f"https://drive.google.com/file/d/{group[0]['file_id']}/view",
+                           key=f"picking_original_{txid}")
+            repair_label = f"只補標（{len(group)} 筆）"
+        if st.button(repair_label, key=f"picking_repair_{txid}"):
+            if _generate_and_upload([item['order'] for item in group]):
                 _load_orders()
                 st.rerun()
+
+    notice = st.session_state.pop("picking_release_notice", "")
+    if notice:
+        st.success(notice)
 
     # 勾選與四個按鈕放在同一個表單：勾選變動不會觸發重新整理，
     # 按下任一按鈕時才一次送出畫面上最後的勾選狀態（與郵便頁一致）。

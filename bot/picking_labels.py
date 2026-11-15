@@ -78,6 +78,7 @@ class PickingTransactionResult:
     marked_rows: list[int]
     drive_file: dict | None = None
     error: str = ""
+    released: bool = False
 
 
 @dataclass(frozen=True)
