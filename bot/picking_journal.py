@@ -24,6 +24,10 @@ from .shipment_ledger import LedgerUnavailable
 
 PREFIX = 'picking:v1:'
 KINDS = ('snapshot', 'batch', 'chunk')
+# 預留上傳至少經過這段時間才可判定「雲端確實沒有檔案」，避免與剛送出的上傳競爭。
+ABANDON_MIN_AGE_SECONDS = 120
+_DOC_CACHE_LIMIT = 16
+_DOC_CACHE = {}
 
 
 class PickingValidationError(ValueError):
@@ -178,9 +182,19 @@ class PickingJournal:
                         or chunk['generation'] != head['generation'] or chunk['index'] != index):
                     raise ValueError()
                 chunks.append(chunk['text'])
-            data = json.loads(''.join(chunks))
+            text = ''.join(chunks)
+            # 文件內容以 generation 不可變；相同文字雜湊代表已完整驗證過，
+            # 可略過昂貴的 JSON 解析與 digest 重算（快照可達數千筆）。
+            cache_key = (key, head['generation'], head['digest'], hashlib.sha256(text.encode()).hexdigest())
+            cached = _DOC_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+            data = json.loads(text)
             if _digest(data) != head['digest']:
                 raise ValueError()
+            if len(_DOC_CACHE) >= _DOC_CACHE_LIMIT:
+                _DOC_CACHE.pop(next(iter(_DOC_CACHE)))
+            _DOC_CACHE[cache_key] = data
             return data
         except Exception:
             raise LedgerUnavailable('picking_document_unreadable') from None
@@ -236,15 +250,15 @@ class PickingJournal:
         if self.ledger.get(key) != head:
             raise LedgerUnavailable('picking_persistence_unconfirmed')
 
-    def load_source_snapshot(self):
-        return self._read_document(f'{PREFIX}snapshot:{self.binding}') or {}
+    def load_source_snapshot(self, records=None):
+        return self._read_document(f'{PREFIX}snapshot:{self.binding}', records) or {}
 
     def save_source_snapshot(self, snapshot):
         _validate_snapshot_document(snapshot)
         self._save_document('snapshot', f'{PREFIX}snapshot:{self.binding}', snapshot)
 
-    def batches(self):
-        records = self._records()
+    def batches(self, records=None):
+        records = records if records is not None else self._records()
         result = []
         for key, head in records.items():
             if is_picking_record(key, head) and head['kind'] == 'batch' and head['binding'] == self.binding:
@@ -253,13 +267,21 @@ class PickingJournal:
                 result.append(record)
         return result
 
+    def read_state(self):
+        """一次讀取帳本，同時取得來源快照與製作證據（避免重複下載整張帳本）。"""
+        records = self._records()
+        return self.load_source_snapshot(records), self.key_evidence(records)
+
     def save_batch(self, record):
         _validate_batch_document(f"{PREFIX}batch:{self.binding}:{record.get('txid', '')}", self.binding, record)
         self._save_document('batch', f"{PREFIX}batch:{self.binding}:{record['txid']}", record)
 
-    def key_evidence(self):
+    def key_evidence(self, records=None):
         evidence = {}
-        for record in self.batches():
+        for record in self.batches(records):
+            if record['stage'] == 'abandoned':
+                # 已確認雲端沒有檔案且解除預留：不再構成製作證據。
+                continue
             for item in record['manifest']:
                 if item['key'] in evidence:
                     raise LedgerUnavailable('picking_multiple_reservations')
@@ -283,7 +305,7 @@ def _validate_snapshot_document(snapshot):
 def _validate_batch_document(key, binding, record):
     if (not isinstance(record, dict) or not _hex(record.get('txid'), 32)
             or key != f"{PREFIX}batch:{binding}:{record['txid']}"
-            or record.get('stage') not in ('reserved', 'upload_started', 'uploaded_verified')
+            or record.get('stage') not in ('reserved', 'upload_started', 'uploaded_verified', 'abandoned')
             or not isinstance(record.get('filename'), str) or not isinstance(record.get('file_id'), str)
             or not isinstance(record.get('manifest'), list) or not record['manifest']
             or record.get('manifest_hash') != _digest(record['manifest'])
@@ -320,6 +342,13 @@ def validate_picking_documents(records):
             _validate_snapshot_document(data)
 
 
+def _drive_file_not_found(exc):
+    """Drive 明確回 404 才算「檔案不存在」；其他錯誤（逾時、5xx、權限）維持未知。"""
+    response = getattr(exc, 'resp', None)
+    status = getattr(response, 'status', None)
+    return str(status) == '404'
+
+
 def _compact_snapshot(snapshot, previous):
     """Keep prior completion associations even after rows move/disappear/reset."""
     result = copy.deepcopy(previous)
@@ -345,7 +374,10 @@ def _compact_snapshot(snapshot, previous):
 
 
 def classify_picking_snapshot(snapshot, journal):
-    previous = journal.load_source_snapshot(); evidence = journal.key_evidence()
+    if hasattr(journal, 'read_state'):
+        previous, evidence = journal.read_state()
+    else:
+        previous = journal.load_source_snapshot(); evidence = journal.key_evidence()
     by_row = {entry['row']: key for key, entry in previous.items()}
     result = {name: [] for name in ('pending', 'done', 'mirror_pending', 'review')}
     for key, entry in snapshot.items():
@@ -359,6 +391,10 @@ def classify_picking_snapshot(snapshot, journal):
                 item['review'] = '已保存 PDF 的品項資料與目前來源不同'; result['review'].append(item)
             elif receipt.get('stage') == 'upload_started' and receipt.get('file_id'):
                 item.update(recovery_kind='check_upload', review='上傳結果未確認；只能核對原預留檔案 ID，禁止重新產生')
+                result['mirror_pending'].append(item)
+            elif receipt.get('stage') == 'reserved':
+                # 預留後程序中斷、尚未上傳任何檔案：可由操作人員解除預留後重新製單。
+                item.update(recovery_kind='release', review='上次製單未完成（尚未上傳 PDF）；可解除預留後重新製單')
                 result['mirror_pending'].append(item)
             elif receipt.get('stage') != 'uploaded_verified':
                 item['review'] = '製作或上傳結果待核對，禁止重新產生'; result['review'].append(item)
@@ -477,7 +513,8 @@ def execute_picking_batch(orders, *, output_dir, source_loader, journal, lock, l
             journal.save_source_snapshot(_compact_snapshot(snapshot, previous))
             manifest = [{'key': picking_order_key(o, journal.source_binding), 'fingerprint': picking_render_fingerprint(o)} for o in fresh]
             record = {'txid': uuid.uuid4().hex, 'manifest': manifest, 'manifest_hash': _digest(manifest),
-                      'stage': 'reserved', 'mirrors': {}, 'filename': '', 'file_id': ''}
+                      'stage': 'reserved', 'mirrors': {}, 'filename': '', 'file_id': '',
+                      'created_at': int(time.time())}
             journal.save_batch(record)
             dt = datetime.now() if now is None else datetime.strptime(now, '%Y-%m-%d %H:%M:%S')
             prefix = dt.strftime('%y%m%d-')
@@ -486,7 +523,8 @@ def execute_picking_batch(orders, *, output_dir, source_loader, journal, lock, l
             render(fresh, path)
             data = Path(path).read_bytes()
             record.update(file_id=reserve_file_id(), md5=hashlib.md5(data).hexdigest(),
-                          sha256=hashlib.sha256(data).hexdigest(), size=len(data), stage='upload_started')
+                          sha256=hashlib.sha256(data).hexdigest(), size=len(data), stage='upload_started',
+                          upload_started_at=int(time.time()))
             if not record['file_id']:
                 raise PickingValidationError('Drive 未傳回預留檔案 ID。')
             journal.save_batch(record)
@@ -497,11 +535,35 @@ def execute_picking_batch(orders, *, output_dir, source_loader, journal, lock, l
                 # Includes 409 and commit-timeout: the exact reserved ID alone
                 # determines whether bytes exist. No new ID or blind retry.
                 pass
+        file_missing = False
         if record.get('file_id'):
             try:
-                drive_file = validate_pdf_receipt(get_file(record), record, folder_id)
-            except Exception:
+                metadata = get_file(record)
+                if isinstance(metadata, dict) and metadata.get('trashed') is True:
+                    file_missing = True
+                else:
+                    drive_file = validate_pdf_receipt(metadata, record, folder_id)
+            except Exception as exc:
                 drive_file = None
+                file_missing = _drive_file_not_found(exc)
+        else:
+            # 只有「預留」階段、尚未取得 Drive ID：根本沒有上傳過。
+            file_missing = record.get('stage') == 'reserved'
+        if not drive_file and existing and file_missing and record.get('stage') in ('reserved', 'upload_started'):
+            started = record.get('upload_started_at') or record.get('created_at')
+            if started and time.time() - float(started) < ABANDON_MIN_AGE_SECONDS:
+                return PickingTransactionResult(False, path, record.get('filename', ''), [],
+                                                error='上次製單剛結束，請約 2 分鐘後再按一次，系統會確認雲端是否真的沒有檔案。')
+            # 持有共用鎖代表沒有其他製單進行；雲端確認沒有該預留檔案 → 解除預留。
+            lock.assert_owned()
+            record['stage'] = 'abandoned'
+            record['abandoned_reason'] = 'drive_file_missing' if record.get('file_id') else 'never_uploaded'
+            record['abandoned_at'] = int(time.time())
+            journal.save_batch(record)
+            return PickingTransactionResult(
+                False, path, record.get('filename', ''), [],
+                error='雲端資料夾確認沒有上次預留的 PDF（上傳未完成）。已解除預留，這批訂單可重新製單。',
+                released=True)
         if not drive_file:
             return PickingTransactionResult(False, path, record.get('filename', ''), [], error='上傳結果待核對；禁止重新產生，請聯絡管理員。')
         if record['stage'] != 'uploaded_verified':

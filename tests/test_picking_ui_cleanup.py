@@ -65,8 +65,8 @@ class PickingUiCleanupTests(unittest.TestCase):
             self.assertTrue(any('PDF 已存在' in text for text in fake.warnings))
             self.assertTrue(any('上傳結果未確認' in text for text in fake.warnings))
             self.assertEqual(len(fake.editors[-1]), 1)
-            self.assertIn('只補標此訂單', [label for label, options in fake.buttons])
-            self.assertIn('核對原上傳結果／補標', [label for label, options in fake.buttons])
+            self.assertIn('只補標（1 筆）', [label for label, options in fake.buttons])
+            self.assertIn('核對上傳結果（1 筆）', [label for label, options in fake.buttons])
             self.assertEqual(len(fake.session_state['picking_diagnostics']['picking_review']), 7)
             self.assertFalse(next(options['disabled'] for label, options in fake.buttons if label == '產生揀貨單'))
             with patch.object(ui.auth, 'can_view_diagnostics', return_value=True):
